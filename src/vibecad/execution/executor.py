@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -27,6 +28,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from vibecad.engine.session import Session as _Session
+from vibecad.engine.session import SessionLifecycleError as _SessionLifecycleError
 from vibecad.execution.adapter import (
     AdapterError as _AdapterError,
 )
@@ -42,6 +44,27 @@ from vibecad.execution.candidate import (
     SealedCandidate,
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
+from vibecad.execution.freecad_reviewed_artifact_inputs import (
+    _ReviewedArtifactRunResolver,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    ReviewedIntentExecutionError,
+    ReviewedIntentExecutionErrorCode,
+    ReviewedNativeExecutionResult,
+    _commit_reviewed_native_create,
+    _commit_reviewed_native_update,
+    _reviewed_native_create_needs_recovery,
+    _ReviewedProductExecutionMode,
+    _ReviewedProductResultKind,
+    _rollback_reviewed_native_create,
+    _rollback_reviewed_native_update,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    execute_reviewed_intent_native as _execute_reviewed_intent_native,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    route_reviewed_intent as _route_reviewed_intent,
+)
 from vibecad.execution.registry import ExecutionProfile, ValueShape, _matches_value_shape
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
@@ -83,9 +106,19 @@ from vibecad.parametric.compiler import (
     stabilize_parametric_session as _stabilize_parametric_session,
 )
 from vibecad.parametric.contracts import ParametricDesignIR
+from vibecad.tools.modeling import (
+    _boolean_common_uncommitted,
+    _boolean_cut_uncommitted,
+    _boolean_fuse_uncommitted,
+)
 from vibecad.tools.modeling import add_box as _add_box
+from vibecad.tools.modeling import add_cone as _add_cone
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
+from vibecad.tools.modeling import add_sphere as _add_sphere
+from vibecad.tools.modeling import add_torus as _add_torus
+from vibecad.tools.modify import _modify_part_uncommitted
 from vibecad.tools.modify import modify_part as _modify_part
+from vibecad.tools.transform import _move_part_uncommitted, _rotate_part_uncommitted
 from vibecad.tools.transform import move_part as _move_part
 from vibecad.tools.transform import rotate_part as _rotate_part
 from vibecad.validation import (
@@ -107,6 +140,7 @@ from vibecad.workflow.contracts import ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 from vibecad.workflow.state import TaskArtifactRef
 
 _MAX_ARTIFACT_BYTES = 536_870_912
@@ -150,11 +184,338 @@ _PARAMETER_FIELDS = {
         ("height", "Height", "mm"),
         ("radius", "Radius", "mm"),
     ),
+    "Part::Cone": (
+        ("angle", "Angle", "deg"),
+        ("base_radius", "Radius1", "mm"),
+        ("height", "Height", "mm"),
+        ("top_radius", "Radius2", "mm"),
+    ),
+    "Part::Sphere": (
+        ("angle1", "Angle1", "deg"),
+        ("angle2", "Angle2", "deg"),
+        ("angle3", "Angle3", "deg"),
+        ("radius", "Radius", "mm"),
+    ),
+    "Part::Torus": (
+        ("angle1", "Angle1", "deg"),
+        ("angle2", "Angle2", "deg"),
+        ("angle3", "Angle3", "deg"),
+        ("major_radius", "Radius1", "mm"),
+        ("minor_radius", "Radius2", "mm"),
+    ),
 }
+_BOOLEAN_OPERATIONS = {
+    "Part::Common": "common",
+    "Part::Cut": "cut",
+    "Part::Fuse": "fuse",
+}
+_NATIVE_ENTITY_TYPES = frozenset((*_PARAMETER_FIELDS, *_BOOLEAN_OPERATIONS))
+
+
+def _native_dependency_graph(
+    pairs: tuple[tuple[object, EntityIdentity], ...],
+) -> tuple[
+    dict[str, tuple[object, EntityIdentity]],
+    dict[str, tuple[str, str]],
+    frozenset[str],
+]:
+    """Validate one bounded native Part forest and return its exact links.
+
+    Boolean operands may themselves be prior boolean roots, but every native
+    object has at most one consumer.  This keeps the document a forest rather
+    than a shared-expression DAG whose overlapping roots would be ambiguous in
+    an assembly observation or STEP export.
+    """
+
+    modelable = tuple(
+        (obj, identity) for obj, identity in pairs if identity.object_type in _NATIVE_ENTITY_TYPES
+    )
+    by_name: dict[str, tuple[object, EntityIdentity]] = {}
+    for obj, identity in modelable:
+        name = getattr(obj, "Name", None)
+        is_boolean = identity.object_type in _BOOLEAN_OPERATIONS
+        key = name if type(name) is str and name else identity.object_id
+        expected_role = SemanticRole.FEATURE if is_boolean else SemanticRole.PRIMITIVE
+        if (
+            (is_boolean and (type(name) is not str or not name))
+            or key in by_name
+            or identity.semantic_role is not expected_role
+            or (is_boolean and identity.feature_id is None)
+        ):
+            raise _ObservationFailure
+        by_name[key] = (obj, identity)
+
+    dependencies: dict[str, tuple[str, str]] = {}
+    consumers: dict[str, str] = {}
+    for name, (obj, identity) in by_name.items():
+        if identity.object_type not in _BOOLEAN_OPERATIONS:
+            continue
+        operand_names = tuple(
+            getattr(getattr(obj, relation, None), "Name", None) for relation in ("Base", "Tool")
+        )
+        if (
+            any(type(item) is not str or item not in by_name for item in operand_names)
+            or len(set(operand_names)) != 2
+        ):
+            raise _ObservationFailure
+        base_name, tool_name = operand_names
+        assert type(base_name) is str and type(tool_name) is str
+        if by_name[base_name][0] is not getattr(obj, "Base", None) or by_name[tool_name][
+            0
+        ] is not getattr(obj, "Tool", None):
+            raise _ObservationFailure
+        for operand_name in (base_name, tool_name):
+            if operand_name in consumers:
+                raise _ObservationFailure
+            consumers[operand_name] = name
+        dependencies[name] = (base_name, tool_name)
+
+    resolved = {name for name in by_name if name not in dependencies}
+    pending = set(dependencies)
+    while pending:
+        ready = tuple(
+            name for name in sorted(pending) if set(dependencies[name]).issubset(resolved)
+        )
+        if not ready:
+            raise _ObservationFailure
+        resolved.update(ready)
+        pending.difference_update(ready)
+    if resolved != set(by_name):
+        raise _ObservationFailure
+    return by_name, dependencies, frozenset(consumers)
+
+
+def _native_boolean_descendants(
+    dependencies: dict[str, tuple[str, str]],
+    *,
+    target_name: str,
+) -> tuple[str, ...]:
+    """Return the unique ordered consumer chain for one native operand."""
+
+    consumer_by_operand = {
+        operand: feature_name
+        for feature_name, operands in dependencies.items()
+        for operand in operands
+    }
+    descendants: list[str] = []
+    current = target_name
+    while current in consumer_by_operand:
+        current = consumer_by_operand[current]
+        descendants.append(current)
+    return tuple(descendants)
+
+
+def _require_recomputed_boolean_descendants(
+    by_name: dict[str, tuple[object, EntityIdentity]],
+    descendant_names: tuple[str, ...],
+    recomputed_objects: frozenset[int],
+    target: object,
+) -> frozenset[str]:
+    """Consume one executor-created dependency-execution challenge.
+
+    A legitimate operand edit can leave the final BRep mathematically
+    unchanged (for example, moving one solid wholly inside a fused base).  The
+    old aggregate-metric test therefore rejected correct edits.  Freshness is
+    instead proved by the reviewed dependency links, a short-lived FreeCAD
+    document-observer receipt, and the post-recompute ``State`` ledger.  The
+    leaf's full recompute must emit an event for the exact target and every
+    authenticated descendant, leave neither ``Touched`` nor ``Invalid``
+    behind, and leave the whole document clean.  The returned object-id set is
+    consumed by the observation validator so an incomplete receipt cannot
+    silently skip one descendant.
+    """
+
+    if id(target) not in recomputed_objects:
+        raise _operation_failure()
+    recomputed: set[str] = set()
+    for name in descendant_names:
+        try:
+            obj, identity = by_name[name]
+            state = tuple(obj.State)
+        except Exception:
+            raise _operation_failure() from None
+        if (
+            any(type(item) is not str for item in state)
+            or id(obj) not in recomputed_objects
+            or "Touched" in state
+            or "Invalid" in state
+        ):
+            raise _operation_failure()
+        recomputed.add(identity.object_id)
+    if len(recomputed) != len(descendant_names):
+        raise _operation_failure()
+    try:
+        document = by_name[descendant_names[0]][0].Document
+        touched = document.isTouched()
+    except Exception:
+        raise _operation_failure() from None
+    if type(touched) is not bool or touched:
+        raise _operation_failure()
+    return frozenset(recomputed)
+
+
+@dataclass(slots=True)
+class _RecomputeReceipt:
+    document: object
+    object_ids: set[int]
+
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        if getattr(obj, "Document", None) is self.document:
+            self.object_ids.add(id(obj))
+
+
+class _DocumentRecomputeObserver:
+    """Short-lived FreeCAD observer proving which objects this leaf recomputed."""
+
+    def __init__(self, document: object) -> None:
+        name = getattr(document, "Name", None)
+        if type(name) is not str or not name:
+            raise _operation_failure()
+        self._receipt = _RecomputeReceipt(document=document, object_ids=set())
+        self._freecad: object | None = None
+
+    def __enter__(self) -> _RecomputeReceipt:
+        try:
+            with _silence_fd1():
+                import FreeCAD  # noqa: PLC0415
+
+                FreeCAD.addDocumentObserver(self._receipt)
+        except Exception:
+            raise _operation_failure() from None
+        self._freecad = FreeCAD
+        return self._receipt
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        try:
+            assert self._freecad is not None
+            self._freecad.removeDocumentObserver(self._receipt)  # type: ignore[attr-defined]
+        except Exception:
+            raise _operation_failure() from None
+
+
+def _validated_explicit_component_roots(
+    session: object,
+    *,
+    pairs: tuple[tuple[object, EntityIdentity], ...] | None = None,
+    records: tuple[tuple[object, ...], ...] | None = None,
+    require_complete: bool = True,
+) -> dict[str, object]:
+    """Authenticate the reviewed native-Part component result profile.
+
+    Native Part operands are hidden by their Boolean result in FreeCAD, but
+    remain document members.  A persisted or externally changed component
+    registry must therefore keep every operand and its consuming feature under
+    the same explicit component, and a component result may never point back
+    to a consumed operand.  Entity-level observation permits multiple
+    unconsumed roots while a later Boolean is being assembled.  Component and
+    export boundaries set ``require_complete`` and require exactly one root.
+
+    FreeCAD ``OutList`` is deliberately not authority here: it mixes consuming
+    geometry links with attachment, support, containment, and arbitrary dynamic
+    properties.  The only consuming edges accepted by this profile are the
+    reviewed native Boolean ``Base``/``Tool`` links validated by
+    :func:`_native_dependency_graph`.  A new object family must add an explicit
+    semantic profile before it can pass component delivery; unknown families
+    fail closed instead of being hidden behind a plausible result shape.
+    """
+
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        return {}
+    try:
+        component_records = tuple(list_records()) if records is None else records
+        if not component_records:
+            return {}
+        list_identities = getattr(session, "list_object_identities", None)
+        get_result_object = getattr(session, "get_result_object", None)
+        if pairs is None and (not callable(list_identities) or not callable(get_result_object)):
+            # Compatibility-only observer fixtures do not expose managed identity
+            # or result-root authority.  Production Session always exposes both.
+            return {
+                part_name: session.get_result_shape(part_name)  # type: ignore[attr-defined]
+                for part_name, _container, _identity, members in component_records
+                if members
+            }
+        identified = tuple(list_identities()) if pairs is None else pairs
+        by_name, dependencies, consumed = _native_dependency_graph(identified)
+        owner_by_name: dict[str, str] = {}
+        member_names_by_part: dict[str, frozenset[str]] = {}
+        ordered_parts: list[str] = []
+        for record in component_records:
+            if len(record) != 4:
+                raise _ObservationFailure
+            part_name, _container, _identity, members = record
+            if type(part_name) is not str or not part_name or type(members) is not tuple:
+                raise _ObservationFailure
+            member_names = tuple(getattr(obj, "Name", None) for obj, _identity in members)
+            if (
+                any(type(name) is not str or not name for name in member_names)
+                or len(member_names) != len(set(member_names))
+                or part_name in member_names_by_part
+            ):
+                raise _ObservationFailure
+            ordered_parts.append(part_name)
+            member_names_by_part[part_name] = frozenset(member_names)
+            for name in member_names:
+                assert type(name) is str
+                if name in owner_by_name:
+                    raise _ObservationFailure
+                owner_by_name[name] = part_name
+
+        # Once explicit components exist, every managed native object must have
+        # exactly one owner.  Otherwise a cross-component Boolean can be counted
+        # once through its result and again through a leaked operand.
+        if set(by_name) - set(owner_by_name):
+            raise _ObservationFailure
+        for feature_name, operands in dependencies.items():
+            owners = {
+                owner_by_name.get(feature_name),
+                *(owner_by_name.get(name) for name in operands),
+            }
+            if None in owners or len(owners) != 1:
+                raise _ObservationFailure
+
+        roots: dict[str, object] = {}
+        for part_name in ordered_parts:
+            member_names = member_names_by_part[part_name]
+            if not member_names:
+                continue
+            root = get_result_object(part_name)
+            root_name = getattr(root, "Name", None)
+            if (
+                type(root_name) is not str
+                or root_name not in member_names
+                or root_name not in by_name
+                or by_name[root_name][0] is not root
+                or root_name in consumed
+            ):
+                raise _ObservationFailure
+            if require_complete:
+                native_members = member_names & set(by_name)
+                native_roots = native_members - consumed
+                if native_members != set(member_names) or native_roots != {root_name}:
+                    raise _ObservationFailure
+            roots[part_name] = root.Shape
+        return roots
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
 
 
 def _fixed_error(code: ExecutorErrorCode) -> ExecutorError:
     return ExecutorError(code)
+
+
+def _prefer_cleanup_failure(
+    current: ExecutorError | None,
+    cleanup: ExecutorError,
+) -> ExecutorError:
+    """Never let a recoverable operation error hide a fatal lifecycle failure."""
+
+    if current is None or cleanup.code is ExecutorErrorCode.INTERNAL_FAILURE:
+        return cleanup
+    return current
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -375,16 +736,22 @@ def _managed_assembly_shape(session: object) -> object:
     """
 
     list_components = getattr(session, "list_component_identity_records", None)
-    if callable(list_components) and tuple(list_components()):
-        return session.get_assembly_shape()  # type: ignore[attr-defined]
+    if callable(list_components):
+        records = tuple(list_components())
+        if records:
+            _validated_explicit_component_roots(session, records=records)
+            return session.get_assembly_shape()  # type: ignore[attr-defined]
     list_identities = getattr(session, "list_object_identities", None)
     if not callable(list_identities):
         return session.get_assembly_shape()  # type: ignore[attr-defined]
     pairs = tuple(list_identities())
-    modelable = tuple(obj for obj, identity in pairs if identity.object_type in _PARAMETER_FIELDS)
-    if not modelable:
+    by_name, _dependencies, consumed = _native_dependency_graph(pairs)
+    if not by_name:
         return session.get_assembly_shape()  # type: ignore[attr-defined]
-    shapes = tuple(obj.Shape for obj in modelable)
+    roots = tuple(obj for name, (obj, _identity) in by_name.items() if name not in consumed)
+    if not roots:
+        raise _ObservationFailure
+    shapes = tuple(obj.Shape for obj in roots)
     if len(shapes) == 1:
         return shapes[0]
     with _silence_fd1():
@@ -399,7 +766,24 @@ def _shape_center_of_mass(
 ) -> tuple[int | float, int | float, int | float]:
     try:
         center = shape.CenterOfMass  # type: ignore[attr-defined]
-    except AttributeError:
+    except Exception:
+        if not solids:
+            try:
+                if _finite_number(shape.Volume, nonnegative=True) != 0:  # type: ignore[attr-defined]
+                    raise _ObservationFailure
+                bounds = shape.BoundBox  # type: ignore[attr-defined]
+                return tuple(
+                    (
+                        _finite_number(getattr(bounds, f"{axis}Min"), nonnegative=False)
+                        + _finite_number(getattr(bounds, f"{axis}Max"), nonnegative=False)
+                    )
+                    / 2.0
+                    for axis in "XYZ"
+                )
+            except _ObservationFailure:
+                raise
+            except Exception:
+                raise _ObservationFailure from None
         weighted = [0.0, 0.0, 0.0]
         total_volume = 0.0
         try:
@@ -432,8 +816,6 @@ def _shape_center_of_mass(
             weighted[1] / total_volume,
             weighted[2] / total_volume,
         )
-    except Exception:
-        raise _ObservationFailure from None
     return (
         _finite_number(center.x, nonnegative=False),
         _finite_number(center.y, nonnegative=False),
@@ -582,7 +964,12 @@ def _bound_box_center(shape: object) -> tuple[int | float, int | float, int | fl
     return tuple((float(low) + float(high)) / 2.0 for low, high in bounds)  # type: ignore[return-value]
 
 
-def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservation:
+def _entity_observation(
+    obj: object,
+    identity: EntityIdentity,
+    *,
+    identities_by_name: dict[str, EntityIdentity] | None = None,
+) -> EntityObservation:
     try:
         standard_parameters = tuple(
             EntityParameterObservation(
@@ -592,12 +979,43 @@ def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservat
             )
             for name, property_name, unit in _PARAMETER_FIELDS.get(identity.object_type, ())
         )
+        relation_parameters: tuple[EntityParameterObservation, ...] = ()
+        if identity.object_type in _BOOLEAN_OPERATIONS:
+            if identities_by_name is None or identity.semantic_role is not SemanticRole.FEATURE:
+                raise _ObservationFailure
+            base_name = getattr(getattr(obj, "Base", None), "Name", None)
+            tool_name = getattr(getattr(obj, "Tool", None), "Name", None)
+            base_identity = identities_by_name.get(base_name) if type(base_name) is str else None
+            tool_identity = identities_by_name.get(tool_name) if type(tool_name) is str else None
+            if (
+                type(base_identity) is not EntityIdentity
+                or type(tool_identity) is not EntityIdentity
+                or base_identity == tool_identity
+            ):
+                raise _ObservationFailure
+            relation_parameters = (
+                EntityParameterObservation(
+                    name="base_object_id",
+                    value=base_identity.object_id,
+                ),
+                EntityParameterObservation(
+                    name="operation",
+                    value=_BOOLEAN_OPERATIONS[identity.object_type],
+                ),
+                EntityParameterObservation(
+                    name="tool_object_id",
+                    value=tool_identity.object_id,
+                ),
+            )
         parametric_parameters = tuple(
             EntityParameterObservation(name=fact.name, value=fact.value, unit=fact.unit)
             for fact in parametric_entity_facts(obj)
         )
         parameters = tuple(
-            sorted((*standard_parameters, *parametric_parameters), key=lambda item: item.name)
+            sorted(
+                (*standard_parameters, *relation_parameters, *parametric_parameters),
+                key=lambda item: item.name,
+            )
         )
         placement = _canonical_placement(obj.Placement)  # type: ignore[attr-defined]
         # ``App::Part`` starts exposing an aggregate Shape after its first member is
@@ -644,15 +1062,36 @@ def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
             identities = index_entity_identities(document_objects)
             pairs = tuple(zip(document_objects, identities, strict=True))
         modelable_objects = tuple(
-            obj for obj in document_objects if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS
+            obj for obj in document_objects if getattr(obj, "TypeId", None) in _NATIVE_ENTITY_TYPES
         )
         if any(
             sum(current is obj for current, _ in pairs) != 1 for obj in modelable_objects
         ) or any(not any(current is obj for obj in document_objects) for current, _ in pairs):
             raise _ObservationFailure
+        named_identities = tuple(
+            (name, identity)
+            for obj, identity in pairs
+            if type(name := getattr(obj, "Name", None)) is str and name
+        )
+        identities_by_name = dict(named_identities)
+        if len(identities_by_name) != len(named_identities):
+            raise _ObservationFailure
+        _native_dependency_graph(pairs)
+        _validated_explicit_component_roots(
+            session,
+            pairs=pairs,
+            require_complete=False,
+        )
         observations = tuple(
             sorted(
-                (_entity_observation(obj, identity) for obj, identity in pairs),
+                (
+                    _entity_observation(
+                        obj,
+                        identity,
+                        identities_by_name=identities_by_name,
+                    )
+                    for obj, identity in pairs
+                ),
                 key=lambda item: item.object_id,
             )
         )
@@ -676,9 +1115,11 @@ def _component_observations(session: object) -> tuple[ComponentObservation, ...]
         return ()
     read_bom = getattr(session, "read_component_bom_metadata", None)
     try:
+        records = tuple(list_records())
+        roots = _validated_explicit_component_roots(session, records=records)
         observations = []
-        for part_name, container, identity, members in tuple(list_records()):
-            local_shape = session.get_result_shape(part_name)  # type: ignore[attr-defined]
+        for part_name, container, identity, members in records:
+            local_shape = roots[part_name]
             shape = local_shape.transformed(container.Placement.toMatrix())
             observations.append(
                 ComponentObservation(
@@ -711,10 +1152,9 @@ def _interference_observations(session: object) -> tuple[InterferenceObservation
         return ()
     try:
         records = tuple(list_records())
+        roots = _validated_explicit_component_roots(session, records=records)
         global_shapes = {
-            identity.object_id: session.get_result_shape(part_name).transformed(  # type: ignore[attr-defined]
-                container.Placement.toMatrix()
-            )
+            identity.object_id: roots[part_name].transformed(container.Placement.toMatrix())
             for part_name, container, identity, _members in records
         }
         observations = []
@@ -750,8 +1190,13 @@ def _component_geometry_digest(
     try:
         local_geometry = _entity_geometry(session.get_result_shape(part_name))  # type: ignore[attr-defined]
         member_facts = []
+        identities_by_name = {obj.Name: identity for obj, identity in members}
         for obj, identity in members:
-            observation = _entity_observation(obj, identity)
+            observation = _entity_observation(
+                obj,
+                identity,
+                identities_by_name=identities_by_name,
+            )
             member_facts.append(
                 {
                     "object_type": observation.object_type,
@@ -943,12 +1388,16 @@ def _reloaded_observations(
         components = _component_observations(probe)
         interferences = _interference_observations(probe)
         bom = _bom_observation(probe, components)
+    except _SessionLifecycleError:
+        raise
     except Exception:
         failed = True
     finally:
         if probe is not None:
             try:
                 probe.close_document()
+            except _SessionLifecycleError:
+                raise
             except Exception:
                 failed = True
     if failed:
@@ -1228,8 +1677,12 @@ def _require_non_target_preservation(
     after: dict[str, EntityObservation],
     *,
     target: str | None,
+    preserve_by_target: dict[str, tuple[str, ...]] | None = None,
 ) -> list[PreservationObservation]:
     if set(before) != set(after):
+        raise _operation_failure()
+    selected = {} if preserve_by_target is None else preserve_by_target
+    if not set(selected).issubset(before):
         raise _operation_failure()
     comparisons: list[PreservationObservation] = []
     for object_id in sorted(before):
@@ -1240,6 +1693,7 @@ def _require_non_target_preservation(
                 before[object_id],
                 after[object_id],
                 target=object_id,
+                preserve=selected.get(object_id, ()),
             )
         )
     return comparisons
@@ -1397,6 +1851,100 @@ def _managed_create(
             float(origin) + offset
             for origin, offset in zip(expected_position, center_offset, strict=True)
         )
+    elif context.operation == "create_cone":
+        expected_parameters = {
+            "angle": 360.0,
+            "base_radius": kwargs.get("radius1"),
+            "height": kwargs.get("height"),
+            "top_radius": kwargs.get("radius2", 0.0),
+        }
+        radius1 = expected_parameters["base_radius"]
+        radius2 = expected_parameters["top_radius"]
+        height = expected_parameters["height"]
+        if any(type(item) not in {int, float} for item in (radius1, radius2, height)):
+            raise _operation_failure()
+        base_radius = float(radius1)
+        top_radius = float(radius2)
+        cone_height = float(height)
+        radius_sum = base_radius**2 + base_radius * top_radius + top_radius**2
+        if base_radius <= 0 or top_radius < 0 or cone_height <= 0 or radius_sum <= 0:
+            raise _operation_failure()
+        expected_volume = math.pi * cone_height * radius_sum / 3.0
+        slant = math.hypot(cone_height, base_radius - top_radius)
+        expected_area = math.pi * (
+            base_radius**2 + top_radius**2 + (base_radius + top_radius) * slant
+        )
+        local_center_z = (
+            cone_height
+            * (base_radius**2 + 2.0 * base_radius * top_radius + 3.0 * top_radius**2)
+            / (4.0 * radius_sum)
+        )
+        cone_axis = kwargs.get("axis", "z")
+        diameter = 2.0 * max(base_radius, top_radius)
+        if cone_axis == "x":
+            expected_rotation = _axis_rotation("y", 90.0)
+            expected_bbox = (cone_height, diameter, diameter)
+        elif cone_axis == "y":
+            expected_rotation = _axis_rotation("x", -90.0)
+            expected_bbox = (diameter, cone_height, diameter)
+        elif cone_axis == "z":
+            expected_rotation = (0.0, 0.0, 0.0, 1.0)
+            expected_bbox = (diameter, diameter, cone_height)
+        else:
+            raise _operation_failure()
+        center_offset = _rotate_vector(expected_rotation, (0.0, 0.0, local_center_z))
+        expected_center = tuple(
+            float(origin) + offset
+            for origin, offset in zip(expected_position, center_offset, strict=True)
+        )
+    elif context.operation == "create_sphere":
+        expected_parameters = {
+            "angle1": -90.0,
+            "angle2": 90.0,
+            "angle3": 360.0,
+            "radius": kwargs.get("radius"),
+        }
+        radius = expected_parameters["radius"]
+        if type(radius) not in {int, float} or float(radius) <= 0:
+            raise _operation_failure()
+        sphere_radius = float(radius)
+        expected_volume = 4.0 * math.pi * sphere_radius**3 / 3.0
+        expected_area = 4.0 * math.pi * sphere_radius**2
+        expected_bbox = (2.0 * sphere_radius,) * 3
+        expected_center = tuple(float(component) for component in expected_position)
+        expected_rotation = (0.0, 0.0, 0.0, 1.0)
+    elif context.operation == "create_torus":
+        expected_parameters = {
+            "angle1": -180.0,
+            "angle2": 180.0,
+            "angle3": 360.0,
+            "major_radius": kwargs.get("radius1"),
+            "minor_radius": kwargs.get("radius2"),
+        }
+        radius1 = expected_parameters["major_radius"]
+        radius2 = expected_parameters["minor_radius"]
+        if type(radius1) not in {int, float} or type(radius2) not in {int, float}:
+            raise _operation_failure()
+        major_radius = float(radius1)
+        minor_radius = float(radius2)
+        if major_radius <= minor_radius or minor_radius <= 0:
+            raise _operation_failure()
+        expected_volume = 2.0 * math.pi**2 * major_radius * minor_radius**2
+        expected_area = 4.0 * math.pi**2 * major_radius * minor_radius
+        torus_axis = kwargs.get("axis", "z")
+        if torus_axis == "x":
+            expected_rotation = _axis_rotation("y", 90.0)
+        elif torus_axis == "y":
+            expected_rotation = _axis_rotation("x", -90.0)
+        elif torus_axis == "z":
+            expected_rotation = (0.0, 0.0, 0.0, 1.0)
+        else:
+            raise _operation_failure()
+        # OCC's torus triangulation can conservatively enlarge the reported X/Y
+        # bounding box.  Volume, area, center, native parameters and one-solid
+        # validity remain the exact creation contract.
+        expected_bbox = None
+        expected_center = tuple(float(component) for component in expected_position)
     else:
         raise _operation_failure()
     if set(parameters) != set(expected_parameters) or any(
@@ -1421,7 +1969,7 @@ def _managed_create(
         or created.center_of_mass_mm is None
         or not _same_geometry_number(created.volume_mm3, expected_volume)
         or not _same_geometry_number(created.area_mm2, expected_area)
-        or not _same_geometry_vector(created.bbox_mm, expected_bbox)
+        or (expected_bbox is not None and not _same_geometry_vector(created.bbox_mm, expected_bbox))
         or not _same_geometry_vector(created.center_of_mass_mm, expected_center)
     ):
         raise _operation_failure()
@@ -1437,6 +1985,212 @@ def _managed_create(
     if component_identity is not None:
         result["component_id"] = component_identity.object_id
     return result
+
+
+def _managed_boolean(
+    session: object,
+    context: _InvocationContext,
+    *,
+    leaf: Callable[..., object],
+    expected_type: str,
+    project_id: str,
+    revision_id: str,
+    base: object,
+    tool: object,
+) -> dict[str, object]:
+    """Create one native Part boolean and seal its operand dependency links."""
+
+    if context.preserve or expected_type not in _BOOLEAN_OPERATIONS:
+        raise _operation_failure()
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    base_obj, base_identity = _resolve_entity_target(
+        session,
+        base,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    tool_obj, tool_identity = _resolve_entity_target(
+        session,
+        tool,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    try:
+        pairs = _identified_pairs(session)
+        by_name, _dependencies, consumed = _native_dependency_graph(pairs)
+        base_name = base_obj.Name
+        tool_name = tool_obj.Name
+        if (
+            base_obj is tool_obj
+            or base_identity == tool_identity
+            or base_name not in by_name
+            or tool_name not in by_name
+            or by_name[base_name] != (base_obj, base_identity)
+            or by_name[tool_name] != (tool_obj, tool_identity)
+            or base_name in consumed
+            or tool_name in consumed
+        ):
+            raise ValueError
+        owner_of = getattr(session, "owner_of", None)
+        if not callable(owner_of):
+            raise ValueError
+        base_owner = owner_of(base_name)
+        tool_owner = owner_of(tool_name)
+        if base_owner != tool_owner:
+            raise ValueError
+        document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+    except Exception:
+        raise _operation_failure() from None
+
+    attach = getattr(session, "attach_object_identity", None)
+    read_identity = getattr(session, "read_object_identity", None)
+    get_result = getattr(session, "get_result_object", None)
+    transaction = getattr(session, "_transaction", None)
+    claim_new_objects = getattr(session, "_claim_new_objects", None)
+    if (
+        not callable(attach)
+        or not callable(read_identity)
+        or not callable(get_result)
+        or not callable(transaction)
+        or (base_owner is not None and not callable(claim_new_objects))
+    ):
+        raise _operation_failure()
+    try:
+        with transaction(
+            f"VibeCAD {context.operation}",
+            part=base_owner,
+            claim_new_objects=False,
+        ):
+            leaf(session, base_name=base_name, tool_name=tool_name)
+            document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+            if any(
+                not any(current is obj for current in document_after) for obj in document_before
+            ):
+                raise ValueError
+            added = tuple(
+                obj
+                for obj in document_after
+                if not any(obj is current for current in document_before)
+            )
+            result_candidates = tuple(
+                obj for obj in added if getattr(obj, "TypeId", None) == expected_type
+            )
+            if len(result_candidates) != 1:
+                raise ValueError
+            result_obj = result_candidates[0]
+            managed_added = tuple(
+                obj
+                for obj in added
+                if getattr(obj, "TypeId", None) in _NATIVE_ENTITY_TYPES
+                or any(
+                    getattr(obj, property_name, None)
+                    for property_name in (
+                        "VibeCADObjectId",
+                        "VibeCADFeatureId",
+                        "VibeCADSemanticRole",
+                        "VibeCADProvenance",
+                    )
+                )
+            )
+            if managed_added != (result_obj,):
+                raise ValueError
+            if (
+                result_obj.TypeId != expected_type
+                or result_obj.Base is not base_obj
+                or result_obj.Tool is not tool_obj
+            ):
+                raise ValueError
+            identity = EntityIdentity(
+                object_id=f"object_{secrets.token_hex(16)}",
+                feature_id=f"feature_{secrets.token_hex(16)}",
+                object_type=expected_type,
+                semantic_role=SemanticRole.FEATURE,
+                provenance=Provenance(
+                    source=ProvenanceSource(context.source.value),
+                    operation_id=context.operation_id,
+                ),
+            )
+            if attach(result_obj, identity) != identity or read_identity(result_obj) != identity:
+                raise ValueError
+            if base_owner is not None:
+                claim_new_objects(
+                    {obj.Name for obj in document_before},
+                    part=base_owner,
+                )
+                if owner_of(result_obj.Name) != base_owner:
+                    raise ValueError
+            if get_result(base_owner) is not result_obj:
+                raise ValueError
+            after = _entity_observations(session)
+            after_by_id = _observation_map(after)
+            if set(before_by_id) - set(after_by_id) or set(after_by_id) - set(before_by_id) != {
+                identity.object_id
+            }:
+                raise ValueError
+            comparisons = _require_non_target_preservation(
+                before_by_id,
+                {key: value for key, value in after_by_id.items() if key != identity.object_id},
+                target=None,
+            )
+            created = after_by_id[identity.object_id]
+            parameters = {item.name: item.value for item in created.parameters}
+            expected_parameters = {
+                "base_object_id": base_identity.object_id,
+                "operation": _BOOLEAN_OPERATIONS[expected_type],
+                "tool_object_id": tool_identity.object_id,
+            }
+            base_observation = before_by_id.get(base_identity.object_id)
+            tool_observation = before_by_id.get(tool_identity.object_id)
+            if (
+                created.object_type != expected_type
+                or created.feature_id != identity.feature_id
+                or parameters != expected_parameters
+                or base_observation is None
+                or tool_observation is None
+                or base_observation.volume_mm3 is None
+                or tool_observation.volume_mm3 is None
+                or created.valid_shape is not True
+                or created.solid_count != 1
+                or created.volume_mm3 is None
+                or created.volume_mm3 <= 0
+                or created.area_mm2 is None
+                or created.area_mm2 <= 0
+                or created.bbox_mm is None
+                or any(component <= 0 for component in created.bbox_mm)
+                or created.center_of_mass_mm is None
+            ):
+                raise ValueError
+            result_volume = float(created.volume_mm3)
+            base_volume = float(base_observation.volume_mm3)
+            tool_volume = float(tool_observation.volume_mm3)
+            tolerance = max(base_volume, tool_volume, 1.0) * 1e-7
+            operation = _BOOLEAN_OPERATIONS[expected_type]
+            if operation == "cut" and not result_volume < base_volume - tolerance:
+                raise ValueError
+            if operation == "fuse" and not (
+                max(base_volume, tool_volume) - tolerance
+                <= result_volume
+                <= base_volume + tool_volume + tolerance
+            ):
+                raise ValueError
+            if operation == "common" and not (
+                0 < result_volume <= min(base_volume, tool_volume) + tolerance
+            ):
+                raise ValueError
+    except Exception:
+        raise _operation_failure() from None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "boolean_created",
+        "operation": context.operation,
+        "object_id": created.object_id,
+        "feature_id": created.feature_id,
+        "base_object_id": base_identity.object_id,
+        "tool_object_id": tool_identity.object_id,
+        "after": created.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
 
 
 def _managed_create_parametric_design(
@@ -1636,6 +2390,626 @@ def _managed_create_parametric_design(
         "features": [item.to_mapping() for item in feature_observations],
         "preservation": [item.to_mapping() for item in comparisons],
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewedProductRunRecord:
+    """One engine-owned Reviewed result retained only for this program run."""
+
+    result: ReviewedNativeExecutionResult
+    identity: EntityIdentity
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.result) is not ReviewedNativeExecutionResult
+            or type(self.identity) is not EntityIdentity
+            or self.result.object is None
+            or self.identity.object_type != self.result.route.operation.native_type_id
+        ):
+            raise _operation_failure()
+
+
+class _ReviewedProductRunState:
+    """Ordered opaque Reviewed outputs scoped to one execution cursor."""
+
+    __slots__ = ("_records", "_token")
+
+    def __init__(self) -> None:
+        self._records: dict[str, _ReviewedProductRunRecord] = {}
+        self._token = object()
+
+    @property
+    def execution_token(self) -> object:
+        return self._token
+
+    def retain(self, result: ReviewedNativeExecutionResult, identity: EntityIdentity) -> None:
+        record = _ReviewedProductRunRecord(result=result, identity=identity)
+        if identity.object_id in self._records:
+            raise _operation_failure()
+        try:
+            result._retain_for_run(self._token)
+        except Exception:
+            raise _operation_failure() from None
+        self._records[identity.object_id] = record
+
+    def replace(
+        self,
+        previous: ReviewedNativeExecutionResult,
+        result: ReviewedNativeExecutionResult,
+        identity: EntityIdentity,
+    ) -> None:
+        if (
+            type(previous) is not ReviewedNativeExecutionResult
+            or type(result) is not ReviewedNativeExecutionResult
+            or type(identity) is not EntityIdentity
+            or result.execution_mode is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            or result.object is not previous.object
+            or result.state_sha256 is None
+            or previous.state_sha256 is None
+            or result.state_sha256 == previous.state_sha256
+        ):
+            raise _operation_failure()
+        record = self._records.get(identity.object_id)
+        if (
+            record is None
+            or record.result is not previous
+            or record.identity != identity
+            or not previous._is_retained_for_run(self._token)
+        ):
+            raise _operation_failure()
+        try:
+            replacement = _ReviewedProductRunRecord(result=result, identity=identity)
+            result._retain_for_run(self._token)
+            previous._release_from_run(self._token)
+        except Exception:
+            raise _operation_failure() from None
+        self._records[identity.object_id] = replacement
+
+    def discard(self, result: ReviewedNativeExecutionResult, identity: EntityIdentity) -> None:
+        """Remove one failed CREATE adoption from this run without exposing it."""
+
+        if (
+            type(result) is not ReviewedNativeExecutionResult
+            or type(identity) is not EntityIdentity
+        ):
+            raise _operation_failure()
+        record = self._records.get(identity.object_id)
+        if (
+            record is None
+            or record.result is not result
+            or record.identity != identity
+            or not result._is_retained_for_run(self._token)
+        ):
+            raise _operation_failure()
+        try:
+            result._release_from_run(self._token)
+        except Exception:
+            raise _operation_failure() from None
+        del self._records[identity.object_id]
+
+    def resolve(
+        self,
+        source_object_ids: tuple[object, ...],
+        *,
+        read_identity: Callable[[object], object],
+        minimum: int = 1,
+        maximum: int = 8,
+    ) -> tuple[ReviewedNativeExecutionResult, ...]:
+        if (
+            type(source_object_ids) is not tuple
+            or type(minimum) is not int
+            or type(maximum) is not int
+            or not 1 <= minimum <= maximum <= 8
+            or not minimum <= len(source_object_ids) <= maximum
+            or not callable(read_identity)
+            or any(
+                not _matches_value_shape(item, ValueShape.OBJECT_ID) for item in source_object_ids
+            )
+        ):
+            raise _operation_failure()
+        try:
+            records = tuple(self._records[item] for item in source_object_ids)
+            if any(
+                read_identity(record.result.object) != record.identity
+                or record.identity.object_id != object_id
+                or not record.result._is_retained_for_run(self._token)
+                for object_id, record in zip(source_object_ids, records, strict=True)
+            ):
+                raise ValueError
+        except Exception:
+            raise _operation_failure() from None
+        return tuple(record.result for record in records)
+
+    def __reduce__(self):
+        raise TypeError("reviewed product run state cannot be serialized")
+
+
+def _reviewed_document_matches(
+    document: object,
+    before: tuple[object, ...],
+    body_tips: tuple[tuple[object, object], ...],
+) -> bool:
+    try:
+        current = tuple(document.Objects)
+        return (
+            len(current) == len(before)
+            and all(actual is expected for actual, expected in zip(current, before, strict=True))
+            and all(body.Tip is tip for body, tip in body_tips)
+        )
+    except Exception:
+        return False
+
+
+def _rollback_reviewed_document(
+    document: object,
+    before: tuple[object, ...],
+    body_tips: tuple[tuple[object, object], ...],
+) -> bool:
+    """Compensate a committed family mutation after later product validation fails."""
+
+    if _reviewed_document_matches(document, before, body_tips):
+        return True
+    try:
+        current = tuple(document.Objects)
+        if len(current) < len(before) or any(
+            actual is not expected
+            for actual, expected in zip(current[: len(before)], before, strict=True)
+        ):
+            return False
+        added = current[len(before) :]
+        names = tuple(getattr(item, "Name", None) for item in added)
+        if (
+            any(type(name) is not str or not name for name in names)
+            or len(set(names)) != len(names)
+            or not all(
+                callable(getattr(document, name, None))
+                for name in (
+                    "openTransaction",
+                    "commitTransaction",
+                    "abortTransaction",
+                    "removeObject",
+                    "recompute",
+                )
+            )
+        ):
+            return False
+        document.openTransaction("VibeCAD rollback reviewed intent")
+    except Exception:
+        return False
+    try:
+        for item, name in reversed(tuple(zip(added, names, strict=True))):
+            if any(item is current_item for current_item in tuple(document.Objects)):
+                document.removeObject(name)
+        for body, tip in body_tips:
+            body.Tip = tip
+        document.recompute()
+        if not _reviewed_document_matches(document, before, body_tips):
+            raise ValueError
+        document.commitTransaction()
+        return _reviewed_document_matches(document, before, body_tips)
+    except BaseException:
+        try:
+            document.abortTransaction()
+            document.recompute()
+        except BaseException:
+            pass
+        return False
+
+
+def _normalize_reviewed_source_ids(
+    sources: object,
+    source_a: object,
+    source_b: object,
+) -> tuple[object, ...]:
+    """Normalize the ordered collection and legacy pair without resolving either."""
+
+    if sources is None:
+        if source_a is None and source_b is None:
+            return ()
+        if source_a is not None:
+            return tuple(item for item in (source_a, source_b) if item is not None)
+        raise _operation_failure()
+    if type(sources) is tuple and len(sources) <= 8 and source_a is None and source_b is None:
+        return sources
+    raise _operation_failure()
+
+
+def _reviewed_partdesign_owner_preservation(
+    result: object,
+    resolved_sources: tuple[ReviewedNativeExecutionResult, ...],
+    *,
+    read_identity: Callable[[object], object],
+) -> dict[str, tuple[str, ...]]:
+    """Allow only the authenticated source Body's derived shape to change."""
+
+    if not resolved_sources or not str(getattr(result, "TypeId", "")).startswith("PartDesign::"):
+        return {}
+    primaries = tuple(source.object for source in resolved_sources)
+    source_owned = tuple(item for source in resolved_sources for item in source.owned_objects)
+    try:
+        candidates = tuple(
+            item
+            for index, item in enumerate(source_owned)
+            if not any(item is prior for prior in source_owned[:index])
+            and getattr(item, "TypeId", None) == "PartDesign::Body"
+            and not any(item is primary for primary in primaries)
+            and item.Tip is result
+            and any(result is member for member in tuple(item.Group))
+        )
+    except Exception:
+        raise _operation_failure() from None
+    if not candidates:
+        return {}
+    if len(candidates) != 1:
+        raise _operation_failure()
+    identity = read_identity(candidates[0])
+    if (
+        type(identity) is not EntityIdentity
+        or identity.object_type != "PartDesign::Body"
+        or identity.semantic_role is not SemanticRole.PART
+    ):
+        raise _operation_failure()
+    return {identity.object_id: ("placement", "parameters")}
+
+
+def _managed_apply_reviewed_intent(
+    session: object,
+    context: _InvocationContext,
+    *,
+    execution_leaf: Callable[..., object],
+    reviewed_products: _ReviewedProductRunState,
+    artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+    artifact_run_token: object | None = None,
+    intent: object,
+    sources: object = None,
+    source_a: object = None,
+    source_b: object = None,
+) -> dict[str, object]:
+    """Execute and adopt one statically routed Reviewed intent."""
+
+    if context.preserve:
+        raise _operation_failure()
+    try:
+        checked = ReviewedIntentProgramV1.from_mapping(intent)
+        attach = session.attach_object_identity  # type: ignore[attr-defined]
+        read_identity = session.read_object_identity  # type: ignore[attr-defined]
+        set_result = session.set_result_object  # type: ignore[attr-defined]
+        get_result = session.get_result_object  # type: ignore[attr-defined]
+        transaction = session._transaction  # type: ignore[attr-defined]
+        if (
+            not all(
+                callable(item)
+                for item in (
+                    attach,
+                    read_identity,
+                    set_result,
+                    get_result,
+                    transaction,
+                    execution_leaf,
+                )
+            )
+            or type(reviewed_products) is not _ReviewedProductRunState
+        ):
+            raise ValueError
+        before = _entity_observations(session)
+        before_by_id = _observation_map(before)
+        document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        body_tips_before = tuple(
+            (item, item.Tip)
+            for item in document_before
+            if getattr(item, "TypeId", None) == "PartDesign::Body"
+        )
+    except Exception:
+        raise _operation_failure() from None
+
+    executed: ReviewedNativeExecutionResult | None = None
+    execution_mode: _ReviewedProductExecutionMode | None = None
+    retained_identity: EntityIdentity | None = None
+    resolved_sources: tuple[ReviewedNativeExecutionResult, ...] = ()
+    resolved_source_identities: tuple[EntityIdentity, ...] = ()
+    try:
+        route = _route_reviewed_intent(checked)
+        source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
+        execution_mode = route.family.product_execution_mode(
+            route.operation,
+            source_count=len(source_values),
+        )
+        artifact_kwargs: dict[str, object] = {}
+        if (
+            route.family.artifact_requirement_for(route.operation) is not None
+            or route.family.multi_document_binding is not None
+        ):
+            if (
+                type(artifact_resolver) is not _ReviewedArtifactRunResolver
+                or artifact_run_token is None
+            ):
+                raise ValueError
+            artifact_kwargs = {
+                "_reviewed_artifact_resolver": artifact_resolver,
+                "_reviewed_artifact_run_token": artifact_run_token,
+            }
+        if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
+            raise ValueError
+        if (
+            execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            and len(source_values) != 1
+        ):
+            raise ValueError
+        if not source_values:
+            executed = execution_leaf(session, checked, **artifact_kwargs)
+        else:
+            resolved_sources = reviewed_products.resolve(
+                source_values,
+                read_identity=read_identity,
+                minimum=1,
+                maximum=8,
+            )
+            if execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
+                resolved_source_identities = tuple(
+                    read_identity(item) for item in resolved_sources[0].owned_objects
+                )
+                if any(type(item) is not EntityIdentity for item in resolved_source_identities):
+                    raise ValueError
+            execution_kwargs: dict[str, object] = {"source_results": resolved_sources}
+            if (
+                execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+                or route.family.requires_same_run_sources
+            ):
+                execution_kwargs["_reviewed_run_token"] = reviewed_products.execution_token
+            execution_kwargs.update(artifact_kwargs)
+            executed = execution_leaf(
+                session,
+                checked,
+                **execution_kwargs,
+            )
+        if (
+            type(executed) is not ReviewedNativeExecutionResult
+            or executed.execution_mode is not execution_mode
+        ):
+            raise ValueError
+        obj = executed.object
+        owned = executed.owned_objects
+        document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            added = tuple(
+                item
+                for item in document_after
+                if not any(item is existing for existing in document_before)
+            )
+            if (
+                len(document_after) != len(document_before) + len(owned)
+                or len(added) != len(owned)
+                or len({id(item) for item in added}) != len(added)
+                or {id(item) for item in added} != {id(item) for item in owned}
+                or owned[0] is not obj
+                or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
+            ):
+                raise ValueError
+            provenance = Provenance(
+                source=ProvenanceSource(context.source.value),
+                operation_id=context.operation_id,
+            )
+            identities = tuple(
+                EntityIdentity(
+                    object_id=f"object_{secrets.token_hex(16)}",
+                    feature_id=f"feature_{secrets.token_hex(16)}",
+                    object_type=owned_object.TypeId,
+                    semantic_role=semantic_role,
+                    provenance=provenance,
+                )
+                for owned_object, semantic_role in zip(
+                    owned,
+                    executed.semantic_roles,
+                    strict=True,
+                )
+            )
+        else:
+            if (
+                len(resolved_sources) != 1
+                or executed.object is not resolved_sources[0].object
+                or len(owned) != len(resolved_sources[0].owned_objects)
+                or any(
+                    item is not previous
+                    for item, previous in zip(
+                        owned,
+                        resolved_sources[0].owned_objects,
+                        strict=True,
+                    )
+                )
+                or len(document_after) != len(document_before)
+                or any(
+                    item is not previous
+                    for item, previous in zip(document_after, document_before, strict=True)
+                )
+            ):
+                raise ValueError
+            identities = tuple(read_identity(item) for item in owned)
+            if (
+                any(
+                    type(identity) is not EntityIdentity
+                    or identity.object_type != item.TypeId
+                    or identity.semantic_role is not role
+                    for identity, item, role in zip(
+                        identities,
+                        owned,
+                        executed.semantic_roles,
+                        strict=True,
+                    )
+                )
+                or identities != resolved_source_identities
+            ):
+                raise ValueError
+            provenance = identities[0].provenance
+        owner_preservation = (
+            _reviewed_partdesign_owner_preservation(
+                obj,
+                resolved_sources,
+                read_identity=read_identity,
+            )
+            if execution_mode is _ReviewedProductExecutionMode.CREATE
+            else {}
+        )
+        with transaction(
+            "VibeCAD adopt reviewed intent",
+            claim_new_objects=False,
+        ):
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                for owned_object, identity in zip(owned, identities, strict=True):
+                    if (
+                        attach(owned_object, identity) != identity
+                        or read_identity(owned_object) != identity
+                    ):
+                        raise ValueError
+            elif any(
+                read_identity(owned_object) != identity
+                for owned_object, identity in zip(owned, identities, strict=True)
+            ):
+                raise ValueError
+            if executed.result_kind is _ReviewedProductResultKind.SOLID:
+                set_result(obj)
+                if get_result() is not obj:
+                    raise ValueError
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                session.doc.recompute()  # type: ignore[attr-defined]
+            after = _entity_observations(session)
+            after_by_id = _observation_map(after)
+            identity_ids = {identity.object_id for identity in identities}
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                if set(after_by_id) != {*before_by_id, *identity_ids}:
+                    raise ValueError
+                comparisons = _require_non_target_preservation(
+                    before_by_id,
+                    {key: value for key, value in after_by_id.items() if key not in identity_ids},
+                    target=None,
+                    preserve_by_target=owner_preservation,
+                )
+            else:
+                if set(after_by_id) != set(before_by_id):
+                    raise ValueError
+                comparisons = _require_non_target_preservation(
+                    before_by_id,
+                    after_by_id,
+                    target=identities[0].object_id,
+                )
+            created_closure = tuple(after_by_id[identity.object_id] for identity in identities)
+            if any(
+                created.feature_id != identity.feature_id
+                or created.object_type != identity.object_type
+                or created.semantic_role != identity.semantic_role.value
+                or created.provenance != provenance.to_mapping()
+                for created, identity in zip(created_closure, identities, strict=True)
+            ):
+                raise ValueError
+            created = created_closure[0]
+            if executed.result_kind is _ReviewedProductResultKind.SOLID:
+                if (
+                    created.valid_shape is not True
+                    or created.solid_count != 1
+                    or created.volume_mm3 is None
+                    or created.volume_mm3 <= 0
+                ):
+                    raise ValueError
+            elif (
+                executed.result_kind is _ReviewedProductResultKind.VALID_SHAPE
+                and created.valid_shape is not True
+            ):
+                raise ValueError
+            adoption_validator = getattr(executed.native_receipt, "validate_adoption", None)
+            if executed.requires_state_sha256:
+                receipt_state_sha256 = getattr(
+                    executed.native_receipt,
+                    "state_sha256",
+                    None,
+                )
+                if (
+                    executed.state_sha256 is None
+                    or type(receipt_state_sha256) is not str
+                    or not hmac.compare_digest(
+                        executed.state_sha256,
+                        receipt_state_sha256,
+                    )
+                    or not callable(adoption_validator)
+                ):
+                    raise ValueError
+                adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]
+            elif adoption_validator is not None:
+                if not callable(adoption_validator):
+                    raise ValueError
+                adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]
+        outcome = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "reviewed_intent_applied",
+            "operation": context.operation,
+            "reviewed_operation_id": executed.route.operation_id,
+            "semantic_operation": executed.route.semantic_operation,
+            "object_id": identities[0].object_id,
+            "feature_id": identities[0].feature_id,
+            "plan_sha256": executed.plan_sha256,
+            "plan_content_sha256": executed.plan_content_sha256,
+            "native_receipt_sha256": executed.native_receipt.receipt_sha256,
+            "after": created.to_mapping(),
+            "preservation": [item.to_mapping() for item in comparisons],
+        }
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            reviewed_products.retain(executed, identities[0])
+            retained_identity = identities[0]
+            if _reviewed_native_create_needs_recovery(executed) and not (
+                _commit_reviewed_native_create(executed)
+            ):
+                raise ValueError
+        else:
+            reviewed_products.replace(resolved_sources[0], executed, identities[0])
+            if not _commit_reviewed_native_update(executed):
+                raise ValueError
+    except (Exception, SystemExit) as error:
+        create_recovery_holder: object | None = None
+        if _reviewed_native_create_needs_recovery(executed):
+            create_recovery_holder = executed
+        elif _reviewed_native_create_needs_recovery(error):
+            create_recovery_holder = error
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            run_state_ok = not (
+                type(error) is ReviewedIntentExecutionError
+                and error.code is ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED
+            )
+            if retained_identity is not None and type(executed) is ReviewedNativeExecutionResult:
+                try:
+                    reviewed_products.discard(executed, retained_identity)
+                except (Exception, SystemExit):
+                    run_state_ok = False
+            document_rollback_ok = _rollback_reviewed_document(
+                session.doc,  # type: ignore[attr-defined]
+                document_before,
+                body_tips_before,
+            )
+            create_recovery_ok = create_recovery_holder is None or (
+                _rollback_reviewed_native_create(create_recovery_holder)
+            )
+            if not run_state_ok or not document_rollback_ok or not create_recovery_ok:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
+            raise _operation_failure() from None
+        native_rollback_ok = not (
+            type(error) is ReviewedIntentExecutionError
+            and error.code is ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED
+        )
+        if (
+            type(executed) is ReviewedNativeExecutionResult
+            and executed.execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            and executed._update_recovery is not None
+        ):
+            native_rollback_ok = _rollback_reviewed_native_update(executed)
+        if (
+            not _rollback_reviewed_document(
+                session.doc,  # type: ignore[attr-defined]
+                document_before,
+                body_tips_before,
+            )
+            or not native_rollback_ok
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
+        raise _operation_failure() from None
+
+    return outcome
 
 
 def _same_parametric_entity_envelope(
@@ -1970,52 +3344,68 @@ def _parameter_value(observation: EntityObservation, name: str) -> int | float:
     return parameter.value
 
 
-def _managed_mutation(
-    session: object,
-    context: _InvocationContext,
+def _validated_managed_mutation_result(
     *,
-    project_id: str,
-    revision_id: str,
-    target: object,
-    leaf: Callable[..., object],
+    context: _InvocationContext,
+    identity: EntityIdentity,
+    old: EntityObservation,
+    before_by_id: dict[str, EntityObservation],
+    after: tuple[EntityObservation, ...],
+    descendant_ids: frozenset[str],
+    descendant_before: dict[str, EntityObservation],
+    recomputed_descendant_ids: frozenset[str],
+    rotation_pivot: tuple[int | float, int | float, int | float] | None,
+    parameter: str | None,
+    value: object,
+    position: object,
     leaf_kwargs: dict[str, object],
-    parameter: str | None = None,
-    value: object = None,
-    position: object = None,
 ) -> dict[str, object]:
-    before = _entity_observations(session)
-    before_by_id = _observation_map(before)
-    obj, identity = _resolve_entity_target(
-        session,
-        target,
-        project_id=project_id,
-        revision_id=revision_id,
-    )
-    old = before_by_id.get(identity.object_id)
-    if old is None:
-        raise _operation_failure()
-    rotation_pivot: tuple[int | float, int | float, int | float] | None = None
-    if context.operation == "rotate_part":
-        try:
-            rotation_pivot = _bound_box_center(obj.Shape)
-        except _ObservationFailure:
-            raise _operation_failure() from None
-    set_result = getattr(session, "set_result_object", None)
-    if not callable(set_result):
-        raise _operation_failure()
-    set_result(obj)
-    leaf(session, name=obj.Name, **leaf_kwargs)
+    """Validate one mutation and every authenticated native Boolean descendant."""
 
-    after = _entity_observations(session)
     after_by_id = _observation_map(after)
     new = after_by_id.get(identity.object_id)
-    if new is None:
+    if new is None or set(before_by_id) != set(after_by_id):
         raise _operation_failure()
-    comparisons = _require_non_target_preservation(
-        before_by_id,
-        after_by_id,
-        target=identity.object_id,
-    )
+    comparisons: list[PreservationObservation] = []
+    for object_id in sorted(before_by_id):
+        if object_id == identity.object_id:
+            continue
+        if object_id in descendant_ids:
+            descendant = after_by_id[object_id]
+            previous = descendant_before[object_id]
+            if (
+                object_id not in recomputed_descendant_ids
+                or descendant.valid_shape is not True
+                or descendant.solid_count != 1
+                or descendant.volume_mm3 is None
+                or descendant.volume_mm3 <= 0
+                or descendant.area_mm2 is None
+                or descendant.area_mm2 <= 0
+                or descendant.bbox_mm is None
+                or descendant.center_of_mass_mm is None
+                or previous.volume_mm3 is None
+                or previous.area_mm2 is None
+                or previous.bbox_mm is None
+                or previous.center_of_mass_mm is None
+            ):
+                raise _operation_failure()
+            comparisons.append(
+                _require_preserved(
+                    before_by_id[object_id],
+                    descendant,
+                    target=object_id,
+                    preserve=("placement", "parameters"),
+                )
+            )
+        else:
+            comparisons.append(
+                _require_preserved(
+                    before_by_id[object_id],
+                    after_by_id[object_id],
+                    target=object_id,
+                )
+            )
+
     parameter_names = {item.name for item in old.parameters}
     fixed: set[str]
     if context.operation == "modify_parameter":
@@ -2119,6 +3509,147 @@ def _managed_mutation(
         "after": new.to_mapping(),
         "preservation": [item.to_mapping() for item in comparisons],
     }
+
+
+def _managed_mutation(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    leaf: Callable[..., object],
+    leaf_kwargs: dict[str, object],
+    parameter: str | None = None,
+    value: object = None,
+    position: object = None,
+) -> dict[str, object]:
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    obj, identity = _resolve_entity_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    old = before_by_id.get(identity.object_id)
+    if old is None:
+        raise _operation_failure()
+    try:
+        by_name, dependencies, _consumed = _native_dependency_graph(_identified_pairs(session))
+        target_name = obj.Name
+        if target_name not in by_name or by_name[target_name] != (obj, identity):
+            raise ValueError
+        descendant_names = _native_boolean_descendants(
+            dependencies,
+            target_name=target_name,
+        )
+        descendant_ids = frozenset(by_name[name][1].object_id for name in descendant_names)
+        descendant_before = {
+            by_name[name][1].object_id: before_by_id[by_name[name][1].object_id]
+            for name in descendant_names
+        }
+    except Exception:
+        raise _operation_failure() from None
+    rotation_pivot: tuple[int | float, int | float, int | float] | None = None
+    if context.operation == "rotate_part":
+        try:
+            rotation_pivot = _bound_box_center(obj.Shape)
+        except _ObservationFailure:
+            raise _operation_failure() from None
+    set_result = getattr(session, "set_result_object", None)
+    if not callable(set_result):
+        raise _operation_failure()
+    owner_of = getattr(session, "owner_of", None)
+    if not callable(owner_of):
+        raise _operation_failure()
+    try:
+        owner = owner_of(target_name)
+        result_obj = by_name[descendant_names[-1]][0] if descendant_names else obj
+    except Exception:
+        raise _operation_failure() from None
+    transaction = getattr(session, "_transaction", None)
+    use_outer_transaction = bool(descendant_names)
+    if use_outer_transaction and not callable(transaction):
+        raise _operation_failure()
+    try:
+        if use_outer_transaction:
+            with transaction(
+                f"VibeCAD {context.operation}",
+                part=owner,
+                claim_new_objects=False,
+            ):
+                set_result(result_obj, part=owner)
+                with _DocumentRecomputeObserver(session.doc) as receipt:  # type: ignore[attr-defined]
+                    if context.operation == "modify_parameter":
+                        _modify_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            parameter=leaf_kwargs["parameter"],
+                            value=leaf_kwargs["value"],
+                            result_name=result_obj.Name,
+                        )
+                    elif context.operation == "move_part":
+                        _move_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            position=leaf_kwargs["position"],
+                            result_name=result_obj.Name,
+                        )
+                    elif context.operation == "rotate_part":
+                        _rotate_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            axis=leaf_kwargs["axis"],
+                            angle=leaf_kwargs["angle"],
+                            result_name=result_obj.Name,
+                        )
+                    else:
+                        raise ValueError
+                recomputed_descendant_ids = _require_recomputed_boolean_descendants(
+                    by_name,
+                    descendant_names,
+                    frozenset(receipt.object_ids),
+                    obj,
+                )
+                after = _entity_observations(session)
+                result = _validated_managed_mutation_result(
+                    context=context,
+                    identity=identity,
+                    old=old,
+                    before_by_id=before_by_id,
+                    after=after,
+                    descendant_ids=descendant_ids,
+                    descendant_before=descendant_before,
+                    recomputed_descendant_ids=recomputed_descendant_ids,
+                    rotation_pivot=rotation_pivot,
+                    parameter=parameter,
+                    value=value,
+                    position=position,
+                    leaf_kwargs=leaf_kwargs,
+                )
+        else:
+            set_result(result_obj, part=owner)
+            leaf(session, name=obj.Name, **leaf_kwargs)
+            after = _entity_observations(session)
+            result = _validated_managed_mutation_result(
+                context=context,
+                identity=identity,
+                old=old,
+                before_by_id=before_by_id,
+                after=after,
+                descendant_ids=descendant_ids,
+                descendant_before=descendant_before,
+                recomputed_descendant_ids=frozenset(),
+                rotation_pivot=rotation_pivot,
+                parameter=parameter,
+                value=value,
+                position=position,
+                leaf_kwargs=leaf_kwargs,
+            )
+    except Exception:
+        raise _operation_failure() from None
+    return result
 
 
 def _managed_inspect(
@@ -2829,7 +4360,7 @@ class InProcessCadExecutor(CadExecutionPort):
 
         if not isinstance(path, Path) or path.suffix.lower() != ".fcstd":
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
-        session = self.load_fcstd(path)
+        session = self._load_fcstd(path, require_identities=False)
         normalized: tuple[EntityObservation, ...] | None = None
         failed: ExecutorError | None = None
         try:
@@ -2845,8 +4376,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         assert normalized is not None
@@ -2870,8 +4400,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(probe)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         if not _same_import_observations(reloaded, normalized):
@@ -2943,11 +4472,15 @@ class InProcessCadExecutor(CadExecutionPort):
                     if unsupported_envelope:
                         code = ExecutorErrorCode.INVALID_INPUT
                 cad_failure = _fixed_error(code)
+            except _SessionLifecycleError:
+                raise
             except BaseException:
                 cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
         finally:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise
             except BaseException:
                 cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
         if cad_failure is not None:
@@ -3011,8 +4544,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
 
@@ -3091,8 +4623,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         try:
@@ -3117,9 +4648,13 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             suffix = revision_id.removeprefix("revision_")
             session.open_document(f"VibeCADCandidate_{suffix}")
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
             except Exception:
                 pass
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -3127,6 +4662,11 @@ class InProcessCadExecutor(CadExecutionPort):
 
     def load_fcstd(self, path: Path) -> object:
         """Load one validated FCStd into a newly owned Session."""
+
+        return self._load_fcstd(path, require_identities=True)
+
+    def _load_fcstd(self, path: Path, *, require_identities: bool) -> object:
+        """Load one FCStd, optionally before import identity normalization."""
 
         try:
             _read_artifact(path, "fcstd")
@@ -3138,9 +4678,15 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
             session.load_document(path)
+            if require_identities:
+                _entity_observations(session)
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
             except Exception:
                 pass
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -3155,6 +4701,7 @@ class InProcessCadExecutor(CadExecutionPort):
             document = session.doc
             document.recompute()
             _stabilize_parametric_session(session)
+            _entity_observations(session)
             session.persist_state()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -3190,6 +4737,8 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
             session.close_document()
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
 
@@ -3229,6 +4778,8 @@ class InProcessCadExecutor(CadExecutionPort):
         *,
         program: ValidatedProgram,
         candidate: ActiveCandidate,
+        artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+        artifact_run_token: object | None = None,
     ):
         """Build the private command cursor used by in-process and Worker CAD."""
 
@@ -3241,6 +4792,8 @@ class InProcessCadExecutor(CadExecutionPort):
         ) = self._prepare_program_invocation(
             program=program,
             candidate=candidate,
+            artifact_resolver=artifact_resolver,
+            artifact_run_token=artifact_run_token,
         )
         try:
             return _prepare_validated_program_execution(
@@ -3260,6 +4813,8 @@ class InProcessCadExecutor(CadExecutionPort):
         *,
         program: ValidatedProgram,
         candidate: ActiveCandidate,
+        artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+        artifact_run_token: object | None = None,
     ) -> tuple[
         ValidatedProgram,
         dict[str, Callable[..., object]],
@@ -3272,6 +4827,11 @@ class InProcessCadExecutor(CadExecutionPort):
         if type(candidate) is not ActiveCandidate:
             raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
         if type(program) is not ValidatedProgram:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        if (artifact_resolver is None) != (artifact_run_token is None) or (
+            artifact_resolver is not None
+            and type(artifact_resolver) is not _ReviewedArtifactRunResolver
+        ):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
             program.require_authentic()
@@ -3292,13 +4852,20 @@ class InProcessCadExecutor(CadExecutionPort):
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
             fixed_leaves = (
                 _add_box,
+                _add_cone,
                 _add_cylinder,
+                _add_sphere,
+                _add_torus,
+                _boolean_common_uncommitted,
+                _boolean_cut_uncommitted,
+                _boolean_fuse_uncommitted,
                 _modify_part,
                 _move_part,
                 _rotate_part,
                 _set_absolute_component_placement,
                 _compile_parametric_design,
                 _modify_parametric_parameter,
+                _execute_reviewed_intent_native,
             )
             if not all(callable(item) for item in fixed_leaves):
                 raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
@@ -3316,6 +4883,7 @@ class InProcessCadExecutor(CadExecutionPort):
             project_id = candidate.project_id
             revision_id = candidate.base_head.revision_id
             candidate_revision_id = candidate.binding.revision_id
+            reviewed_products = _ReviewedProductRunState()
             handlers = {
                 "create_box": _queued_handler(
                     contexts.get("create_box", deque()),
@@ -3335,6 +4903,72 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         leaf=_add_cylinder,
                         expected_type="Part::Cylinder",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_cone": _queued_handler(
+                    contexts.get("create_cone", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_cone,
+                        expected_type="Part::Cone",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_sphere": _queued_handler(
+                    contexts.get("create_sphere", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_sphere,
+                        expected_type="Part::Sphere",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_torus": _queued_handler(
+                    contexts.get("create_torus", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_torus,
+                        expected_type="Part::Torus",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_cut": _queued_handler(
+                    contexts.get("boolean_cut", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_cut_uncommitted,
+                        expected_type="Part::Cut",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_fuse": _queued_handler(
+                    contexts.get("boolean_fuse", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_fuse_uncommitted,
+                        expected_type="Part::Fuse",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_common": _queued_handler(
+                    contexts.get("boolean_common", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_common_uncommitted,
+                        expected_type="Part::Common",
                         project_id=project_id,
                         revision_id=revision_id,
                     ),
@@ -3408,6 +5042,17 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         project_id=project_id,
                         revision_id=revision_id,
+                    ),
+                ),
+                "apply_reviewed_intent": _queued_handler(
+                    contexts.get("apply_reviewed_intent", deque()),
+                    partial(
+                        _managed_apply_reviewed_intent,
+                        session,
+                        execution_leaf=_execute_reviewed_intent_native,
+                        reviewed_products=reviewed_products,
+                        artifact_resolver=artifact_resolver,
+                        artifact_run_token=artifact_run_token,
                     ),
                 ),
             }

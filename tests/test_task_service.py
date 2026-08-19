@@ -3859,6 +3859,7 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
     app._layout = None  # noqa: SLF001
     app._lease_manager = rig.leases  # noqa: SLF001
     app._revision_store = rig.revisions  # noqa: SLF001
+    app._reviewed_inputs = None  # noqa: SLF001
     app._runtime_factory = runtime_factory  # noqa: SLF001
     app._runtimes = OrderedDict()  # noqa: SLF001
     app._task_store = rig.tasks  # noqa: SLF001

@@ -11,6 +11,7 @@ from PIL import Image
 from tests.test_visual_review_artifacts import _artifact
 from tests.test_visual_service import _budget, _cloud_profiles, _CloudFeatureTransport
 from vibecad.application.agent import AgentApplication
+from vibecad.application.visual_admission import ApplicationVisualAdmissionGate
 from vibecad.application.visual_review import ApplicationVisualReviewPort
 from vibecad.visual.cloud_provider import CloudVisualProvider
 from vibecad.visual.contracts import (
@@ -98,11 +99,17 @@ def test_descriptor_ingress_seals_without_starting_a_visual_provider(tmp_path: P
     assert provider_calls == 0
 
 
-def test_visual_service_composes_application_owned_review_cleanup(tmp_path: Path) -> None:
+def test_visual_service_composes_application_owned_admission_and_review_ports(
+    tmp_path: Path,
+) -> None:
     application = AgentApplication.open(data_root=_data_root(tmp_path))
     try:
         _api, service = application._visual_bundle_for_request()  # noqa: SLF001
 
+        assert type(application._visual_admission) is ApplicationVisualAdmissionGate  # noqa: SLF001
+        assert service._admission is application._visual_admission  # noqa: SLF001
+        assert application._visual_admission.reconstruction_store is application._visual_drafts  # noqa: SLF001
+        assert application._visual_admission.visual_input_store is application._visual_inputs  # noqa: SLF001
         assert type(application._visual_review_port) is ApplicationVisualReviewPort  # noqa: SLF001
         assert service._review_cleanup is application._visual_review_port  # noqa: SLF001
         assert application._visual_review_port.store is application._visual_reviews  # noqa: SLF001

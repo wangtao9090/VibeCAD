@@ -12,6 +12,7 @@ from types import MappingProxyType
 import pytest
 
 import vibecad.application.task_api as task_api_module
+from tests.test_reviewed_intent_program import reviewed_box_program
 from vibecad.application.task_api import (
     TaskApi,
     TaskApiErrorCode,
@@ -25,7 +26,14 @@ from vibecad.execution.revisions import (
     RevisionArtifactRef,
     RevisionRef,
 )
-from vibecad.workflow.contracts import AcceptanceSpec, ErrorCategory, ModelProgram, StepError
+from vibecad.workflow.contracts import (
+    AcceptanceSpec,
+    ErrorCategory,
+    ModelCommand,
+    ModelProgram,
+    StepError,
+    ValueSource,
+)
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.revert import build_revert_binding
 from vibecad.workflow.state import (
@@ -1160,6 +1168,48 @@ def test_valid_program_json_is_decoded_once_and_submitted_as_a_model_program():
     assert type(kwargs["program"]) is ModelProgram
 
 
+def test_reviewed_box_program_enters_through_submit_model_program() -> None:
+    reviewed = reviewed_box_program()
+    program = ModelProgram(
+        task_id=TASK_ID,
+        base_revision=BASE_REVISION,
+        operations=(
+            ModelCommand(
+                id="reviewed_box",
+                op="apply_reviewed_intent",
+                target={},
+                args={"intent": reviewed.to_mapping()},
+                depends_on=(),
+                preserve=(),
+                source=ValueSource.MODEL,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-box", criteria=()),
+    )
+    port = _FakePort(_stored(TaskStatus.NEEDS_INPUT, generation=8))
+
+    response = TaskApi(port=port).submit_model_program(
+        {
+            "schema_version": 1,
+            "task_id": TASK_ID,
+            "expected_generation": 7,
+            "program_json": json.dumps(
+                program.to_mapping(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        }
+    )
+
+    _assert_success(response)
+    assert len(port.calls) == 1
+    name, kwargs = port.calls[0]
+    assert name == "submit_model_program"
+    assert kwargs["program"] == program
+
+
 def test_program_task_id_mismatch_is_rejected_before_the_port():
     port = _FakePort(_stored())
     request = {
@@ -2128,10 +2178,17 @@ def test_capabilities_match_the_exact_sorted_public_projection():
     assert result["registry_schema_version"] == 1
     operations = result["operations"]
     assert [item["operation"] for item in operations] == [
+        "apply_reviewed_intent",
+        "boolean_common",
+        "boolean_cut",
+        "boolean_fuse",
         "create_box",
         "create_component",
+        "create_cone",
         "create_cylinder",
         "create_parametric_design",
+        "create_sphere",
+        "create_torus",
         "inspect_model",
         "modify_parameter",
         "modify_parametric_parameter",
@@ -2179,14 +2236,16 @@ def test_capabilities_match_the_exact_sorted_public_projection():
             assert all(set(item) == field_keys for item in operation[group])
         assert all(set(item) == slot_keys for item in operation["result_slots"])
         assert operation["preservation_fields"] == sorted(operation["preservation_fields"])
-    create_box = operations[0]
+    create_box = next(item for item in operations if item["operation"] == "create_box")
     assert [item["name"] for item in create_box["argument_fields"]] == [
         "height_mm",
         "length_mm",
         "position_mm",
         "width_mm",
     ]
-    create_parametric_design = operations[3]
+    create_parametric_design = next(
+        item for item in operations if item["operation"] == "create_parametric_design"
+    )
     assert create_parametric_design["target_fields"] == []
     assert create_parametric_design["argument_fields"] == [
         {

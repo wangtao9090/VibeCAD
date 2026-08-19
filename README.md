@@ -23,7 +23,7 @@ execution, deterministic verification, recovery, and delivery.
   FCStd/STEP artifacts, recovery, and replay-safe request semantics.
 - Editable parametric designs with bounded derived-parameter linkage and semantic Fillet/Chamfer
   treatments, including one linear start-to-end variable-radius fillet on an oriented edge.
-- A host-neutral 38-tool MCP and Skill contract for Codex, Claude, WorkBuddy, and other compatible
+- A host-neutral 39-tool MCP and Skill contract for Codex, Claude, WorkBuddy, and other compatible
   agents; each real host profile is certified separately against the same package smoke.
 - Additional WorkBuddy 5.3.5 compatibility coverage for strict-error recovery, durable restart,
   exact Release approval, and native MCP Blob reads for PDF/ZIP delivery.
@@ -128,7 +128,7 @@ a claim of arbitrary reverse engineering.
 
 ## Current Public Capabilities (development branch)
 
-The MCPB manifest and runtime project the same frozen contract, which currently exposes 38
+The MCPB manifest and runtime project the same frozen contract, which currently exposes 39
 tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
 A host should call `get_capabilities` first instead of inferring capabilities from the number of
 tools or from general model knowledge.
@@ -136,7 +136,7 @@ tools or from general model knowledge.
 | Category | Tools |
 |---|---|
 | Service and runtime | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
-| Capability discovery | `get_capabilities` |
+| Capability discovery | `get_capabilities`, `query_freecad_runtime_capabilities` |
 | Projects and versions | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | Tasks and drafts | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | Delivery | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
@@ -151,6 +151,12 @@ wire contains no path, filename, base64 payload, or image bytes. This optional s
 is not required when the calling multimodal host already sees the images. Direct WorkBuddy
 attachment ingress into VibeCAD's sealed store remains unverified, and the MCP surface accepts no
 image path, base64 payload, or visual Resource URI.
+
+`get_capabilities` remains the stable executable Agent-operation contract. The read-only
+`query_freecad_runtime_capabilities` tool pages through the content-bound native TypeId inventory
+of the active managed FreeCAD build; a `discovered` entry is inventory and never grants execution
+authority. Its opaque cursor is bound to the runtime, filters, and page size and fails closed after
+any drift.
 
 A successful `export_task_artifacts` call returns a canonical result and two typed
 `ResourceLink` values:
@@ -268,7 +274,7 @@ canonical multi-turn task, but remains a provisional default: keep runtime
 maintenance tools outside an autonomous CAD task's allowed-tool set and require
 explicit user confirmation for `uninstall_runtime`.
 
-For the current 38-tool visual development profile, WorkBuddy 5.3.5 should
+For the current 39-tool visual development profile, WorkBuddy 5.3.5 should
 submit a handwritten ModelProgram through the bounded project-local command
 `vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`; the
 canonical Skill defines the exact four-field request. This preserves actionable
@@ -307,7 +313,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 ## What “Host-ready” Means Precisely
 
 The 0.9.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
-Release ResourceLinks, managed FreeCAD E2E, and exact 38-tool discovery independently of any host.
+Release ResourceLinks, managed FreeCAD E2E, and exact 39-tool discovery independently of any host.
 Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
 never certifies the others. WorkBuddy additionally carries the compatibility coverage described
 above, and no result claims that every model available in a host is certified.

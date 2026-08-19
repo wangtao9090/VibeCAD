@@ -1,0 +1,143 @@
+name: Windows qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Highest Windows qualification phase to execute
+        required: true
+        default: contracts
+        type: choice
+        options:
+          - contracts
+          - managed-runtime
+          - product
+          - attestation
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    # Pin the image. windows-latest is intentionally forbidden because its
+    # underlying image changes independently of the qualification receipt.
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Install the frozen development environment
+        run: uv sync --frozen
+      - name: Windows contract and compatibility gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\windows-evidence" | Out-Null
+          git rev-parse HEAD | Out-File -Encoding ascii "$env:RUNNER_TEMP\windows-evidence\commit.txt"
+          Get-ComputerInfo | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 "$env:RUNNER_TEMP\windows-evidence\host.json"
+          uv run --frozen ruff check .
+          uv run --frozen pytest -q -m "not slow" `
+            tests/test_platform.py `
+            tests/test_paths.py `
+            tests/test_micromamba.py `
+            tests/test_freecad_env.py `
+            tests/test_status.py `
+            tests/test_installer.py `
+            tests/test_workflow_lease.py `
+            tests/test_supervisor.py `
+            tests/test_freecad_worker.py `
+            --junitxml "$env:RUNNER_TEMP\windows-evidence\contracts.xml"
+      - name: Upload Windows contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-contract-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-evidence
+          if-no-files-found: error
+
+  managed:
+    if: inputs.phase != 'contracts'
+    needs: contracts
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      VIBECAD_RUN_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Bind an isolated Windows runtime and evidence root
+        shell: pwsh
+        run: |
+          "VIBECAD_HOME=$env:RUNNER_TEMP\vibecad-windows-runtime" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "WINDOWS_EVIDENCE=$env:RUNNER_TEMP\windows-evidence" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\windows-evidence" | Out-Null
+      - run: uv sync --frozen
+      - name: Install the current managed FreeCAD runtime
+        env:
+          VIBECAD_PIP_SPEC: ${{ github.workspace }}
+        run: >-
+          uv run --frozen python -c
+          "from vibecad.runtime.installer import RuntimeInstaller;
+          RuntimeInstaller().install()"
+      - name: Bind and fingerprint the managed runtime
+        shell: pwsh
+        run: |
+          $managedPython = uv run --frozen python -c "from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())"
+          $managedPrefix = uv run --frozen python -c "from vibecad.runtime.paths import env_prefix; print(env_prefix().resolve())"
+          "VIBECAD_MANAGED_FREECAD_PYTHON=$managedPython" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_FREECAD_ENV=$managedPrefix" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          & $managedPython -c "import json,platform,sys; import FreeCAD; print(json.dumps({'platform':'windows.x86_64','python':sys.version,'windows':platform.version(),'freecad':FreeCAD.Version()},sort_keys=True))" |
+            Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\runtime.json"
+      - name: Managed runtime and direct Worker gate
+        run: >-
+          uv run --frozen pytest -m slow -v -s
+          tests/test_freecad_worker.py::test_real_managed_worker_round_trips_parametric_design
+          --junitxml "$env:WINDOWS_EVIDENCE\managed-runtime.xml"
+      - name: Reviewed product gate
+        if: inputs.phase == 'product' || inputs.phase == 'attestation'
+        shell: pwsh
+        run: |
+          uv run --frozen pytest -m slow -v -s `
+            tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate `
+            tests/test_task_kernel_integration.py::test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref `
+            tests/test_program_executor.py::test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_duplicate `
+            --junitxml "$env:WINDOWS_EVIDENCE\product.xml"
+      - name: Windows reviewed-attestation check
+        if: inputs.phase == 'attestation'
+        run: >-
+          uv run --frozen python -I
+          .github/scripts/generate_freecad_reviewed_release_attestation.py --check
+      - name: Record exact source identity
+        if: always()
+        shell: pwsh
+        run: git rev-parse HEAD | Out-File -Encoding ascii "$env:WINDOWS_EVIDENCE\commit.txt"
+      - name: Remove the isolated managed runtime
+        if: always()
+        shell: pwsh
+        run: |
+          uv run --frozen python -c "from vibecad.runtime.uninstall import uninstall_now; print(uninstall_now())"
+          $uninstallExit = $LASTEXITCODE
+          $expected = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP "vibecad-windows-runtime"))
+          $actual = [IO.Path]::GetFullPath($env:VIBECAD_HOME)
+          if ($actual -ne $expected) {
+            throw "refusing to clean an unexpected VIBECAD_HOME"
+          }
+          if (Test-Path -LiteralPath $actual) {
+            Remove-Item -LiteralPath $actual -Recurse -Force
+          }
+          if (Test-Path -LiteralPath $actual) {
+            throw "isolated VIBECAD_HOME remains after Windows qualification cleanup"
+          }
+          if ($uninstallExit -ne 0) {
+            throw "managed runtime uninstaller failed before exact-root cleanup"
+          }
+      - name: Upload Windows managed evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-managed-evidence-${{ github.sha }}-${{ inputs.phase }}
+          path: ${{ runner.temp }}/windows-evidence
+          if-no-files-found: error

@@ -128,6 +128,150 @@ def add_cylinder(
     return result
 
 
+def add_cone(
+    session: Session,
+    radius1: float,
+    height: float,
+    radius2: float = 0.0,
+    position=(0.0, 0.0, 0.0),
+    axis="z",
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one full circular cone or frustum with its base at ``position``."""
+
+    for field, value in (("radius1", radius1), ("radius2", radius2), ("height", height)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{field} 必须是有限数字（得到 {value!r}）")
+    if radius1 <= 0:
+        raise ValueError(f"radius1 必须 > 0（得到 {radius1}）")
+    if radius2 < 0:
+        raise ValueError(f"radius2 必须 >= 0（得到 {radius2}）")
+    if height <= 0:
+        raise ValueError(f"height 必须 > 0（得到 {height}）")
+    _validate_position(position)
+    if axis not in _AXIS:
+        raise ValueError(f"axis 必须是 x/y/z（得到 {axis!r}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_cone", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Cone", "Cone")
+            obj.Radius1, obj.Radius2, obj.Height, obj.Angle = radius1, radius2, height, 360.0
+            rot_axis, angle = _AXIS[axis]
+            obj.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(*position), FreeCAD.Rotation(FreeCAD.Vector(*rot_axis), angle)
+            )
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                "axis": axis,
+                **_stale_hint(session),
+            }
+    return result
+
+
+def add_sphere(
+    session: Session,
+    radius: float,
+    position=(0.0, 0.0, 0.0),
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one complete sphere centered at ``position``."""
+
+    if (
+        not isinstance(radius, (int, float))
+        or isinstance(radius, bool)
+        or not math.isfinite(radius)
+        or radius <= 0
+    ):
+        raise ValueError(f"radius 必须是 > 0 的有限数字（得到 {radius!r}）")
+    _validate_position(position)
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_sphere", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Sphere", "Sphere")
+            obj.Radius, obj.Angle1, obj.Angle2, obj.Angle3 = radius, -90.0, 90.0, 360.0
+            obj.Placement = FreeCAD.Placement(FreeCAD.Vector(*position), FreeCAD.Rotation())
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                **_stale_hint(session),
+            }
+    return result
+
+
+def add_torus(
+    session: Session,
+    radius1: float,
+    radius2: float,
+    position=(0.0, 0.0, 0.0),
+    axis="z",
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one non-self-intersecting full torus centered at ``position``."""
+
+    for field, value in (("radius1", radius1), ("radius2", radius2)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{field} 必须是 > 0 的有限数字（得到 {value!r}）")
+    if radius1 <= radius2:
+        raise ValueError("radius1 必须大于 radius2，避免自相交圆环体")
+    _validate_position(position)
+    if axis not in _AXIS:
+        raise ValueError(f"axis 必须是 x/y/z（得到 {axis!r}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_torus", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Torus", "Torus")
+            obj.Radius1, obj.Radius2 = radius1, radius2
+            obj.Angle1, obj.Angle2, obj.Angle3 = -180.0, 180.0, 360.0
+            rot_axis, angle = _AXIS[axis]
+            obj.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(*position), FreeCAD.Rotation(FreeCAD.Vector(*rot_axis), angle)
+            )
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                "axis": axis,
+                **_stale_hint(session),
+            }
+    return result
+
+
 def _validate_boolean_names(base_name: str, tool_name: str) -> None:
     if not base_name or not isinstance(base_name, str):
         raise ValueError("base_name 必须是非空字符串")
@@ -167,34 +311,44 @@ def _boolean_owner(session: Session, base_name: str, tool_name: str) -> str | No
 def boolean_cut(session: Session, base_name: str, tool_name: str) -> dict[str, Any]:
     _validate_boolean_names(base_name, tool_name)
     owner = _boolean_owner(session, base_name, tool_name)
+    with session._transaction("boolean_cut", part=owner):
+        return _boolean_cut_uncommitted(session, base_name, tool_name)
+
+
+def _boolean_cut_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Create a checked cut inside an executor-owned surrounding transaction."""
+
+    _validate_boolean_names(base_name, tool_name)
+    owner = _boolean_owner(session, base_name, tool_name)
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
-    with session._transaction("boolean_cut", part=owner):
-        with silence_fd1():
-            base = _solid_object(session, base_name)
-            tool = _solid_object(session, tool_name)
-            session.doc.recompute()  # 防守：确保 Base/Tool 已算
-            base_vol = base.Shape.Volume
-            cut = session.doc.addObject("Part::Cut", "Cut")
-            cut.Base = base
-            cut.Tool = tool
-            session.doc.recompute()
-            session.assert_valid_solid(cut.Shape)
-            assert_solid_integrity(session, cut.Shape, "boolean_cut", part=owner)
-            if cut.Shape.Volume >= base_vol - 1e-6:
-                raise RuntimeError(
-                    f"几何断言失败：布尔差集未移除任何材料（base={base_vol:.3f}, "
-                    f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
-                    f"未与 base '{base_name}' 相交"
-                )
-            session.set_result_object(cut, part=owner)
-            result = {
-                "ok": True,
-                "name": cut.Name,
-                "volume": cut.Shape.Volume,
-                **_stale_hint(session),
-            }
-    return result
+    with silence_fd1():
+        base = _solid_object(session, base_name)
+        tool = _solid_object(session, tool_name)
+        session.doc.recompute()
+        base_vol = float(base.Shape.Volume)
+        cut = session.doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = base, tool
+        session.doc.recompute()
+        session.assert_valid_solid(cut.Shape)
+        assert_solid_integrity(session, cut.Shape, "boolean_cut", part=owner)
+        if float(cut.Shape.Volume) >= base_vol - 1e-6:
+            raise RuntimeError(
+                f"几何断言失败：布尔差集未移除任何材料（base={base_vol:.3f}, "
+                f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
+                f"未与 base '{base_name}' 相交"
+            )
+        session.set_result_object(cut, part=owner)
+        return {
+            "ok": True,
+            "name": cut.Name,
+            "volume": float(cut.Shape.Volume),
+            **_stale_hint(session),
+        }
 
 
 def _boolean_combine(
@@ -206,52 +360,96 @@ def _boolean_combine(
 ) -> dict[str, Any]:
     _validate_boolean_names(base_name, tool_name)
     owner = _boolean_owner(session, base_name, tool_name)
+    with session._transaction(f"boolean_{operation}", part=owner):
+        return _boolean_combine_uncommitted(
+            session,
+            base_name,
+            tool_name,
+            operation=operation,
+        )
+
+
+def _boolean_combine_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    """Create a checked fuse/common inside an executor-owned transaction."""
+
+    _validate_boolean_names(base_name, tool_name)
+    owner = _boolean_owner(session, base_name, tool_name)
     if operation not in ("fuse", "common"):
         raise ValueError(f"未知布尔运算 {operation!r}")
     type_name = "Part::Fuse" if operation == "fuse" else "Part::Common"
     label = "Fuse" if operation == "fuse" else "Common"
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
-    with session._transaction(f"boolean_{operation}", part=owner):
-        with silence_fd1():
-            base = _solid_object(session, base_name)
-            tool = _solid_object(session, tool_name)
-            session.doc.recompute()
-            base_vol, tool_vol = float(base.Shape.Volume), float(tool.Shape.Volume)
-            obj = session.doc.addObject(type_name, label)
-            obj.Base, obj.Tool = base, tool
-            session.doc.recompute()
-            session.assert_valid_solid(obj.Shape)
-            assert_solid_integrity(session, obj.Shape, f"boolean_{operation}", part=owner)
-            volume = float(obj.Shape.Volume)
-            tol = max(base_vol, tool_vol, 1.0) * 1e-7
-            if operation == "fuse":
-                if volume < max(base_vol, tool_vol) - tol:
-                    raise RuntimeError(
-                        "几何断言失败：并集体积小于较大输入体积，运算可能丢失材料"
-                        f"（{volume:.3f} < {max(base_vol, tool_vol):.3f}）"
-                    )
-                if volume > base_vol + tool_vol + tol:
-                    raise RuntimeError(
-                        "几何断言失败：并集体积大于两个输入体积之和"
-                        f"（{volume:.3f} > {base_vol + tool_vol:.3f}）"
-                    )
-            elif volume > min(base_vol, tool_vol) + tol:
+    with silence_fd1():
+        base = _solid_object(session, base_name)
+        tool = _solid_object(session, tool_name)
+        session.doc.recompute()
+        base_vol, tool_vol = float(base.Shape.Volume), float(tool.Shape.Volume)
+        obj = session.doc.addObject(type_name, label)
+        obj.Base, obj.Tool = base, tool
+        session.doc.recompute()
+        session.assert_valid_solid(obj.Shape)
+        assert_solid_integrity(session, obj.Shape, f"boolean_{operation}", part=owner)
+        volume = float(obj.Shape.Volume)
+        tol = max(base_vol, tool_vol, 1.0) * 1e-7
+        if operation == "fuse":
+            if volume < max(base_vol, tool_vol) - tol:
                 raise RuntimeError(
-                    "几何断言失败：交集体积大于较小输入体积"
-                    f"（{volume:.3f} > {min(base_vol, tool_vol):.3f}）"
+                    "几何断言失败：并集体积小于较大输入体积，运算可能丢失材料"
+                    f"（{volume:.3f} < {max(base_vol, tool_vol):.3f}）"
                 )
-            session.set_result_object(obj, part=owner)
-            result = {
-                "ok": True,
-                "name": obj.Name,
-                "operation": operation,
-                "base": base_name,
-                "tool": tool_name,
-                "volume": volume,
-                **_stale_hint(session),
-            }
-    return result
+            if volume > base_vol + tool_vol + tol:
+                raise RuntimeError(
+                    "几何断言失败：并集体积大于两个输入体积之和"
+                    f"（{volume:.3f} > {base_vol + tool_vol:.3f}）"
+                )
+        elif not 0 < volume <= min(base_vol, tool_vol) + tol:
+            raise RuntimeError(
+                "几何断言失败：交集体积为空或大于较小输入体积"
+                f"（common={volume:.3f}, min={min(base_vol, tool_vol):.3f}）"
+            )
+        session.set_result_object(obj, part=owner)
+        return {
+            "ok": True,
+            "name": obj.Name,
+            "operation": operation,
+            "base": base_name,
+            "tool": tool_name,
+            "volume": volume,
+            **_stale_hint(session),
+        }
+
+
+def _boolean_fuse_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    return _boolean_combine_uncommitted(
+        session,
+        base_name,
+        tool_name,
+        operation="fuse",
+    )
+
+
+def _boolean_common_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    return _boolean_combine_uncommitted(
+        session,
+        base_name,
+        tool_name,
+        operation="common",
+    )
 
 
 def boolean_fuse(session: Session, base_name: str, tool_name: str) -> dict[str, Any]:

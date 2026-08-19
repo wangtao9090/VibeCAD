@@ -11,12 +11,19 @@ import re
 import secrets
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.visual.admission_inputs import (
+    MAX_VISUAL_ADMISSION_INPUT_BYTES,
+    VisualAdmissionInputBundle,
+    VisualAdmissionInputError,
+    decode_visual_admission_inputs,
+    encode_visual_admission_inputs,
+)
 from vibecad.visual.drafts import (
     MAX_RECONSTRUCTION_DRAFT_MUTATIONS,
     MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
@@ -32,6 +39,7 @@ from vibecad.visual.drafts import (
     validate_reconstruction_creation,
     validate_reconstruction_successor,
 )
+from vibecad.visual.reconstruction import ReconstructionStatus
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.lease import LeaseError, LeaseErrorCode, ResourceLease, ResourceLeaseManager
 
@@ -42,23 +50,27 @@ _MAX_JSON_DEPTH = 64
 _MAX_JSON_NODES = 8192
 _MAX_JSON_STRING_BYTES = 64 * 1024
 _MAX_PAYLOAD_BYTES = 768 * 1024
+_MAX_STORED_RECORD_BYTES = MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES + 8 * 1024
 _LEASE_WAIT_SECONDS = 3.0
 _LEASE_RETRY_SECONDS = 0.02
 
 _CATALOG_RESOURCE = "reconstruction-draft-store:catalog"
 _JOURNAL_CHECKSUM_DOMAIN = b"vibecad-reconstruction-draft-mutation-v1\0"
+_STORED_RECORD_CHECKSUM_DOMAIN = b"vibecad-reconstruction-draft-store-record-v2\0"
+_ADMISSION_ID_DOMAIN = b"vibecad-reconstruction-admission-inputs-v1\0"
 
 _RECONSTRUCTION_ID = re.compile(r"^reconstruction_[0-9a-f]{32}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _DECIMAL_ID = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+_ADMISSION_ID = re.compile(r"^admission_inputs_[0-9a-f]{32}$")
 _PAYLOAD_NAME = re.compile(
-    r"^(?:visual_observation|reconstruction_proposal|clarification_answer)_"
+    r"^(?:visual_observation|reconstruction_proposal|clarification_answer|admission_inputs)_"
     r"[0-9a-f]{32}\.json$"
 )
 _STAGE_NAME = re.compile(r"^\.stage_[0-9a-f]{32}_[0-9a-f]{32}$")
 _RECORD_TEMP_NAME = re.compile(r"^\.record\.[0-9a-f]{32}\.tmp$")
 _PAYLOAD_TEMP_NAME = re.compile(
-    r"^\.(?:visual_observation|reconstruction_proposal|clarification_answer)_"
+    r"^\.(?:visual_observation|reconstruction_proposal|clarification_answer|admission_inputs)_"
     r"[0-9a-f]{32}\.json\.[0-9a-f]{32}\.tmp$"
 )
 _JOURNAL_NAME = ".mutation.json"
@@ -138,6 +150,22 @@ def _canonical_json(value: object, *, maximum: int) -> bytes:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    if len(raw) > maximum:
+        _raise(ReconstructionDraftStoreErrorCode.RECORD_TOO_LARGE)
+    return raw
+
+
+def _canonical_ascii_json(value: object, *, maximum: int) -> bytes:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
     except (TypeError, ValueError, UnicodeError, RecursionError):
         _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
     if len(raw) > maximum:
@@ -476,6 +504,205 @@ def _rename_directory_noreplace(parent_fd: int, source: str, destination: str) -
 
 
 @dataclass(frozen=True, slots=True)
+class _AdmissionRef:
+    admission_id: str
+    reconstruction_id: str
+    admitted_generation: int
+    base_head_sha256: str
+    image_set_id: str
+    image_set_manifest_sha256: str
+    observation_digest: str
+    proposal_digest: str
+    bundle_digest: str
+    sha256: str
+    size_bytes: int
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != 1
+            or type(self.admission_id) is not str
+            or _ADMISSION_ID.fullmatch(self.admission_id) is None
+            or type(self.reconstruction_id) is not str
+            or _RECONSTRUCTION_ID.fullmatch(self.reconstruction_id) is None
+            or type(self.admitted_generation) is not int
+            or not 0 <= self.admitted_generation <= MAX_SAFE_JSON_INTEGER
+            or type(self.image_set_id) is not str
+            or not self.image_set_id.startswith("image_set_")
+            or any(
+                type(value) is not str or _DIGEST.fullmatch(value) is None
+                for value in (
+                    self.base_head_sha256,
+                    self.image_set_manifest_sha256,
+                    self.observation_digest,
+                    self.proposal_digest,
+                    self.bundle_digest,
+                    self.sha256,
+                )
+            )
+            or type(self.size_bytes) is not int
+            or not 0 < self.size_bytes <= MAX_VISUAL_ADMISSION_INPUT_BYTES
+        ):
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+        expected_id = (
+            "admission_inputs_"
+            + hashlib.sha256(
+                _ADMISSION_ID_DOMAIN
+                + self.reconstruction_id.encode("ascii")
+                + b"\0"
+                + str(self.admitted_generation).encode("ascii")
+                + b"\0"
+                + bytes.fromhex(self.bundle_digest)
+            ).hexdigest()[:32]
+        )
+        if not secrets.compare_digest(self.admission_id, expected_id):
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+
+    @property
+    def filename(self) -> str:
+        return self.admission_id + ".json"
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "admission_id": self.admission_id,
+            "admitted_generation": self.admitted_generation,
+            "base_head_sha256": self.base_head_sha256,
+            "bundle_digest": self.bundle_digest,
+            "image_set_id": self.image_set_id,
+            "image_set_manifest_sha256": self.image_set_manifest_sha256,
+            "observation_digest": self.observation_digest,
+            "proposal_digest": self.proposal_digest,
+            "reconstruction_id": self.reconstruction_id,
+            "schema_version": self.schema_version,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> _AdmissionRef:
+        expected = {
+            "admission_id",
+            "admitted_generation",
+            "base_head_sha256",
+            "bundle_digest",
+            "image_set_id",
+            "image_set_manifest_sha256",
+            "observation_digest",
+            "proposal_digest",
+            "reconstruction_id",
+            "schema_version",
+            "sha256",
+            "size_bytes",
+        }
+        if type(value) is not dict or set(value) != expected:
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+        try:
+            return cls(**value)
+        except TypeError:
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredDraftRecord:
+    draft: ReconstructionDraft
+    admission_ref: _AdmissionRef | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.draft) is not ReconstructionDraft:
+            raise TypeError("draft must be an exact ReconstructionDraft")
+        reference = self.admission_ref
+        if reference is None:
+            return
+        if type(reference) is not _AdmissionRef:
+            raise TypeError("admission_ref must be an exact _AdmissionRef or null")
+        allowed = self.draft.status in {
+            ReconstructionStatus.PROPOSED,
+            ReconstructionStatus.ADOPTING,
+            ReconstructionStatus.ADOPTED,
+        } or (
+            self.draft.status is ReconstructionStatus.RECOVERY_REQUIRED
+            and self.draft.adoption_key_sha256 is not None
+        )
+        if (
+            not allowed
+            or self.draft.base_head is None
+            or self.draft.image_set_id is None
+            or self.draft.image_set_manifest_sha256 is None
+            or self.draft.observation_ref is None
+            or self.draft.proposal_ref is None
+            or reference.reconstruction_id != self.draft.reconstruction_id
+            or reference.admitted_generation > self.draft.generation
+            or reference.base_head_sha256 != self.draft.base_head.sha256
+            or reference.image_set_id != self.draft.image_set_id
+            or reference.image_set_manifest_sha256 != self.draft.image_set_manifest_sha256
+            or reference.observation_digest != self.draft.observation_ref.contract_digest
+            or reference.proposal_digest != self.draft.proposal_ref.contract_digest
+        ):
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+
+
+def _admission_ref_for(
+    bundle: VisualAdmissionInputBundle,
+    *,
+    admitted_generation: int,
+    raw: bytes,
+) -> _AdmissionRef:
+    admission_id = (
+        "admission_inputs_"
+        + hashlib.sha256(
+            _ADMISSION_ID_DOMAIN
+            + bundle.reconstruction_id.encode("ascii")
+            + b"\0"
+            + str(admitted_generation).encode("ascii")
+            + b"\0"
+            + bytes.fromhex(bundle.bundle_digest)
+        ).hexdigest()[:32]
+    )
+    return _AdmissionRef(
+        admission_id=admission_id,
+        reconstruction_id=bundle.reconstruction_id,
+        admitted_generation=admitted_generation,
+        base_head_sha256=bundle.base_head_sha256,
+        image_set_id=bundle.image_set_ref.image_set_id,
+        image_set_manifest_sha256=bundle.image_set_ref.manifest_sha256,
+        observation_digest=bundle.observation_ref.contract_digest,
+        proposal_digest=bundle.proposal_ref.contract_digest,
+        bundle_digest=bundle.bundle_digest,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+    )
+
+
+def _successor_admission(
+    previous: _StoredDraftRecord,
+    successor: ReconstructionDraft,
+) -> _AdmissionRef | None:
+    reference = previous.admission_ref
+    if reference is None:
+        return None
+    preserved = successor.status in {
+        ReconstructionStatus.PROPOSED,
+        ReconstructionStatus.ADOPTING,
+        ReconstructionStatus.ADOPTED,
+    } or (
+        successor.status is ReconstructionStatus.RECOVERY_REQUIRED
+        and successor.adoption_key_sha256 is not None
+    )
+    if not preserved:
+        return None
+    if (
+        successor.base_head != previous.draft.base_head
+        or successor.image_set_id != previous.draft.image_set_id
+        or successor.image_set_manifest_sha256 != previous.draft.image_set_manifest_sha256
+        or successor.observation_ref != previous.draft.observation_ref
+        or successor.proposal_ref != previous.draft.proposal_ref
+    ):
+        return None
+    return reference
+
+
+@dataclass(frozen=True, slots=True)
 class _FileEvidence:
     name: str
     sha256: str
@@ -526,9 +753,7 @@ class _FileEvidence:
             or type(value["sha256"]) is not str
             or _DIGEST.fullmatch(value["sha256"]) is None
             or type(value["size"]) is not int
-            or not 0
-            <= value["size"]
-            <= max(MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES, _MAX_PAYLOAD_BYTES)
+            or not 0 <= value["size"] <= max(_MAX_STORED_RECORD_BYTES, _MAX_PAYLOAD_BYTES)
             or type(value["mode"]) is not int
             or value["mode"] != 0o600
             or any(
@@ -648,7 +873,7 @@ class _MutationJournal:
             or _DIGEST.fullmatch(self.new_sha256) is None
             or self.old_sha256 == self.new_sha256
             or type(self.new_size) is not int
-            or not 0 < self.new_size <= MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES
+            or not 0 < self.new_size <= _MAX_STORED_RECORD_BYTES
             or _RECORD_TEMP_NAME.fullmatch(self.record_temp_name) is None
             or len({item.name for item in self.add_payloads}) != len(self.add_payloads)
             or len({item.name for item in self.remove_payloads}) != len(self.remove_payloads)
@@ -914,7 +1139,7 @@ def _scan_draft_directory(
         if info is None:
             _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
         if name == _RECORD_NAME:
-            maximum = MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES
+            maximum = _MAX_STORED_RECORD_BYTES
             record_present = True
         elif _PAYLOAD_NAME.fullmatch(name) is not None:
             maximum = _MAX_PAYLOAD_BYTES
@@ -922,7 +1147,7 @@ def _scan_draft_directory(
             maximum = _MAX_JOURNAL_BYTES
             journal_present = True
         elif _RECORD_TEMP_NAME.fullmatch(name) is not None:
-            maximum = MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES
+            maximum = _MAX_STORED_RECORD_BYTES
             temp_present = True
         elif _PAYLOAD_TEMP_NAME.fullmatch(name) is not None:
             maximum = _MAX_PAYLOAD_BYTES
@@ -961,7 +1186,7 @@ def _scan_stage_directory(
         if info is None:
             _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
         if name == _RECORD_NAME:
-            maximum = MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES
+            maximum = _MAX_STORED_RECORD_BYTES
         elif _PAYLOAD_NAME.fullmatch(name) is not None:
             maximum = _MAX_PAYLOAD_BYTES
         else:
@@ -1116,7 +1341,7 @@ def _translate_draft_error(error: ReconstructionDraftError, *, transition: bool 
     _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
 
 
-def _encode_record(draft: ReconstructionDraft) -> bytes:
+def _encode_public_draft(draft: ReconstructionDraft) -> bytes:
     try:
         raw = encode_reconstruction_draft(draft)
         decoded = decode_reconstruction_draft(raw)
@@ -1127,14 +1352,78 @@ def _encode_record(draft: ReconstructionDraft) -> bytes:
     return raw
 
 
-def _decode_record(raw: bytes, reconstruction_id: str) -> ReconstructionDraft:
+def _encode_record(record: _StoredDraftRecord) -> bytes:
+    if type(record) is not _StoredDraftRecord:
+        raise TypeError("record must be an exact _StoredDraftRecord")
+    draft_raw = _encode_public_draft(record.draft)
+    if record.admission_ref is None:
+        return draft_raw
+    draft_mapping = _decode_canonical(
+        draft_raw,
+        maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+    )
+    body = {
+        "admission_ref": record.admission_ref.to_mapping(),
+        "draft_record": draft_mapping,
+    }
+    body_raw = _canonical_json(body, maximum=_MAX_STORED_RECORD_BYTES)
+    raw = _canonical_json(
+        {
+            "body": body,
+            "body_sha256": hashlib.sha256(_STORED_RECORD_CHECKSUM_DOMAIN + body_raw).hexdigest(),
+            "storage_epoch": 2,
+        },
+        maximum=_MAX_STORED_RECORD_BYTES,
+    )
+    if _decode_record(raw, record.draft.reconstruction_id) != record:
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    return raw
+
+
+def _decode_record(raw: bytes, reconstruction_id: str) -> _StoredDraftRecord:
+    decoded = _decode_canonical(raw, maximum=_MAX_STORED_RECORD_BYTES)
+    if type(decoded) is not dict:
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    if set(decoded) != {"body", "body_sha256", "storage_epoch"}:
+        try:
+            draft = decode_reconstruction_draft(raw)
+        except ReconstructionDraftError as error:
+            _translate_draft_error(error)
+        if draft.reconstruction_id != reconstruction_id or _encode_public_draft(draft) != raw:
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+        return _StoredDraftRecord(draft=draft)
+    body = decoded["body"]
+    checksum = decoded["body_sha256"]
+    if (
+        type(decoded["storage_epoch"]) is not int
+        or decoded["storage_epoch"] != 2
+        or type(body) is not dict
+        or set(body) != {"admission_ref", "draft_record"}
+        or type(checksum) is not str
+        or _DIGEST.fullmatch(checksum) is None
+    ):
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    body_raw = _canonical_json(body, maximum=_MAX_STORED_RECORD_BYTES)
+    expected = hashlib.sha256(_STORED_RECORD_CHECKSUM_DOMAIN + body_raw).hexdigest()
+    if not secrets.compare_digest(checksum, expected):
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    if _canonical_json(decoded, maximum=_MAX_STORED_RECORD_BYTES) != raw:
+        _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    draft_raw = _canonical_ascii_json(
+        body["draft_record"],
+        maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+    )
     try:
-        result = decode_reconstruction_draft(raw)
+        draft = decode_reconstruction_draft(draft_raw)
     except ReconstructionDraftError as error:
         _translate_draft_error(error)
-    if result.reconstruction_id != reconstruction_id or _encode_record(result) != raw:
+    record = _StoredDraftRecord(
+        draft=draft,
+        admission_ref=_AdmissionRef.from_mapping(body["admission_ref"]),
+    )
+    if draft.reconstruction_id != reconstruction_id:
         _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
-    return result
+    return record
 
 
 def _normalize_payloads(value: object) -> tuple[ReconstructionPayload, ...]:
@@ -1149,10 +1438,13 @@ def _normalize_payloads(value: object) -> tuple[ReconstructionPayload, ...]:
 
 
 def _refs_by_filename(
-    draft: ReconstructionDraft,
-) -> dict[str, ReconstructionPayloadRef]:
-    result = {item.filename: item for item in draft.payload_refs}
-    if len(result) != len(draft.payload_refs) or any(
+    record: _StoredDraftRecord,
+) -> dict[str, ReconstructionPayloadRef | _AdmissionRef]:
+    references: tuple[ReconstructionPayloadRef | _AdmissionRef, ...] = record.draft.payload_refs + (
+        () if record.admission_ref is None else (record.admission_ref,)
+    )
+    result = {item.filename: item for item in references}
+    if len(result) != len(references) or any(
         _PAYLOAD_NAME.fullmatch(name) is None for name in result
     ):
         _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
@@ -1163,7 +1455,7 @@ def _payloads_by_filename(
     draft: ReconstructionDraft,
     payloads: tuple[ReconstructionPayload, ...],
 ) -> dict[str, ReconstructionPayload]:
-    expected = _refs_by_filename(draft)
+    expected = {item.filename: item for item in draft.payload_refs}
     result: dict[str, ReconstructionPayload] = {}
     for payload in payloads:
         reference = expected.get(payload.ref.filename)
@@ -1176,13 +1468,30 @@ def _payloads_by_filename(
 def _validate_payload_file(
     root: SafeRoot,
     draft_fd: int,
-    reference: ReconstructionPayloadRef,
+    reference: ReconstructionPayloadRef | _AdmissionRef,
 ) -> _FileEvidence:
     raw, info = _read_file(root, draft_fd, reference.filename, maximum=reference.size_bytes)
-    try:
-        ReconstructionPayload(ref=reference, raw=raw)
-    except ReconstructionDraftError as error:
-        _translate_draft_error(error)
+    if type(reference) is ReconstructionPayloadRef:
+        try:
+            ReconstructionPayload(ref=reference, raw=raw)
+        except ReconstructionDraftError as error:
+            _translate_draft_error(error)
+    elif type(reference) is _AdmissionRef:
+        try:
+            bundle = decode_visual_admission_inputs(raw)
+        except VisualAdmissionInputError:
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+        if (
+            _admission_ref_for(
+                bundle,
+                admitted_generation=reference.admitted_generation,
+                raw=raw,
+            )
+            != reference
+        ):
+            _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+    else:  # pragma: no cover - closed private union.
+        raise TypeError("reference must be an exact stored payload reference")
     if len(raw) != reference.size_bytes:
         _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
     evidence = _FileEvidence(
@@ -1202,24 +1511,25 @@ def _load_draft_fd(
     root: SafeRoot,
     draft_fd: int,
     reconstruction_id: str,
-) -> tuple[ReconstructionDraft, bytes]:
+) -> tuple[_StoredDraftRecord, bytes]:
     _scan_draft_directory(root, draft_fd, reconstruction_id)
     raw, _record_info = _read_file(
         root,
         draft_fd,
         _RECORD_NAME,
-        maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+        maximum=_MAX_STORED_RECORD_BYTES,
     )
-    draft = _decode_record(raw, reconstruction_id)
-    expected_names = {_RECORD_NAME, *(item.filename for item in draft.payload_refs)}
-    for reference in draft.payload_refs:
+    record = _decode_record(raw, reconstruction_id)
+    references = _refs_by_filename(record)
+    expected_names = {_RECORD_NAME, *references}
+    for reference in references.values():
         _validate_payload_file(root, draft_fd, reference)
 
     names = set(os.listdir(draft_fd))
     if _JOURNAL_NAME not in names:
         if names != expected_names:
             _raise(ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED)
-        return draft, raw
+        return record, raw
 
     reserved, staged, _valid, _partial, _info = _read_journal(root, draft_fd)
     selected = staged if staged is not None else reserved
@@ -1232,7 +1542,7 @@ def _load_draft_fd(
     }
     if not names.issubset(allowed):
         _raise(ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED)
-    return draft, raw
+    return record, raw
 
 
 def _evidence_matches(
@@ -1345,15 +1655,18 @@ def _open_draft_at(
 
 def _validate_journal_bindings(
     journal: _MutationJournal,
-    previous: ReconstructionDraft,
-    successor: ReconstructionDraft,
-) -> tuple[dict[str, ReconstructionPayloadRef], dict[str, ReconstructionPayloadRef]]:
+    previous: _StoredDraftRecord,
+    successor: _StoredDraftRecord,
+) -> tuple[
+    dict[str, ReconstructionPayloadRef | _AdmissionRef],
+    dict[str, ReconstructionPayloadRef | _AdmissionRef],
+]:
     old_refs = _refs_by_filename(previous)
     new_refs = _refs_by_filename(successor)
     expected_add = tuple(sorted(set(new_refs) - set(old_refs)))
     expected_remove = tuple(sorted(set(old_refs) - set(new_refs)))
     if (
-        successor.reconstruction_id != journal.reconstruction_id
+        successor.draft.reconstruction_id != journal.reconstruction_id
         or hashlib.sha256(_encode_record(previous)).hexdigest() != journal.old_sha256
         or hashlib.sha256(_encode_record(successor)).hexdigest() != journal.new_sha256
         or len(_encode_record(successor)) != journal.new_size
@@ -1375,12 +1688,12 @@ def _validate_journal_bindings(
 
 def _validate_committed_journal(
     journal: _MutationJournal,
-    successor: ReconstructionDraft,
-) -> dict[str, ReconstructionPayloadRef]:
+    successor: _StoredDraftRecord,
+) -> dict[str, ReconstructionPayloadRef | _AdmissionRef]:
     new_raw = _encode_record(successor)
     new_refs = _refs_by_filename(successor)
     if (
-        successor.reconstruction_id != journal.reconstruction_id
+        successor.draft.reconstruction_id != journal.reconstruction_id
         or hashlib.sha256(new_raw).hexdigest() != journal.new_sha256
         or len(new_raw) != journal.new_size
         or any(
@@ -1397,13 +1710,13 @@ def _validate_committed_journal(
 
 def _validate_old_record_rollback(
     journal: _MutationJournal,
-    current: ReconstructionDraft,
+    current: _StoredDraftRecord,
 ) -> None:
     """Bind rollback deletion authority to the still-authoritative old record."""
 
     current_refs = _refs_by_filename(current)
     if (
-        current.reconstruction_id != journal.reconstruction_id
+        current.draft.reconstruction_id != journal.reconstruction_id
         or any(plan.name in current_refs for plan in journal.add_payloads)
         or any(
             evidence.name not in current_refs
@@ -1452,7 +1765,7 @@ def _publish_payload_plan(
     root: SafeRoot,
     draft_fd: int,
     plan: _PayloadPlan,
-    reference: ReconstructionPayloadRef,
+    reference: ReconstructionPayloadRef | _AdmissionRef,
 ) -> _FileEvidence:
     if (
         plan.name != reference.filename
@@ -1549,7 +1862,7 @@ class ReconstructionDraftStore:
             _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
         if len(draft.provider_invocations) > MAX_RECONSTRUCTION_DRAFT_INVOCATIONS:
             _raise(ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED)
-        _encode_record(draft)
+        _encode_record(_StoredDraftRecord(draft=draft))
 
     def load(self, reconstruction_id: object) -> ReconstructionDraft:
         selected_id = _draft_id(reconstruction_id)
@@ -1566,7 +1879,8 @@ class ReconstructionDraftStore:
                 _scan_catalog(self._root, root_fd)
                 draft_lease = self._acquire_draft(selected_id)
                 draft_fd, _draft_info = _open_draft_at(self._root, root_fd, selected_id)
-                result, _raw = _load_draft_fd(self._root, draft_fd, selected_id)
+                record, _raw = _load_draft_fd(self._root, draft_fd, selected_id)
+                result = record.draft
                 self._root.verify_directory_entry(
                     root_fd,
                     selected_id,
@@ -1614,8 +1928,10 @@ class ReconstructionDraftStore:
                 _scan_catalog(self._root, root_fd)
                 draft_lease = self._acquire_draft(selected_id)
                 draft_fd, _draft_info = _open_draft_at(self._root, root_fd, selected_id)
-                draft, _raw = _load_draft_fd(self._root, draft_fd, selected_id)
-                current = _refs_by_filename(draft).get(reference.filename)
+                record, _raw = _load_draft_fd(self._root, draft_fd, selected_id)
+                current = {item.filename: item for item in record.draft.payload_refs}.get(
+                    reference.filename
+                )
                 if current is None:
                     _raise(ReconstructionDraftStoreErrorCode.NOT_FOUND)
                 if current != reference:
@@ -1653,6 +1969,410 @@ class ReconstructionDraftStore:
             or not draft_release_ok
             or not catalog_release_ok
         ):
+            _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
+        return result
+
+    def _load_admission_exact(
+        self,
+        reconstruction_id: object,
+        *,
+        expected_generation: object,
+        expected_proposal_ref: object,
+    ) -> VisualAdmissionInputBundle:
+        """Load only the sidecar bound to the exact current draft snapshot."""
+
+        selected_id = _draft_id(reconstruction_id)
+        expected = _generation(expected_generation)
+        if type(expected_proposal_ref) is not ReconstructionPayloadRef:
+            raise TypeError("expected_proposal_ref must be an exact ReconstructionPayloadRef")
+        catalog = self._acquire_catalog()
+        draft_lease = None
+        root_fd = -1
+        draft_fd = -1
+        result = None
+        failure: ReconstructionDraftStoreError | None = None
+        try:
+            try:
+                self._recover_pending_locked()
+                root_fd = self._root.open()
+                _scan_catalog(self._root, root_fd)
+                draft_lease = self._acquire_draft(selected_id)
+                draft_fd, _draft_info = _open_draft_at(self._root, root_fd, selected_id)
+                record, _raw = _load_draft_fd(self._root, draft_fd, selected_id)
+                if (
+                    record.draft.generation != expected
+                    or record.draft.proposal_ref != expected_proposal_ref
+                ):
+                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                reference = record.admission_ref
+                if reference is None:
+                    _raise(ReconstructionDraftStoreErrorCode.NOT_FOUND)
+                payload_raw, _payload_info = _read_file(
+                    self._root,
+                    draft_fd,
+                    reference.filename,
+                    maximum=reference.size_bytes,
+                )
+                try:
+                    result = decode_visual_admission_inputs(payload_raw)
+                except VisualAdmissionInputError:
+                    _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+                if (
+                    _admission_ref_for(
+                        result,
+                        admitted_generation=reference.admitted_generation,
+                        raw=payload_raw,
+                    )
+                    != reference
+                ):
+                    _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+                self._root.verify_directory_entry(
+                    root_fd,
+                    selected_id,
+                    expected=os.fstat(draft_fd),
+                )
+            except ReconstructionDraftStoreError as error:
+                failure = error
+            except (OSError, StorageFailure):
+                failure = ReconstructionDraftStoreError(ReconstructionDraftStoreErrorCode.IO_ERROR)
+        finally:
+            draft_close_ok = draft_fd < 0 or _close(draft_fd)
+            root_close_ok = root_fd < 0 or _close(root_fd)
+            draft_release_ok = draft_lease is None or _release(draft_lease)
+            catalog_release_ok = _release(catalog)
+        if failure is not None:
+            raise failure
+        if (
+            result is None
+            or not draft_close_ok
+            or not root_close_ok
+            or not draft_release_ok
+            or not catalog_release_ok
+        ):
+            _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
+        return result
+
+    def _attach_admission_exact(
+        self,
+        reconstruction_id: object,
+        *,
+        expected_generation: object,
+        expected_proposal_ref: object,
+        bundle: object,
+    ) -> VisualAdmissionInputBundle:
+        """Attach one immutable input bundle without advancing draft generation."""
+
+        selected_id = _draft_id(reconstruction_id)
+        expected = _generation(expected_generation)
+        if type(expected_proposal_ref) is not ReconstructionPayloadRef:
+            raise TypeError("expected_proposal_ref must be an exact ReconstructionPayloadRef")
+        if type(bundle) is not VisualAdmissionInputBundle:
+            raise TypeError("bundle must be an exact VisualAdmissionInputBundle")
+        try:
+            bundle_raw = encode_visual_admission_inputs(bundle)
+            if decode_visual_admission_inputs(bundle_raw) != bundle:
+                _raise(ReconstructionDraftStoreErrorCode.CORRUPT_RECORD)
+        except VisualAdmissionInputError:
+            _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+
+        def prepare(
+            previous: _StoredDraftRecord,
+        ) -> tuple[_StoredDraftRecord, Mapping[str, bytes]]:
+            draft = previous.draft
+            if (
+                draft.status is not ReconstructionStatus.PROPOSED
+                or draft.base_head is None
+                or draft.observation_ref is None
+                or draft.proposal_ref != expected_proposal_ref
+                or bundle.reconstruction_id != draft.reconstruction_id
+                or bundle.base_head_sha256 != draft.base_head.sha256
+                or bundle.observation_ref != draft.observation_ref
+                or bundle.proposal_ref != draft.proposal_ref
+                or bundle.image_set_ref.image_set_id != draft.image_set_id
+                or bundle.image_set_ref.manifest_sha256 != draft.image_set_manifest_sha256
+            ):
+                _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+            reference = _admission_ref_for(
+                bundle,
+                admitted_generation=expected,
+                raw=bundle_raw,
+            )
+            if previous.admission_ref is not None:
+                if previous.admission_ref != reference:
+                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                return previous, {}
+            return (
+                _StoredDraftRecord(draft=draft, admission_ref=reference),
+                {reference.filename: bundle_raw},
+            )
+
+        self._compare_and_set_record(selected_id, expected, prepare)
+        return bundle
+
+    def _compare_and_set_record(
+        self,
+        reconstruction_id: str,
+        expected_generation: int,
+        prepare: Callable[
+            [_StoredDraftRecord],
+            tuple[_StoredDraftRecord, Mapping[str, bytes]],
+        ],
+    ) -> _StoredDraftRecord:
+        """Run the one private payload-first, record-last stored-record CAS."""
+
+        catalog = self._acquire_catalog()
+        draft_lease = None
+        root_fd = -1
+        draft_fd = -1
+        publication_fd = -1
+        journal_created = False
+        replaced = False
+        previous: _StoredDraftRecord | None = None
+        old_raw: bytes | None = None
+        successor: _StoredDraftRecord | None = None
+        reserved: _MutationJournal | None = None
+        journal_identity: tuple[int, int] | None = None
+        created_identities: dict[str, tuple[int, int]] = {}
+        result: _StoredDraftRecord | None = None
+        failure: ReconstructionDraftStoreError | None = None
+        try:
+            try:
+                self._recover_pending_locked()
+                root_fd = self._root.open()
+                snapshot = _scan_catalog(self._root, root_fd)
+                draft_lease = self._acquire_draft(reconstruction_id)
+                draft_fd, _draft_info = _open_draft_at(
+                    self._root,
+                    root_fd,
+                    reconstruction_id,
+                )
+                previous, old_raw = _load_draft_fd(
+                    self._root,
+                    draft_fd,
+                    reconstruction_id,
+                )
+                if previous.draft.generation != expected_generation:
+                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                successor, supplied = prepare(previous)
+                if type(successor) is not _StoredDraftRecord or type(supplied) is not dict:
+                    raise TypeError("stored record prepare result must be exact")
+                if successor.draft.reconstruction_id != reconstruction_id:
+                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                if successor == previous:
+                    if supplied:
+                        _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                    result = previous
+                else:
+                    new_raw = _encode_record(successor)
+                    old_refs = _refs_by_filename(previous)
+                    new_refs = _refs_by_filename(successor)
+                    shared = set(old_refs) & set(new_refs)
+                    if any(old_refs[name] != new_refs[name] for name in shared):
+                        _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                    additions = tuple(sorted(set(new_refs) - set(old_refs)))
+                    removals = tuple(sorted(set(old_refs) - set(new_refs)))
+                    if set(supplied) != set(additions) or any(
+                        type(supplied[name]) is not bytes
+                        or len(supplied[name]) != new_refs[name].size_bytes
+                        or hashlib.sha256(supplied[name]).hexdigest() != new_refs[name].sha256
+                        for name in additions
+                    ):
+                        _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+
+                    token = secrets.token_hex(16)
+                    plans = tuple(
+                        _PayloadPlan(
+                            name=name,
+                            temp_name=f".{name}.{token}.tmp",
+                            sha256=new_refs[name].sha256,
+                            size=new_refs[name].size_bytes,
+                        )
+                        for name in additions
+                    )
+                    removed_evidence = tuple(
+                        _validate_payload_file(self._root, draft_fd, old_refs[name])
+                        for name in removals
+                    )
+                    record_temp_name = f".record.{token}.tmp"
+                    reserved = _MutationJournal(
+                        state="RESERVED",
+                        reconstruction_id=reconstruction_id,
+                        old_sha256=hashlib.sha256(old_raw).hexdigest(),
+                        new_sha256=hashlib.sha256(new_raw).hexdigest(),
+                        new_size=len(new_raw),
+                        record_temp_name=record_temp_name,
+                        add_payloads=plans,
+                        remove_payloads=removed_evidence,
+                    )
+                    peak = (
+                        snapshot.total_bytes
+                        + len(new_raw)
+                        + sum(len(raw) for raw in supplied.values())
+                        + _MAX_JOURNAL_BYTES
+                    )
+                    if peak > MAX_RECONSTRUCTION_DRAFT_STORE_BYTES:
+                        _raise(ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED)
+
+                    journal_identity = _create_journal(self._root, draft_fd, reserved)
+                    journal_created = True
+                    for plan in plans:
+                        created_identity = _write_exclusive(
+                            self._root,
+                            draft_fd,
+                            plan.temp_name,
+                            supplied[plan.name],
+                            maximum=plan.size,
+                        )
+                        created_identities[plan.temp_name] = created_identity
+                        created_identities[plan.name] = created_identity
+                    created_identities[record_temp_name] = _write_exclusive(
+                        self._root,
+                        draft_fd,
+                        record_temp_name,
+                        new_raw,
+                        maximum=_MAX_STORED_RECORD_BYTES,
+                    )
+                    added_evidence = tuple(
+                        _publish_payload_plan(
+                            self._root,
+                            draft_fd,
+                            plan,
+                            new_refs[plan.name],
+                        )
+                        for plan in plans
+                    )
+                    record_evidence = _capture_expected_file(
+                        self._root,
+                        draft_fd,
+                        record_temp_name,
+                        reserved.new_sha256,
+                        reserved.new_size,
+                        maximum=_MAX_STORED_RECORD_BYTES,
+                    )
+                    staged = _MutationJournal(
+                        state="STAGED",
+                        reconstruction_id=reserved.reconstruction_id,
+                        old_sha256=reserved.old_sha256,
+                        new_sha256=reserved.new_sha256,
+                        new_size=reserved.new_size,
+                        record_temp_name=reserved.record_temp_name,
+                        add_payloads=reserved.add_payloads,
+                        remove_payloads=reserved.remove_payloads,
+                        record_temp=record_evidence,
+                        added_payloads=added_evidence,
+                    )
+                    _append_staged_journal(
+                        self._root,
+                        draft_fd,
+                        journal_identity,
+                        reserved,
+                        staged,
+                        valid_length=len(reserved.to_line()),
+                    )
+                    current, current_raw = _load_draft_fd(
+                        self._root,
+                        draft_fd,
+                        reconstruction_id,
+                    )
+                    if current != previous or current_raw != old_raw:
+                        _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
+                    publication_fd, _publication_identity = _open_verified(
+                        self._root,
+                        draft_fd,
+                        record_evidence,
+                        maximum=_MAX_STORED_RECORD_BYTES,
+                    )
+                    os.replace(
+                        record_temp_name,
+                        _RECORD_NAME,
+                        src_dir_fd=draft_fd,
+                        dst_dir_fd=draft_fd,
+                    )
+                    replaced = True
+                    _verify_replaced(
+                        self._root,
+                        draft_fd,
+                        _RECORD_NAME,
+                        publication_fd,
+                        record_evidence,
+                        maximum=_MAX_STORED_RECORD_BYTES,
+                    )
+                    os.fsync(draft_fd)
+                    result, readback_raw = _load_draft_fd(
+                        self._root,
+                        draft_fd,
+                        reconstruction_id,
+                    )
+                    if result != successor or readback_raw != new_raw:
+                        _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
+                    self._finish_committed_cleanup(draft_fd, staged, successor)
+                    _unlink_exact(
+                        self._root,
+                        draft_fd,
+                        _JOURNAL_NAME,
+                        journal_identity,
+                        maximum=_MAX_JOURNAL_BYTES,
+                    )
+                    journal_created = False
+                self._root.verify_directory_entry(
+                    root_fd,
+                    reconstruction_id,
+                    expected=os.fstat(draft_fd),
+                )
+            except ReconstructionDraftStoreError as error:
+                failure = error
+            except (OSError, StorageFailure):
+                failure = ReconstructionDraftStoreError(ReconstructionDraftStoreErrorCode.IO_ERROR)
+            if failure is not None and draft_fd >= 0 and not journal_created:
+                journal_created = _stat_at(draft_fd, _JOURNAL_NAME) is not None
+            if (
+                failure is not None
+                and not replaced
+                and journal_created
+                and draft_fd >= 0
+                and previous is not None
+                and old_raw is not None
+                and reserved is not None
+                and journal_identity is not None
+                and self._rollback_failed_cas_locked(
+                    draft_fd,
+                    previous,
+                    old_raw,
+                    reserved,
+                    journal_identity,
+                    created_identities,
+                )
+            ):
+                journal_created = False
+        finally:
+            publication_close_ok = publication_fd < 0 or _close(publication_fd)
+            draft_close_ok = draft_fd < 0 or _close(draft_fd)
+            root_close_ok = root_fd < 0 or _close(root_fd)
+            draft_release_ok = draft_lease is None or _release(draft_lease)
+            catalog_release_ok = _release(catalog)
+        committed_generation = (
+            expected_generation if successor is None else successor.draft.generation
+        )
+        if failure is not None:
+            if replaced or journal_created:
+                _raise(
+                    ReconstructionDraftStoreErrorCode.DURABILITY_UNCERTAIN,
+                    committed_generation=committed_generation,
+                )
+            raise failure
+        if (
+            result is None
+            or not publication_close_ok
+            or not draft_close_ok
+            or not root_close_ok
+            or not draft_release_ok
+            or not catalog_release_ok
+        ):
+            if replaced:
+                _raise(
+                    ReconstructionDraftStoreErrorCode.DURABILITY_UNCERTAIN,
+                    committed_generation=committed_generation,
+                )
             _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
         return result
 
@@ -1737,7 +2457,7 @@ class ReconstructionDraftStore:
                     self._root,
                     draft_fd,
                     reserved.record_temp_name,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                    maximum=_MAX_STORED_RECORD_BYTES,
                 )
                 if (
                     len(new_raw) != reserved.new_size
@@ -1764,7 +2484,7 @@ class ReconstructionDraftStore:
                     reserved.record_temp_name,
                     reserved.new_sha256,
                     reserved.new_size,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                    maximum=_MAX_STORED_RECORD_BYTES,
                 )
                 staged = _MutationJournal(
                     state="STAGED",
@@ -1823,7 +2543,7 @@ class ReconstructionDraftStore:
                 self._root,
                 draft_fd,
                 selected.record_temp_name,
-                maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                maximum=_MAX_STORED_RECORD_BYTES,
             )
             successor = _decode_record(new_raw, reconstruction_id)
             _validate_journal_bindings(selected, current, successor)
@@ -1847,7 +2567,7 @@ class ReconstructionDraftStore:
                 self._root,
                 draft_fd,
                 selected.record_temp,
-                maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                maximum=_MAX_STORED_RECORD_BYTES,
             )
             os.replace(
                 selected.record_temp_name,
@@ -1861,7 +2581,7 @@ class ReconstructionDraftStore:
                 _RECORD_NAME,
                 publication_fd,
                 selected.record_temp,
-                maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                maximum=_MAX_STORED_RECORD_BYTES,
             )
             os.fsync(draft_fd)
             readback, readback_raw = _load_draft_fd(self._root, draft_fd, reconstruction_id)
@@ -1935,7 +2655,7 @@ class ReconstructionDraftStore:
     def _rollback_failed_cas_locked(
         self,
         draft_fd: int,
-        previous: ReconstructionDraft,
+        previous: _StoredDraftRecord,
         old_raw: bytes,
         journal: _MutationJournal,
         journal_identity: tuple[int, int],
@@ -1948,15 +2668,15 @@ class ReconstructionDraftStore:
                 self._root,
                 draft_fd,
                 _RECORD_NAME,
-                maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                maximum=_MAX_STORED_RECORD_BYTES,
             )
             if (
                 current_raw != old_raw
-                or _decode_record(current_raw, previous.reconstruction_id) != previous
+                or _decode_record(current_raw, previous.draft.reconstruction_id) != previous
             ):
                 return False
             _validate_old_record_rollback(journal, previous)
-            for reference in previous.payload_refs:
+            for reference in _refs_by_filename(previous).values():
                 _validate_payload_file(self._root, draft_fd, reference)
 
             removable_names = [
@@ -1971,7 +2691,7 @@ class ReconstructionDraftStore:
                 if expected_identity is None or _identity(current) != expected_identity:
                     return False
                 maximum = (
-                    MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES
+                    _MAX_STORED_RECORD_BYTES
                     if name == journal.record_temp_name
                     else _MAX_PAYLOAD_BYTES
                 )
@@ -1995,7 +2715,7 @@ class ReconstructionDraftStore:
             readback, readback_raw = _load_draft_fd(
                 self._root,
                 draft_fd,
-                previous.reconstruction_id,
+                previous.draft.reconstruction_id,
             )
             return readback == previous and readback_raw == old_raw
         except (OSError, StorageFailure, ReconstructionDraftStoreError):
@@ -2005,7 +2725,7 @@ class ReconstructionDraftStore:
         self,
         draft_fd: int,
         journal: _MutationJournal,
-        successor: ReconstructionDraft,
+        successor: _StoredDraftRecord,
     ) -> None:
         new_refs = _refs_by_filename(successor)
         for plan in journal.add_payloads:
@@ -2036,7 +2756,7 @@ class ReconstructionDraftStore:
         selected_payloads = _normalize_payloads(payloads)
         if selected_payloads:
             _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
-        raw = _encode_record(draft)
+        raw = _encode_record(_StoredDraftRecord(draft=draft))
 
         catalog = self._acquire_catalog()
         draft_lease = None
@@ -2069,7 +2789,7 @@ class ReconstructionDraftStore:
                             root_fd,
                             existing_id,
                         )
-                        existing, _existing_raw = _load_draft_fd(
+                        existing_record, _existing_raw = _load_draft_fd(
                             self._root,
                             existing_fd,
                             existing_id,
@@ -2080,6 +2800,7 @@ class ReconstructionDraftStore:
                     finally:
                         if existing_fd >= 0 and not _close(existing_fd):
                             _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
+                    existing = existing_record.draft
                     owned_image_set = existing.image_set_id
                     if existing.delete_cleanup is not None:
                         owned_image_set = existing.delete_cleanup.image_set_id
@@ -2117,7 +2838,7 @@ class ReconstructionDraftStore:
                         stage_fd,
                         _RECORD_NAME,
                         raw,
-                        maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
+                        maximum=_MAX_STORED_RECORD_BYTES,
                     )
                     os.fsync(stage_fd)
                     _rename_directory_noreplace(
@@ -2135,13 +2856,14 @@ class ReconstructionDraftStore:
                         root_fd,
                         draft.reconstruction_id,
                     )
-                    result, readback_raw = _load_draft_fd(
+                    readback, readback_raw = _load_draft_fd(
                         self._root,
                         final_fd,
                         draft.reconstruction_id,
                     )
-                    if result != draft or readback_raw != raw:
+                    if readback.draft != draft or readback_raw != raw:
                         _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
+                    result = readback.draft
                     self._root.verify_directory_entry(
                         root_fd,
                         draft.reconstruction_id,
@@ -2208,234 +2930,23 @@ class ReconstructionDraftStore:
         if successor.reconstruction_id != selected_id or expected == MAX_SAFE_JSON_INTEGER:
             _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
         selected_payloads = _normalize_payloads(payloads)
-        new_raw = _encode_record(successor)
+        _encode_public_draft(successor)
 
-        catalog = self._acquire_catalog()
-        draft_lease = None
-        root_fd = -1
-        draft_fd = -1
-        publication_fd = -1
-        journal_created = False
-        replaced = False
-        previous: ReconstructionDraft | None = None
-        old_raw: bytes | None = None
-        reserved: _MutationJournal | None = None
-        journal_identity: tuple[int, int] | None = None
-        created_identities: dict[str, tuple[int, int]] = {}
-        result: ReconstructionDraft | None = None
-        failure: ReconstructionDraftStoreError | None = None
-        try:
+        supplied = _payloads_by_filename(successor, selected_payloads)
+
+        def prepare(
+            previous: _StoredDraftRecord,
+        ) -> tuple[_StoredDraftRecord, Mapping[str, bytes]]:
             try:
-                self._recover_pending_locked()
-                root_fd = self._root.open()
-                snapshot = _scan_catalog(self._root, root_fd)
-                draft_lease = self._acquire_draft(selected_id)
-                draft_fd, _draft_info = _open_draft_at(self._root, root_fd, selected_id)
-                previous, old_raw = _load_draft_fd(self._root, draft_fd, selected_id)
-                if previous.generation != expected:
-                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
-                try:
-                    validate_reconstruction_successor(previous, successor)
-                except ReconstructionDraftError as error:
-                    _translate_draft_error(error, transition=True)
-
-                old_refs = _refs_by_filename(previous)
-                new_refs = _refs_by_filename(successor)
-                shared = set(old_refs) & set(new_refs)
-                if any(old_refs[name] != new_refs[name] for name in shared):
-                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
-                additions = tuple(sorted(set(new_refs) - set(old_refs)))
-                removals = tuple(sorted(set(old_refs) - set(new_refs)))
-                supplied = _payloads_by_filename(successor, selected_payloads)
-                if set(supplied) != set(additions):
-                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
-
-                token = secrets.token_hex(16)
-                plans = tuple(
-                    _PayloadPlan(
-                        name=name,
-                        temp_name=f".{name}.{token}.tmp",
-                        sha256=new_refs[name].sha256,
-                        size=new_refs[name].size_bytes,
-                    )
-                    for name in additions
-                )
-                removed_evidence = tuple(
-                    _validate_payload_file(self._root, draft_fd, old_refs[name])
-                    for name in removals
-                )
-                record_temp_name = f".record.{token}.tmp"
-                reserved = _MutationJournal(
-                    state="RESERVED",
-                    reconstruction_id=selected_id,
-                    old_sha256=hashlib.sha256(old_raw).hexdigest(),
-                    new_sha256=hashlib.sha256(new_raw).hexdigest(),
-                    new_size=len(new_raw),
-                    record_temp_name=record_temp_name,
-                    add_payloads=plans,
-                    remove_payloads=removed_evidence,
-                )
-                peak = (
-                    snapshot.total_bytes
-                    + len(new_raw)
-                    + sum(item.ref.size_bytes for item in selected_payloads)
-                    + _MAX_JOURNAL_BYTES
-                )
-                if peak > MAX_RECONSTRUCTION_DRAFT_STORE_BYTES:
-                    _raise(ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED)
-
-                journal_identity = _create_journal(self._root, draft_fd, reserved)
-                journal_created = True
-                for plan in plans:
-                    created_identity = _write_exclusive(
-                        self._root,
-                        draft_fd,
-                        plan.temp_name,
-                        supplied[plan.name].raw,
-                        maximum=plan.size,
-                    )
-                    created_identities[plan.temp_name] = created_identity
-                    created_identities[plan.name] = created_identity
-                created_identities[record_temp_name] = _write_exclusive(
-                    self._root,
-                    draft_fd,
-                    record_temp_name,
-                    new_raw,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
-                )
-                added_evidence = tuple(
-                    _publish_payload_plan(
-                        self._root,
-                        draft_fd,
-                        plan,
-                        new_refs[plan.name],
-                    )
-                    for plan in plans
-                )
-                record_evidence = _capture_expected_file(
-                    self._root,
-                    draft_fd,
-                    record_temp_name,
-                    reserved.new_sha256,
-                    reserved.new_size,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
-                )
-                staged = _MutationJournal(
-                    state="STAGED",
-                    reconstruction_id=reserved.reconstruction_id,
-                    old_sha256=reserved.old_sha256,
-                    new_sha256=reserved.new_sha256,
-                    new_size=reserved.new_size,
-                    record_temp_name=reserved.record_temp_name,
-                    add_payloads=reserved.add_payloads,
-                    remove_payloads=reserved.remove_payloads,
-                    record_temp=record_evidence,
-                    added_payloads=added_evidence,
-                )
-                _append_staged_journal(
-                    self._root,
-                    draft_fd,
-                    journal_identity,
-                    reserved,
-                    staged,
-                    valid_length=len(reserved.to_line()),
-                )
-                current, current_raw = _load_draft_fd(self._root, draft_fd, selected_id)
-                if current != previous or current_raw != old_raw:
-                    _raise(ReconstructionDraftStoreErrorCode.CONFLICT)
-                publication_fd, _publication_identity = _open_verified(
-                    self._root,
-                    draft_fd,
-                    record_evidence,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
-                )
-                os.replace(
-                    record_temp_name,
-                    _RECORD_NAME,
-                    src_dir_fd=draft_fd,
-                    dst_dir_fd=draft_fd,
-                )
-                replaced = True
-                _verify_replaced(
-                    self._root,
-                    draft_fd,
-                    _RECORD_NAME,
-                    publication_fd,
-                    record_evidence,
-                    maximum=MAX_RECONSTRUCTION_DRAFT_RECORD_BYTES,
-                )
-                os.fsync(draft_fd)
-                result, readback_raw = _load_draft_fd(self._root, draft_fd, selected_id)
-                if result != successor or readback_raw != new_raw:
-                    _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
-                self._finish_committed_cleanup(draft_fd, staged, successor)
-                _unlink_exact(
-                    self._root,
-                    draft_fd,
-                    _JOURNAL_NAME,
-                    journal_identity,
-                    maximum=_MAX_JOURNAL_BYTES,
-                )
-                journal_created = False
-                self._root.verify_directory_entry(
-                    root_fd,
-                    selected_id,
-                    expected=os.fstat(draft_fd),
-                )
-            except ReconstructionDraftStoreError as error:
-                failure = error
-            except (OSError, StorageFailure):
-                failure = ReconstructionDraftStoreError(ReconstructionDraftStoreErrorCode.IO_ERROR)
-            if failure is not None and draft_fd >= 0 and not journal_created:
-                journal_created = _stat_at(draft_fd, _JOURNAL_NAME) is not None
-            if (
-                failure is not None
-                and not replaced
-                and journal_created
-                and draft_fd >= 0
-                and previous is not None
-                and old_raw is not None
-                and reserved is not None
-                and journal_identity is not None
-                and self._rollback_failed_cas_locked(
-                    draft_fd,
-                    previous,
-                    old_raw,
-                    reserved,
-                    journal_identity,
-                    created_identities,
-                )
-            ):
-                journal_created = False
-        finally:
-            publication_close_ok = publication_fd < 0 or _close(publication_fd)
-            draft_close_ok = draft_fd < 0 or _close(draft_fd)
-            root_close_ok = root_fd < 0 or _close(root_fd)
-            draft_release_ok = draft_lease is None or _release(draft_lease)
-            catalog_release_ok = _release(catalog)
-        if failure is not None:
-            if replaced or journal_created:
-                _raise(
-                    ReconstructionDraftStoreErrorCode.DURABILITY_UNCERTAIN,
-                    committed_generation=successor.generation,
-                )
-            raise failure
-        if not all(
-            (
-                publication_close_ok,
-                draft_close_ok,
-                root_close_ok,
-                draft_release_ok,
-                catalog_release_ok,
+                validate_reconstruction_successor(previous.draft, successor)
+            except ReconstructionDraftError as error:
+                _translate_draft_error(error, transition=True)
+            return (
+                _StoredDraftRecord(
+                    draft=successor,
+                    admission_ref=_successor_admission(previous, successor),
+                ),
+                {name: payload.raw for name, payload in supplied.items()},
             )
-        ):
-            _raise(
-                ReconstructionDraftStoreErrorCode.DURABILITY_UNCERTAIN,
-                committed_generation=successor.generation,
-            )
-        if result is None:
-            _raise(
-                ReconstructionDraftStoreErrorCode.DURABILITY_UNCERTAIN,
-                committed_generation=successor.generation,
-            )
-        return result
+
+        return self._compare_and_set_record(selected_id, expected, prepare).draft

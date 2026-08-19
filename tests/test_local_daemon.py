@@ -961,8 +961,8 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
                 "epoch": 1,
             },
             "implementation": {
-                "package_version": "0.9.0",
-                "build_id": "vcad-a10-visual-review-workflow",
+                "package_version": "0.10.0",
+                "build_id": "vcad-a12-native-part-booleans",
             },
         }
         capabilities = client.call(
@@ -2434,7 +2434,7 @@ def test_client_eof_and_bad_secret_kill_only_connection_then_fresh_client_succee
 def test_visual_tools_expand_public_count_without_file_grants() -> None:
     from vibecad.application.public_surface import public_tool_specs
 
-    assert len(public_tool_specs()) == 38
+    assert len(public_tool_specs()) == 39
     assert tuple(spec.name for spec in public_tool_specs())[-6:] == (
         "create_box",
         "create_cylinder",

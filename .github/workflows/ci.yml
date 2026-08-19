@@ -39,6 +39,13 @@ jobs:
           managed_python="$(uv run --frozen python -c \
             'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
           echo "VIBECAD_MANAGED_FREECAD_PYTHON=$managed_python" >> "$GITHUB_ENV"
+      - name: bind private FreeCAD process directories
+        run: >-
+          uv run --frozen python -c
+          "from vibecad.runtime.status import freecad_process_environment;
+          [print(f'{name}={value}') for name, value in
+          sorted(freecad_process_environment().items())]"
+          >> "$GITHUB_ENV"
       - name: current Agent-first real-machine gate
         run: >-
           uv run --frozen pytest -m slow -v -s
@@ -49,9 +56,12 @@ jobs:
           uv pip install
           --python "$VIBECAD_MANAGED_FREECAD_PYTHON"
           pytest==9.0.3
-      - name: current parametric FreeCAD gate
+      - name: current native and parametric FreeCAD gate
         run: >-
           "$VIBECAD_MANAGED_FREECAD_PYTHON" -m pytest -m slow -v -s
+          tests/test_tools_modeling.py::test_native_cone_sphere_torus_create_save_and_reopen_real
+          tests/test_program_executor.py::test_real_freecad_native_booleans_edit_reopen_and_export_step
+          tests/test_program_executor.py::test_real_freecad_component_boolean_owner_root_reopen_and_export_step
           tests/test_parametric_compiler.py::test_real_native_pattern_features_compile_edit_and_reopen
           tests/test_parametric_compiler.py::test_real_additive_non_immediate_pattern_can_continue_modeling
           tests/test_parametric_compiler.py::test_real_reopen_rejects_forged_global_pattern_budget

@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,8 @@ _WORKER_REVISION = re.compile(r"worker_revision_[0-9a-f]{32}\Z")
 _SESSION = re.compile(r"worker_session_[0-9a-f]{32}\Z")
 _PROGRAM = re.compile(r"worker_program_[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_ARTIFACT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
+_ARTIFACT_SNAPSHOT_KIND = "reviewed_artifact_snapshot_v1"
 _STAGE_NAME = re.compile(r"\.(?:import|normalized|stage|work)\.[0-9a-f]{32}\.FCStd\Z")
 _MAX_FILE_BYTES = 536_870_912
 _MAX_DIRECTORY_ENTRIES = 64
@@ -946,6 +949,8 @@ class FreeCadWorker(_Opaque):
         program: ModelProgram | ValidatedProgram,
         candidate: WorkerCandidate,
         session: WorkerSession,
+        artifact_snapshot: Mapping[str, object] | None = None,
+        artifact_snapshot_fd: int | None = None,
     ) -> tuple[NormalizedToolOutcome, ...]:
         try:
             if type(program) is ModelProgram:
@@ -956,6 +961,41 @@ class FreeCadWorker(_Opaque):
             else:
                 raise TypeError
             source = validated.program
+            if (artifact_snapshot is None) != (artifact_snapshot_fd is None):
+                raise TypeError
+            snapshot_mapping: dict[str, object] | None = None
+            if artifact_snapshot is not None:
+                if type(artifact_snapshot) is not dict:
+                    raise TypeError
+                snapshot_mapping = dict(artifact_snapshot)
+                if set(snapshot_mapping) != {
+                    "base_revision",
+                    "catalog_sha256",
+                    "kind",
+                    "project_id",
+                    "run_id",
+                    "schema_version",
+                    "task_id",
+                } or (
+                    snapshot_mapping["kind"] != _ARTIFACT_SNAPSHOT_KIND
+                    or type(snapshot_mapping["schema_version"]) is not int
+                    or snapshot_mapping["schema_version"] != 1
+                    or type(snapshot_mapping["catalog_sha256"]) is not str
+                    or _DIGEST.fullmatch(snapshot_mapping["catalog_sha256"]) is None
+                    or any(
+                        type(snapshot_mapping[name]) is not str
+                        or len(snapshot_mapping[name]) > 128
+                        or _ARTIFACT_IDENTIFIER.fullmatch(snapshot_mapping[name]) is None
+                        for name in ("task_id", "project_id", "base_revision", "run_id")
+                    )
+                ):
+                    raise TypeError
+                if (
+                    type(artifact_snapshot_fd) is not int
+                    or artifact_snapshot_fd < 0
+                    or not _private_directory(os.fstat(artifact_snapshot_fd))
+                ):
+                    raise TypeError
         except Exception:
             raise WorkerError(WorkerErrorCode.INVALID_INPUT) from None
         with self._operation_lock:
@@ -967,14 +1007,24 @@ class FreeCadWorker(_Opaque):
             self._require_live_candidate(candidate_state)
             if source.base_revision != candidate_state.base_head.revision_id:
                 raise WorkerError(WorkerErrorCode.INVALID_CANDIDATE)
+            if snapshot_mapping is not None and (
+                snapshot_mapping["task_id"] != source.task_id
+                or snapshot_mapping["project_id"] != candidate_state.base_head.project_id
+                or snapshot_mapping["base_revision"] != source.base_revision
+            ):
+                raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+            begin_params: dict[str, object] = {
+                "session_id": session.session_id,
+                "candidate_id": candidate.candidate_id,
+                "program": source.to_mapping(),
+            }
+            if snapshot_mapping is not None:
+                begin_params["artifact_snapshot"] = snapshot_mapping
             begin = self._request(
                 "program.begin",
-                {
-                    "session_id": session.session_id,
-                    "candidate_id": candidate.candidate_id,
-                    "program": source.to_mapping(),
-                },
+                begin_params,
                 timeout_ms=30_000,
+                capability_fd=artifact_snapshot_fd,
             )
             expected_ids = [command.id for command in validated.commands]
             expected_deadlines = [

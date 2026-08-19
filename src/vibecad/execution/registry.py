@@ -19,6 +19,7 @@ from typing import Self
 from vibecad.execution.selectors import EntityKind, SelectorV1, SemanticRole
 from vibecad.parametric.contracts import ParametricDesignIR
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _OBJECT_ID = re.compile(r"^object_[0-9a-f]{32}$")
@@ -106,11 +107,13 @@ class ValueShape(StrEnum):
     VECTOR3 = "vector3"
     QUANTITY = "quantity"
     RESULT_REF = "result_ref"
+    RESULT_REF_COLLECTION = "result_ref_collection"
     OBJECT_SELECTOR = "object_selector"
     OBJECT_ID = "object_id"
     ENTITY_TARGET = "entity_target"
     ANGLE_DEGREES = "angle_degrees"
     PARAMETRIC_DESIGN_IR = "parametric_design_ir"
+    REVIEWED_INTENT = "reviewed_intent"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -216,6 +219,12 @@ def _matches_value_shape(
             and _is_safe_value_text(snapshot["command_id"])
             and _is_safe_value_text(snapshot["slot"])
         )
+    if shape is ValueShape.RESULT_REF_COLLECTION:
+        return (
+            type(value) is tuple
+            and len(value) <= 8
+            and all(_matches_value_shape(item, ValueShape.RESULT_REF) for item in value)
+        )
     if shape is ValueShape.OBJECT_SELECTOR:
         try:
             SelectorV1.from_mapping(value)
@@ -238,6 +247,12 @@ def _matches_value_shape(
     if shape is ValueShape.PARAMETRIC_DESIGN_IR:
         try:
             ParametricDesignIR.from_mapping(value)
+        except Exception:
+            return False
+        return True
+    if shape is ValueShape.REVIEWED_INTENT:
+        try:
+            ReviewedIntentProgramV1.from_mapping(value)
         except Exception:
             return False
         return True
@@ -540,11 +555,16 @@ def _validate_shape_constraints(
             "allowed_units are only valid for quantity fields",
             field=field_name,
         )
-    if value_shape in {ValueShape.RESULT_REF, ValueShape.ENTITY_TARGET}:
+    if value_shape in {
+        ValueShape.RESULT_REF,
+        ValueShape.RESULT_REF_COLLECTION,
+        ValueShape.ENTITY_TARGET,
+    }:
         if not isinstance(referenced_value_shape, ValueShape) or referenced_value_shape in {
             ValueShape.ENUM,
             ValueShape.QUANTITY,
             ValueShape.RESULT_REF,
+            ValueShape.RESULT_REF_COLLECTION,
             ValueShape.OBJECT_SELECTOR,
             ValueShape.ENTITY_TARGET,
         }:
@@ -554,12 +574,16 @@ def _validate_shape_constraints(
                 field=field_name,
             )
         if (
-            value_shape is ValueShape.ENTITY_TARGET
+            value_shape in {ValueShape.ENTITY_TARGET, ValueShape.RESULT_REF_COLLECTION}
             and referenced_value_shape is not ValueShape.OBJECT_ID
         ):
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
-                "entity_target must reference an object_id result slot",
+                (
+                    "entity_target must reference an object_id result slot"
+                    if value_shape is ValueShape.ENTITY_TARGET
+                    else "result_ref_collection must reference an object_id result slot"
+                ),
                 field=field_name,
             )
     elif referenced_value_shape is not None:
@@ -631,7 +655,7 @@ class ResultSlotMetadata:
             referenced_value_shape=None,
             field_name=self.name,
         )
-        if self.value_shape is ValueShape.RESULT_REF:
+        if self.value_shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 "result slots must expose concrete values",
@@ -986,15 +1010,19 @@ class OperationRegistry:
 _ENTITY_PRESERVATION_FIELDS = (
     "angle",
     "area_mm2",
+    "base_radius",
     "bbox_mm",
     "center_of_mass_mm",
     "geometry",
     "height",
     "length",
+    "major_radius",
+    "minor_radius",
     "parameters",
     "placement",
     "radius",
     "solid_count",
+    "top_radius",
     "valid_shape",
     "volume_mm3",
     "width",
@@ -1097,7 +1125,16 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                     "parameter",
                     "parameter",
                     ValueShape.ENUM,
-                    enum_values=("height", "length", "radius", "width"),
+                    enum_values=(
+                        "base_radius",
+                        "height",
+                        "length",
+                        "major_radius",
+                        "minor_radius",
+                        "radius",
+                        "top_radius",
+                        "width",
+                    ),
                 ),
                 FieldMetadata("value_mm", "value", ValueShape.POSITIVE_NUMBER),
             ),
@@ -1176,6 +1213,187 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             ),
             direct_exposed=True,
             description="检查指定任务版本的模型事实",
+        ),
+        OperationMetadata(
+            operation="create_cone",
+            handler_name="create_cone",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "component",
+                    ValueShape.ENTITY_TARGET,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("base_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata(
+                    "top_radius_mm",
+                    "radius2",
+                    ValueShape.POSITIVE_NUMBER,
+                    required=False,
+                ),
+                FieldMetadata("height_mm", "height", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3, required=False),
+                FieldMetadata(
+                    "axis",
+                    "axis",
+                    ValueShape.ENUM,
+                    required=False,
+                    enum_values=("x", "y", "z"),
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中创建完整圆锥或圆台",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="create_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "component",
+                    ValueShape.ENTITY_TARGET,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("radius_mm", "radius", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3, required=False),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中创建完整球体",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="create_torus",
+            handler_name="create_torus",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "component",
+                    ValueShape.ENTITY_TARGET,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("major_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("minor_radius_mm", "radius2", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3, required=False),
+                FieldMetadata(
+                    "axis",
+                    "axis",
+                    ValueShape.ENUM,
+                    required=False,
+                    enum_values=("x", "y", "z"),
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中创建非自相交完整圆环体",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="boolean_cut",
+            handler_name="boolean_cut",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中对两个同零件实体创建材料差集",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="boolean_fuse",
+            handler_name="boolean_fuse",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中合并两个相交或相接的同零件实体",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="boolean_common",
+            handler_name="boolean_common",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中创建两个同零件实体的实体交集",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
         ),
         OperationMetadata(
             operation="create_component",
@@ -1307,6 +1525,57 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=False,
+        ),
+        OperationMetadata(
+            operation="apply_reviewed_intent",
+            handler_name="apply_reviewed_intent",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(
+                FieldMetadata(
+                    "intent",
+                    "intent",
+                    ValueShape.REVIEWED_INTENT,
+                ),
+                FieldMetadata(
+                    "source_a",
+                    "source_a",
+                    ValueShape.RESULT_REF,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "source_b",
+                    "source_b",
+                    ValueShape.RESULT_REF,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "sources",
+                    "sources",
+                    ValueShape.RESULT_REF_COLLECTION,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                # Static reviewed family contracts remain the exact authority.
+                # The coarse envelope admits PM1's bounded whole transaction:
+                # Body + Origin + seven helpers + Sketch + Pad + 2 * 16 cuts.
+                max_created_objects=43,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=False,
+            description="通过当前平台已验证的 Reviewed 语义执行一个受限参数化意图",
+            result_slots=(
+                ResultSlotMetadata(
+                    "object",
+                    "object_id",
+                    ValueShape.OBJECT_ID,
+                ),
+            ),
         ),
     )
 )

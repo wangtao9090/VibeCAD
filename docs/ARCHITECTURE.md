@@ -1,6 +1,6 @@
 # VibeCAD 当前实施架构
 
-> 实现基线：VibeCAD 0.9.0 候选 / runtime epoch 4 / 38-tool Agent-first + Visual Mechanical V1 + Guided Photo V3 + derived parameters + semantic edge treatments
+> 实现基线：VibeCAD 0.9.0 候选 / runtime epoch 4 / 39-tool Agent-first + Visual Mechanical V1 + Guided Photo V3 + derived parameters + semantic edge treatments
 > internal foundation accepted
 >
 > 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh + G1 closeout / 2026-08-01
@@ -13,7 +13,7 @@
 >
 > MR0-C01..C04 已交付并验收内部通用 runtime 合同与 descriptor registry、backend-neutral CAD
 > registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
-> CAD adapter 仍是 FreeCAD，公共 38-tool、六 direct operation 与 `SelectorV1` 合同不变；durable
+> CAD adapter 仍是 FreeCAD；MR0 当时未改变公共 38-tool、六 direct operation 与 `SelectorV1` 合同；durable
 > Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
 >
 > G1 FreeCAD Workbench Alpha 已交付项目/任务发现、HEAD/draft preview、verdict、精确
@@ -182,13 +182,13 @@ macOS 默认根目录为 `~/Library/Application Support/VibeCAD`。Stage 3 的 d
 
 ## 5. 当前公共 MCP 面
 
-当前 `tools/list` 精确包含 38 个工具：32 个稳定控制/领域 facade，加 6 个 registry-derived 直接
+当前 `tools/list` 精确包含 39 个工具：33 个稳定控制/领域 facade，加 6 个 registry-derived 直接
 CAD 工具。
 
 | 组别 | 工具 |
 |---|---|
 | 服务与运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
-| 能力 | `get_capabilities` |
+| 能力 | `get_capabilities`, `query_freecad_runtime_capabilities` |
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
@@ -216,9 +216,9 @@ JSON Schema；unknown field、错误类型、非有限数、重复 JSON key、�
 
 AR-1 发现 S3-7 discovery 缺少 tool description，而且重复广播完整 task output schema，使一次
 `tools/list` 约 350 KB。S3-8 已补齐描述、从宿主发现投影中省略可选 output schema，并继续在服务端
-保留完整输出验证；当前固定 38-tool 完整 discovery frame 为 30,415 bytes，低于 32,768-byte
+保留完整输出验证；当前固定 39-tool 完整 discovery frame 为 31,504 bytes，低于 32,768-byte
 上限；receipt 绑定的完整 public-surface digest 为
-`6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`。direct operation 与稳定工具
+`fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d`。direct operation 与稳定工具
 重名会 fail closed。
 
 ## 6. Application 与 Task Kernel 分层
@@ -546,16 +546,16 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 当前 0.9.0 发布候选冻结：
 
-- tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.9.0；公开工具 38 个，MCP 1.27.2，
+- tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.9.0；公开工具 39 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
-  `6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`；
-- 固定 38-tool 完整 discovery frame 为 30,415 bytes。tool description 和 input
+  `fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d`；
+- 固定 39-tool 完整 discovery frame 为 31,504 bytes。tool description 和 input
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带
   同一 skill tree，wheel/受管 Python 环境刻意不携带 skill；
 - MCPB 只声明已验证的 Darwin 产品路径；`uv.lock` 随包，tests/docs/runtime/cache 不进入产品包；
 - C13 已证明 MCP 与 public Workbench client 经同一 Application/Task Kernel 共享 draft、verdict 和
-  HEAD，client EOF/重连不改变 durable truth；发布门把同一 38-tool/skill/package identity 刷新到
+  HEAD，client EOF/重连不改变 durable truth；发布门把同一 39-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。
 
 0.9.0 使用同一发布包 smoke 分别验收 Codex、Claude、WorkBuddy；WorkBuddy 另保留 skill 发现、
@@ -580,7 +580,7 @@ Profile 都不自动认证另一个宿主或其中其他模型。
 | `src/vibecad/runtime/contracts.py`, `registry.py`, `conformance.py` | domain-neutral runtime immutable contracts、descriptor registry 与 transcript conformance |
 | `src/vibecad/runtime/` 其他模块 | 受管 Python/FreeCAD paths、receipt、installer、status、uninstall |
 | `src/vibecad/engine/`, `tools/`, `feedback/` | 内部 FreeCAD 能力库存；非公共 endpoint |
-| `manifest.json` | MCPB 平台、启动和 38-tool 静态声明 |
+| `manifest.json` | MCPB 平台、启动和 39-tool 静态声明 |
 | `tests/` | 纯契约、恢复/竞态、真实 FreeCAD、package/MCPB E2E |
 
 ## 14. 当前限制与下一步

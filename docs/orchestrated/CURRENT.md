@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.9.0 published; A09 first slices landed; Visual review integration active**
+> Status: **v0.9.0 published; A09 slices merged; A11 photo product-flow integration active**
 >
 > Updated: 2026-08-08
 >
-> Repository anchor: `main@b0d229f`; published tag `v0.9.0@900ca1a`
+> Repository anchor: `main@6fc966e`; published tag `v0.9.0@900ca1a`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -72,8 +72,86 @@ metadata, standard PNG ResourceLinks, and `resources/read` Blob delivery without
 starting FreeCAD. The active follow-on candidate now generates and publishes those
 records from exact process-local Provider evidence after the durable observation is
 committed, never replays a lost Provider call after restart, and tombstones review
-records before reconstruction source deletion. Durable calibration policy and the
-final real-photo-to-CAD review outcome remain later integration gates.
+records before reconstruction source deletion. PR #37 merged that workflow at
+`main@6fc966e`; GitHub Actions run `31258950080` passed, and PRs #22–#37 now have
+no open successor PR. These post-v0.9 changes are on `main` but are not yet part of
+the published v0.9.0 package.
+
+`VCAD-A11` is the active product-flow gate. It composes the landed modules in one
+bounded route without changing authority:
+
+```text
+sealed ImageSet -> deterministic capture preflight
+-> exact Provider evidence -> explicit scale / eligible calibration
+-> bounded planar fits -> confirmed ParametricDesignIR / ModelProgram
+-> ordinary REQUIRE_REVIEW Task -> verifier -> FCStd / STEP Resources
+```
+
+The route must stop before a CAD Task when images are unreadable, scale is missing
+or ambiguous, required geometry is occluded or conflicting, or required fits are
+unknown. A visual Provider remains advisory and cannot Accept, commit, or advance
+HEAD. The same candidate identity must later pass Codex, Claude, and WorkBuddy
+fresh-process recovery and Resource reads; the three hosts do not substitute for
+one another, and no new runner or validation framework is introduced merely for
+that matrix.
+
+The first A11 implementation remains authority-free: it adds exact sealed capture
+preflight and a deterministic advisory readiness receipt. The Task write boundary
+is intentionally withheld until a follow-on contract proves both the exact
+calibration source and complete coverage of every proposal/IR evidence consumer.
+The older public `adopt_reconstruction` entry remains unchanged, so this slice must
+not be described as a product-wide or global adoption interlock.
+
+The next authority-free A11 candidate now freezes both missing contracts without
+opening that write boundary. Its planar-calibration builder accepts only exact
+ImageSet/Provider-overview bindings, confirmed metric landmarks, and a metric
+frame; the matrix, eligibility, and all receipt digests are derived internally,
+and `task_adoption_eligible` is always false. Its proposal-coverage planner accepts
+only an exact `ReconstructionProposal`, enumerates every supported CAD-effective
+consumer, rejects caller-selected requirement subsets and orphan evidence/claims,
+and currently supports only an origin-XY rectangular Pad with an optional verified
+Through-All Hole set. These records are still process-local integrity/checklist
+artifacts: confirmation authenticity, evidence/fit evaluation, durable recovery,
+and Task admission remain separate gates. The combined candidate passed 6,300
+non-slow tests with one expected integration skip; it added no public export, MCP
+tool, durable schema, Provider call, CAD operation, Task, Revision, or HEAD path.
+
+The authority-free evaluator now closes the next in-process gate. Its only
+inputs are an exact Proposal, a sealed `VisualInputStore`, one Provider image
+batch, raw Provider feature points, and confirmed planar landmarks/frame. The
+application rereads the sealed PNG bytes, recomputes capture quality, rebuilds
+the no-crop Provider batch byte-for-byte, derives calibration, binds raw
+evidence, applies fixed fit policies, reruns geometry fitting, and derives the
+coverage plan internally. It accepts no caller capture/evidence/fit/receipt,
+plan, requirements, policy, tolerance, or clarification override. Rectangle
+Pad and optional 1/3/16-hole cases can reach an authority-free `COMPLETE`;
+blank capture, shifted/collapsed features, alternate batches, missing explicit
+confirmation, high uncertainty, and LINE-only profiles cannot. Complete
+canonical capture/evidence/fit records are included in the sealed report
+digest, while `task_adoption_eligible` remains false. Independent review closed
+four P1 findings, and the final candidate passed 6,312 non-slow tests with one
+expected integration skip. Durable admission and Task creation remain closed.
+
+The latest private blade outcome is additional A11 evidence, not a public fixture.
+Eleven ordinary photos were sealed and analyzed before the user-supplied STEP was
+opened. The STEP content and topology never entered the visual/model context; it
+was used only afterward for local dimensions and hidden comparison. The resulting
+42-parameter, five fully constrained sketch, six-feature plus Fillet model reopened
+as one valid editable solid; all four Task verifiers passed at
+`awaiting_user_review`, HEAD remained unchanged, and aligned volume IoU was
+`0.957064`. This proves photos plus independent reference dimensions for this
+bounded part. It does not prove unscaled, universal, or arbitrary hidden-geometry
+reconstruction. Private photos, STEP, Task data, and generated artifacts remain
+outside the repository.
+
+Managed runtime policy changed on 2026-08-08: a VibeCAD-created managed runtime is
+now a persistent reusable environment by default and is removed only when the user
+explicitly requests cleanup. Per-run scratch, caches, copied inputs, probes, and
+temporary host sessions remain disposable. The already removed private-pilot
+runtime must be installed once at the next real runtime gate and then retained.
+Blender implementation remains deferred until development moves to the M4 mini;
+its runtime and workspaces should live under `/Volumes/ExtSSD/DevArchive`. B10
+design work may continue without installing or executing Blender on this host.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,

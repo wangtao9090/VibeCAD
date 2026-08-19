@@ -1,6 +1,6 @@
 # VibeCAD 0.9.0 发布验收测试
 
-本清单验证当前 Agent-first 产品：持久化 Project/Task/Revision/Draft/Artifact/Release、38 个公开工具、
+本清单验证当前 Agent-first 产品：持久化 Project/Task/Revision/Draft/Artifact/Release、39 个公开工具、
 direct operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP/PDF/ZIP 资源交付。
 
 放行结论必须区分：
@@ -27,12 +27,12 @@ inventory、activation 或 migration。其 future acceptance 与当前 0.9.0 hos
 
 ### 1.1 公开工具
 
-运行时 `tools/list` 与 MCPB manifest 必须同序公开以下 38 个唯一名称：
+运行时 `tools/list` 与 MCPB manifest 必须同序公开以下 39 个唯一名称：
 
 | 类别 | 工具 |
 |---|---|
 | 运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
-| 能力 | `get_capabilities` |
+| 能力 | `get_capabilities`, `query_freecad_runtime_capabilities` |
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
@@ -79,7 +79,7 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
   摘要批准的 Release ZIP；
 - FreeCAD 是唯一连接的 CAD adapter；fake runtime/adapter 只能作为 conformance fixture，不能进入
   capability/product support 声明；
-- MR0 内部 runtime/artifact/selector contract 不改变 38 tools、六个 direct operations 或公开 `SelectorV1`；
+- MR0 内部 runtime/artifact/selector contract 不改变当时的 38 tools、六个 direct operations 或公开 `SelectorV1`；
   durable Revision/Candidate/manifest/recovery writer 仍固定 FCStd/STEP v1；MR1-P00 只冻结 future
   migration contract，不创建 v2 byte；
 - active cancellation 由受管、可终止 FreeCAD Worker 和持久化 `reconcile` 路径收口；空闲取消仍不得启动
@@ -154,7 +154,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | ID | Gate | 通过标准 | 结果 |
 |---|---|---|---|
 | G01 | 版本与协议身份 | tag/source/pyproject/manifest/FreeCAD package/lock = 0.9.0；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
-| G02 | 公开面 | 精确 38 个唯一工具；说明与 manifest 完全一致；固定 discovery frame ≤ 32,768 bytes | ☐ |
+| G02 | 公开面 | 精确 39 个唯一工具；说明与 manifest 完全一致；固定 discovery frame ≤ 32,768 bytes | ☐ |
 | G03 | 内部校验 | discovery 不发 output schema，但正常与异常 CallToolResult 仍受冻结 output validator 约束 | ☐ |
 | G04 | 命名空间 | direct 与稳定名称碰撞、direct 重名都在 schema/dispatch/effect 前 fail closed | ☐ |
 | G05 | Skill | canonical Skill 通过校验；示例、恢复表和限制与 live schema 一致 | ☐ |
@@ -169,6 +169,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G14 | 三宿主发布包 | Codex、Claude、WorkBuddy 分别完成恢复、建模和 ResourceLink/资源读取；WorkBuddy 另过兼容适配门 | ☐ |
 | G15 | Guided Photo V3 | 三个公开正例各形成可编辑 review draft；缺尺寸和多物体负例均在 Task 前停止；真实 FreeCAD 证明 DoF、BRep、单实体和参数修改 | ☐ |
 | G16 | 参数联动与边处理 | 派生仿射表达式和语义 Fillet/Chamfer 通过 focused、完整回归、重开编辑及真实 FreeCAD runtime 门；歧义与无效几何原子失败 | ☐ |
+| G17 | Windows qualification | 按 [`WINDOWS_QUALIFICATION.md`](WINDOWS_QUALIFICATION.md) 完成 pinned hosted contracts、双系统 native managed/product gate、`windows.x86_64` reviewed attestation、发布依赖激活和环境清理；计划提交本身不得声称 Windows 已支持 | ☐ |
 
 ## 3. 自动化与打包 Gate
 
@@ -181,13 +182,13 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 2. runtime receipt、status 与 server handshake 使用同一 VibeCAD 版本；
 3. private server epoch 为 4，runtime receipt 的 public-surface digest 绑定 description、input/output
    enforcement schema 与 annotations；当前 SHA-256 为
-   `6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`；
+   `fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d`；
 4. MCP 保持 1.27.2、Python 保持 3.12、FreeCAD 保持 1.1.0；
 5. `uv lock --offline` 不产生非预期差异。
 
 任何一个身份不一致都阻断放行。
 
-### G02：38-tool discovery
+### G02：39-tool discovery
 
 对固定 JSON-RPC request id `1` 获取完整 `tools/list`，用 sorted keys、compact separators、
 `ensure_ascii=false` 序列化，并计入末尾 LF。预期：
@@ -223,7 +224,7 @@ projection 阶段以固定内部错误拒绝，不能产生重复 discovery、�
 canonical source 是 `skills/vibecad-agent/`。执行 Skill validator，并检查：
 
 - frontmatter 只有 `name` 与 `description`，`agents/openai.yaml` 可解析；
-- 正文列出精确 38 个工具（包括七个 reconstruction 工具），先 `get_capabilities`，包含 project/task/review/artifact/release/visual 流程；
+- 正文列出精确 39 个工具（包括七个 reconstruction 工具），先 `get_capabilities`，包含 runtime capability query 与 project/task/review/artifact/release/visual 流程；
 - direct/ModelProgram、SelectorV1、AcceptanceSpec、ResultRef、generation 与恢复表和实际 schema 一致；
 - cancellation 段明确空闲取消的同请求重放、review 使用 reject、active cancellation 的持久化
   `reconcile` 语义，以及 `notifications/cancelled` 的 transport-only 语义；当返回
@@ -352,7 +353,7 @@ Accept/Reject 用错 draft id、task id 或 generation 必须 fail closed。
    新 HEAD 指向该 revision；Reject 分支由确定性测试证明 HEAD 不变。
 
 Darwin `public-agent-matrix` release target 必须执行这条路径，不能只以 fake coordinator、API schema 或
-38-tool discovery 代替真实 CAD 证据。相同 key 与相同意图重放返回同一任务；变更 source 或
+39-tool discovery 代替真实 CAD 证据。相同 key 与相同意图重放返回同一任务；变更 source 或
 expected-head 必须 conflict。
 
 ### E07：受支持 FCStd import
@@ -499,7 +500,7 @@ revision，Reject 后 task generation 为 10、HEAD 仍为 base revision，check
 从全新输出根解包 `VibeCAD.mcpb`，不引用 checkout 的 `src/` 或开发虚拟环境。运行一个 raw/typed MCP
 client，至少覆盖：
 
-1. initialize、38-tool discovery、artifact/release resource template；
+1. initialize、39-tool discovery、artifact/release resource template；
 2. runtime epoch/version 与 ready 状态；
 3. `get_capabilities`；
 4. empty project → task → real `create_box` → auto-commit；
@@ -561,7 +562,7 @@ Codex、Claude、WorkBuddy 按以下同一矩阵分别执行；WorkBuddy 再增�
 
 三端均从 host-profile 候选 SHA-256 为
 `6fd8e63db5d10181d81540339f7a2a9ca5622a5f11c2390db74a8d2540d93620` 的同一
-`VibeCAD.mcpb` 启动，使用同一受管 FreeCAD 1.1.0 runtime 和 38-tool surface。宿主订阅、模型选择
+`VibeCAD.mcpb` 启动，使用同一受管 FreeCAD 1.1.0 runtime 和 39-tool surface。宿主订阅、模型选择
 与计费均由各宿主所有，未向 VibeCAD 提交 API key。
 
 | 宿主 | 真实 Profile | 结果与持久证据 | Resource 证据 |

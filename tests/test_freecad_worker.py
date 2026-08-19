@@ -11,6 +11,7 @@ import pickle
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 import vibecad.execution.revisions as revisions_module
+from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     ProjectHead,
@@ -46,8 +48,8 @@ from vibecad.worker.codec import (
     encode_worker_request,
     encode_worker_response,
 )
-from vibecad.worker.generation import _SpawnedProcess, _WorkerProcess
-from vibecad.worker.service import WorkerService, _recv_header_with_descriptors
+from vibecad.worker.generation import _minimal_environment, _SpawnedProcess, _WorkerProcess
+from vibecad.worker.service import WorkerService, _recv_header_with_descriptors, serve_worker
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
     AcceptanceKind,
@@ -666,7 +668,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                                 result = {{"sha256": digest, "size_bytes": size}}
                         finally:
                             os.close(validation_fd)
-                    elif descriptors:
+                    elif descriptors and method != "program.begin":
                         raise SystemExit(2)
                     elif method == "candidate.release":
                         os.close(candidate_fd)
@@ -755,6 +757,11 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                             }},
                         }}
                     elif method == "program.begin":
+                        has_snapshot = "artifact_snapshot" in request["params"]
+                        if has_snapshot != (len(descriptors) == 1):
+                            raise SystemExit(2)
+                        for descriptor in descriptors:
+                            os.close(descriptor)
                         operations = request["params"]["program"]["operations"]
                         result = {{
                             "program_id": "worker_program_" + "9" * 32,
@@ -981,6 +988,27 @@ def _wait_gone(pid: int, timeout: float = 2.0) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def test_worker_environment_canonicalizes_private_freecad_roots(tmp_path: Path) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir(mode=0o700)
+    alias_root = tmp_path / "alias"
+    alias_root.symlink_to(real_root, target_is_directory=True)
+    home = alias_root / "worker"
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+
+    environment = _minimal_environment(
+        source_root=Path(__file__).parents[1] / "src",
+        home=home,
+        python=Path(sys.executable).resolve(),
+    )
+
+    for name in ("FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP"):
+        path = Path(environment[name])
+        assert path == path.resolve(strict=True)
+        assert path.is_relative_to(real_root.resolve(strict=True))
 
 
 def test_worker_codec_is_canonical_bounded_and_exact() -> None:
@@ -2793,6 +2821,58 @@ def test_multiple_scm_rights_descriptors_are_rejected_and_closed(
         right.close()
         real_close(first)
         real_close(second)
+
+
+def test_internal_executor_failure_returns_one_error_then_retires_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+
+    def fail_dispatch(
+        service: WorkerService,
+        method: str,
+        params: object,
+        descriptors: tuple[int, ...] = (),
+    ) -> dict[str, object]:
+        del service, method, params, descriptors
+        raise ExecutorError(ExecutorErrorCode.INTERNAL_FAILURE)
+
+    monkeypatch.setattr(WorkerService, "dispatch", fail_dispatch)
+    request = encode_worker_request(
+        {
+            "schema_version": 1,
+            "generation_id": _GENERATION,
+            "request_id": _REQUEST,
+            "method": "worker.ready",
+            "params": {},
+        }
+    )
+    left.sendall(struct.pack(">I", len(request)) + request)
+    try:
+        assert serve_worker(right, _GENERATION) == 3
+        header = left.recv(4)
+        assert len(header) == 4
+        remaining = struct.unpack(">I", header)[0]
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = left.recv(remaining)
+            assert chunk
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        response = decode_worker_response(
+            raw,
+            expected_generation_id=_GENERATION,
+            expected_request_id=_REQUEST,
+        )
+        assert response["ok"] is False
+        assert response["error"] == {
+            "schema_version": 1,
+            "code": WorkerWireErrorCode.INTERNAL_ERROR.value,
+        }
+    finally:
+        left.close()
+        right.close()
 
 
 def test_parent_importing_worker_supervision_does_not_import_freecad() -> None:

@@ -5,11 +5,11 @@ description: Use VibeCAD's Agent-first MCP surface to turn text or host-visible 
 
 # VibeCAD Agent
 
-Use the current 38-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, visual reconstruction, evidence, artifact, and release records as authoritative. Keep model reasoning, image understanding, subscription, and credentials with the calling host. Never infer success from prose alone.
+Use the current 39-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, visual reconstruction, evidence, artifact, and release records as authoritative. Keep model reasoning, image understanding, subscription, and credentials with the calling host. Never infer success from prose alone.
 
 ## Public tools
 
-Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`.
+Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`, `query_freecad_runtime_capabilities`.
 
 Project, task, and delivery tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release`.
 
@@ -24,6 +24,8 @@ Project, task, revision, review, artifact, release, and CAD MCP calls plus the p
 ## Required workflow
 
 Initialize or verify the runtime first. Once it is ready, call `get_capabilities` as the first business discovery tool instead of guessing CAD support or arguments. Keep every write attached to the returned project id, task id, generation, base revision, draft revision, and idempotency key.
+
+Use `query_freecad_runtime_capabilities` only when the host needs the exact native TypeId inventory of the active managed FreeCAD build. Page with the returned opaque cursor and repeat the same `module`, `semantic_kind`, `minimum_status`, and `limit`; discard the cursor and restart at page one if an integrity error reports cursor drift. A `discovered` entry is inventory, not execution authority. Use `get_capabilities` for the stable executable Agent operations and never infer that an arbitrary discovered TypeId is callable.
 
 Runtime maintenance is never a schema-recovery or task-recovery mechanism. Call
 `ensure_runtime` only when `get_runtime_status` says the runtime is not ready.
@@ -158,6 +160,12 @@ primitives, and uncertainty, but it cannot accept a CAD draft, change Task/Revis
 an uncalibrated image into dimensional truth. An empty list is valid before review evidence has
 been rendered; never fabricate a URI or fall back to an arbitrary local path.
 
+Adoption is eligible only when VibeCAD's internal exact-evidence admission recomputes as `COMPLETE`
+from the sealed images, provider evidence, calibration facts, fitted geometry, proposal, and user
+answers. The caller cannot supply or narrow that admission. Missing, stale, ambiguous, or tampered
+input fails closed before Task creation; inspect the reconstruction and recreate the affected input
+instead of blindly retrying `adopt_reconstruction`.
+
 Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic default provider as real photo-to-CAD inference, and do not make this optional lifecycle the default when the host already sees the images.
 
 ## Artifact delivery
@@ -174,7 +182,7 @@ Approval is a separate user decision. After the user approves the exact displaye
 
 The current buffered Release resource ceiling is 64 MiB. If creation returns `resource_exhausted`, report that transport limit; do not bypass it with an arbitrary filesystem path or claim that a larger package was approved.
 
-Never reconstruct retired tool names. Use only the live 38-tool surface above.
+Never reconstruct retired tool names. Use only the live 39-tool surface above.
 
 Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded geometry engine behind VibeCAD, not an authorization to run model-generated code.
 

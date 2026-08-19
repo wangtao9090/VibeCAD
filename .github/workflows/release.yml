@@ -13,9 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: tag/version consistency guard
         # Do not install the project: this stdlib-only guard rejects identity drift first.
-        run: python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+        run: >-
+          python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+          --expected-ref "$GITHUB_REF" --expected-object "$GITHUB_SHA" --require-clean
 
   quality:
     needs: version-guard
@@ -119,7 +124,12 @@ jobs:
         run: printf 'RELEASE_DIST=%s\n' "$RUNNER_TEMP/release-dist" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: recheck exact release identity before packaging
+        run: >-
+          python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+          --expected-ref "$GITHUB_REF" --expected-object "$GITHUB_SHA" --require-clean
       - uses: astral-sh/setup-uv@v6
       - name: build wheel and sdist from the guarded tag
         run: |
@@ -364,7 +374,7 @@ jobs:
             uv pip install --python "$environment/bin/python" --no-deps "$artifact"
           EXPECTED_VERSION="${GITHUB_REF_NAME#v}" EXPECTED_ROOT="$environment" \
             "$environment/bin/python" -I -c \
-              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == os.environ["EXPECTED_VERSION"]; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe"; assert len(public_tool_specs()) == 38'
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == os.environ["EXPECTED_VERSION"]; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d"; assert len(public_tool_specs()) == 39'
           done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4
@@ -383,8 +393,88 @@ jobs:
             ${{ runner.temp }}/release-dist/vibecad-agent-skill-*.zip
           if-no-files-found: error
 
+  reviewed-attestation:
+    needs: package-gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_id: macos.x86_64
+            runner: macos-15-intel
+          - platform_id: macos.arm64
+            runner: macos-15
+    env:
+      EXPECTED_PLATFORM_ID: ${{ matrix.platform_id }}
+    steps:
+      - name: bind a fresh isolated reviewed-attestation home
+        run: |
+          runtime_home="$RUNNER_TEMP/vibecad-reviewed-attestation"
+          test ! -e "$runtime_home"
+          printf 'VIBECAD_HOME=%s\n' "$runtime_home" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: download the gated Python distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: ${{ runner.temp }}/python-distributions
+      - name: bind the check to the exact gated wheel
+        id: package
+        run: |
+          shopt -s nullglob
+          wheels=("${RUNNER_TEMP}"/python-distributions/*.whl)
+          [[ ${#wheels[@]} -eq 1 ]]
+          [[ -f "${wheels[0]}" && ! -L "${wheels[0]}" ]]
+          echo "wheel=${wheels[0]}" >> "$GITHUB_OUTPUT"
+      - name: fresh-install the managed FreeCAD runtime from the gated wheel
+        env:
+          VIBECAD_PIP_SPEC: ${{ steps.package.outputs.wheel }}
+        run: |
+          bootstrap="$RUNNER_TEMP/reviewed-attestation-bootstrap"
+          test ! -e "$bootstrap"
+          uv venv --python 3.12 "$bootstrap"
+          uv pip install --python "$bootstrap/bin/python" --no-deps "$VIBECAD_PIP_SPEC"
+          "$bootstrap/bin/python" -I -c \
+            'from vibecad.runtime.installer import RuntimeInstaller; RuntimeInstaller().install()'
+          managed_python="$("$bootstrap/bin/python" -I -c \
+            'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
+          [[ -x "$managed_python" ]]
+          echo "VIBECAD_MANAGED_FREECAD_PYTHON=$managed_python" >> "$GITHUB_ENV"
+      - name: assert the trusted managed platform matches the matrix
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I -c
+          "import os,pathlib,sys;
+          from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id;
+          expected=os.environ['EXPECTED_PLATFORM_ID']; actual=_platform_id();
+          executable=pathlib.Path(sys.executable).resolve(); home=pathlib.Path(os.environ['VIBECAD_HOME']).resolve();
+          assert executable.is_relative_to(home), (executable,home);
+          assert actual == expected, (actual,expected)"
+      - name: validate the exact installed reviewed-attestation resource
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I -c
+          "import os,pathlib,vibecad;
+          from vibecad.execution.freecad_reviewed_release_attestation import decode_freecad_reviewed_release_attestation;
+          from vibecad.execution.freecad_reviewed_release_attestation_resource import load_current_packaged_freecad_reviewed_release_attestation;
+          home=pathlib.Path(os.environ['VIBECAD_HOME']).resolve(); installed=pathlib.Path(vibecad.__file__).resolve();
+          assert installed.is_relative_to(home), (installed,home);
+          packaged=load_current_packaged_freecad_reviewed_release_attestation();
+          attestation=decode_freecad_reviewed_release_attestation(packaged.raw,expected_source_attestation_sha256=packaged.resource_sha256);
+          verification=attestation.verification_set; expected=os.environ['EXPECTED_PLATFORM_ID'];
+          assert attestation.runtime_backend.platform_id == expected, (attestation.runtime_backend.platform_id,expected);
+          assert len(verification.receipts) == 21;
+          assert len(verification.formal_operations) == 126;
+          assert len(verification.native_types) == 102"
+      - name: exact packaged reviewed-attestation gate (${{ matrix.platform_id }})
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I
+          .github/scripts/generate_freecad_reviewed_release_attestation.py --check
+
   pypi:
-    needs: [package-gate, managed-agent]
+    needs: [package-gate, managed-agent, reviewed-attestation]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -401,7 +491,7 @@ jobs:
           packages-dir: dist/
 
   mcpb:
-    needs: [package-gate, managed-agent]
+    needs: [package-gate, managed-agent, reviewed-attestation]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -527,7 +527,7 @@ def _normalize_field(
         if _OBJECT_ID.fullmatch(value) is None:
             _raise(TaskApiErrorCode.INVALID_VALUE, path)
         return value, None
-    if shape is ValueShape.RESULT_REF:
+    if shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
         _raise(TaskApiErrorCode.INVALID_VALUE, path)
     _raise(TaskApiErrorCode.INVALID_INPUT, path)
 
@@ -1106,6 +1106,20 @@ _CLARIFICATION_QUESTION_PATTERN = r"^clarification_question_[0-9a-f]{32}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
 _OBJECT_TYPE_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
 _VERSION_PATTERN = r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
+_FREECAD_CAPABILITY_MODULE_PATTERN = r"^(?!.*(?:\.\.|//))[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,191}$"
+_FREECAD_CAPABILITY_CURSOR_PATTERN = r"^[A-Za-z0-9_-]{1,2048}$"
+_FREECAD_CAPABILITY_SEMANTIC_KINDS = (
+    "document_object",
+    "property_type",
+    "extension_type",
+    "native_type",
+)
+_FREECAD_CAPABILITY_STATUSES = (
+    "discovered",
+    "representable",
+    "executable",
+    "verified",
+)
 
 _STABLE_TOOL_NAMES = (
     "ping",
@@ -1113,6 +1127,7 @@ _STABLE_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -1149,6 +1164,7 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "ensure_runtime": "安装、升级或验证受管 FreeCAD 运行时",
         "uninstall_runtime": "预览或确认清理受管 CAD 运行时，保留项目数据",
         "get_capabilities": "返回当前可执行操作的冻结能力元数据",
+        "query_freecad_runtime_capabilities": "分页查询当前受管 FreeCAD 运行时的原生能力索引",
         "create_project": "创建空项目或导入仅含长方体和圆柱体的 FCStd 作为第零代",
         "get_project": "读取持久化项目的当前版本",
         "list_projects": "分页发现持久化项目的当前已提交版本摘要",
@@ -1381,7 +1397,7 @@ def _field_schema(field: FieldMetadata) -> dict[str, object]:
         return _selector_schema()
     if shape is ValueShape.OBJECT_ID:
         return _id_schema(_OBJECT_ID.pattern)
-    if shape is ValueShape.RESULT_REF:
+    if shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
         raise ValueError("direct public tools cannot expose result references")
     raise ValueError("unsupported registry value shape")
 
@@ -1651,6 +1667,129 @@ def _capabilities_result_schema() -> dict[str, object]:
                 "type": "array",
                 "items": _capability_operation_schema(),
             },
+        }
+    )
+
+
+def _freecad_capability_layer_schema(status: str) -> dict[str, object]:
+    return _nullable(
+        _closed_schema(
+            {
+                "catalog_sha256": _id_schema(_DIGEST_PATTERN),
+                "descriptor_sha256": _id_schema(_DIGEST_PATTERN),
+                "promotion_pack_sha256": _nullable(_id_schema(_DIGEST_PATTERN)),
+                "status": {"type": "string", "const": status},
+            }
+        )
+    )
+
+
+def _freecad_capability_entry_schema() -> dict[str, object]:
+    identifier = {
+        "type": "string",
+        "pattern": _FREECAD_CAPABILITY_MODULE_PATTERN,
+        "maxLength": 192,
+    }
+    return _closed_schema(
+        {
+            "capability_id": identifier,
+            "declaring_module": identifier,
+            "active_descriptor_sha256": _id_schema(_DIGEST_PATTERN),
+            "active_status": {
+                "type": "string",
+                "enum": _FREECAD_CAPABILITY_STATUSES,
+            },
+            "inheritance_family_native_type_id": identifier,
+            "layers": _closed_schema(
+                {
+                    status: _freecad_capability_layer_schema(status)
+                    for status in _FREECAD_CAPABILITY_STATUSES
+                }
+            ),
+            "native_type_id": identifier,
+            "parent_native_type_id": _nullable(identifier),
+            "semantic_kind": {
+                "type": "string",
+                "enum": _FREECAD_CAPABILITY_SEMANTIC_KINDS,
+            },
+        }
+    )
+
+
+def _freecad_runtime_binding_schema() -> dict[str, object]:
+    digest_array = {
+        "type": "array",
+        "items": _id_schema(_DIGEST_PATTERN),
+        "maxItems": 64,
+        "uniqueItems": True,
+    }
+    return _closed_schema(
+        {
+            "backend": _closed_schema(
+                {
+                    "backend_id": _bounded_text_schema(128),
+                    "backend_version": {
+                        "type": "array",
+                        "items": _safe_integer_schema(minimum=0, maximum=999_999),
+                        "minItems": 1,
+                        "maxItems": 4,
+                    },
+                    "build_fingerprint_sha256": _id_schema(_DIGEST_PATTERN),
+                    "discovery_profile": {
+                        "type": "string",
+                        "enum": ("headless", "offscreen_gui", "interactive_gui"),
+                    },
+                    "platform_id": _bounded_text_schema(128),
+                }
+            ),
+            "binding_sha256": _id_schema(_DIGEST_PATTERN),
+            "compiler_catalog_sha256": _id_schema(_DIGEST_PATTERN),
+            "discovery_manifest_sha256": _id_schema(_DIGEST_PATTERN),
+            "discovery_snapshot_sha256": _id_schema(_DIGEST_PATTERN),
+            "extra_formal_catalog_sha256": digest_array,
+            "intent_catalog_sha256": _id_schema(_DIGEST_PATTERN),
+            "native_type_count": _safe_integer_schema(minimum=0),
+            "operation_catalog_sha256": _id_schema(_DIGEST_PATTERN),
+            "projection_catalog_sha256": _id_schema(_DIGEST_PATTERN),
+            "projection_manifest_sha256": _id_schema(_DIGEST_PATTERN),
+            "promotion_pack_sha256": digest_array,
+            "schema_version": _version_schema(),
+        }
+    )
+
+
+def _freecad_capability_query_page_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "entries": {
+                "type": "array",
+                "items": _freecad_capability_entry_schema(),
+                "maxItems": 128,
+            },
+            "next_cursor": _nullable(
+                {
+                    "type": "string",
+                    "pattern": _FREECAD_CAPABILITY_CURSOR_PATTERN,
+                    "maxLength": 2048,
+                }
+            ),
+            "offset": _safe_integer_schema(minimum=0),
+            "page_sha256": _id_schema(_DIGEST_PATTERN),
+            "page_size": _safe_integer_schema(minimum=1, maximum=128),
+            "query_sha256": _id_schema(_DIGEST_PATTERN),
+            "runtime_binding_sha256": _id_schema(_DIGEST_PATTERN),
+            "schema_version": _version_schema(),
+            "total_matches": _safe_integer_schema(minimum=0),
+        }
+    )
+
+
+def _freecad_runtime_capabilities_result_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "runtime_binding": _freecad_runtime_binding_schema(),
+            "query_page": _freecad_capability_query_page_schema(),
         }
     )
 
@@ -2433,6 +2572,34 @@ def _stable_input_schema(name: str) -> dict[str, object]:
         return _closed_schema({"confirm": {"type": "boolean"}})
     if name == "get_capabilities":
         return _closed_schema({"schema_version": _version_schema()})
+    if name == "query_freecad_runtime_capabilities":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "module": {
+                    "type": "string",
+                    "pattern": _FREECAD_CAPABILITY_MODULE_PATTERN,
+                    "maxLength": 192,
+                },
+                "semantic_kind": {
+                    "type": "string",
+                    "enum": _FREECAD_CAPABILITY_SEMANTIC_KINDS,
+                },
+                "minimum_status": {
+                    "type": "string",
+                    "enum": _FREECAD_CAPABILITY_STATUSES,
+                },
+                "limit": _safe_integer_schema(minimum=1, maximum=128),
+                "cursor": _nullable(
+                    {
+                        "type": "string",
+                        "pattern": _FREECAD_CAPABILITY_CURSOR_PATTERN,
+                        "maxLength": 2048,
+                    }
+                ),
+            },
+            required=("schema_version",),
+        )
     if name == "create_project":
         return _closed_schema(
             {
@@ -2691,6 +2858,8 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _uninstall_result_schema()
     if name == "get_capabilities":
         return _capabilities_result_schema()
+    if name == "query_freecad_runtime_capabilities":
+        return _freecad_runtime_capabilities_result_schema()
     if name == "create_project":
         return _project_create_result_schema()
     if name == "get_project":
@@ -2742,6 +2911,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "ensure_runtime": (False, True, True, True),
         "uninstall_runtime": (False, True, True, False),
         "get_capabilities": (True, False, True, False),
+        "query_freecad_runtime_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),

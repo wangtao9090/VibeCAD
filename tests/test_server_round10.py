@@ -23,6 +23,7 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "ensure_runtime": (False, True, True, True),
         "uninstall_runtime": (False, True, True, False),
         "get_capabilities": (True, False, True, False),
+        "query_freecad_runtime_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),
@@ -93,10 +94,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 30_370
+    assert len(raw) == 31_459
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "65eddfcc6049a072eb8649c1adddde75f498622765dd85a39e1d1980925af183"
+        "c4c4b904bf04c5b7c2a7d22bb14153597ce4e2e7d90afe481eac23e4964169ee"
     )
     for tool in tools:
         assert tool.title is None

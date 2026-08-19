@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`v0.9.0` 已发布；A09 首批四路线能力已合入；视觉审核集成进行中**
+> 状态：**`v0.9.0` 已发布；A09 四路线与视觉审核已合入；A11 照片产品流集成进行中**
 >
 > 更新：2026-08-08
 >
-> 产品基线：已发布 `v0.9.0@900ca1a`；当前锚点 `main@a8e6b94`
+> 产品基线：已发布 `v0.9.0@900ca1a`；当前锚点 `main@6fc966e`
 >
-> 当前里程碑：S43/S44、F10、M10、F20 首批能力已合入；继续闭合视觉 review workflow
+> 当前里程碑：S43/S44、F10、M10、F20 与视觉 review workflow 已合入；继续闭合统一照片产品流
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -698,13 +698,14 @@ data layout；成功的 reconstruction result 可带至多 16 个严格 `review_
 ResourceLink；`resources/read` 返回 binary Blob，且纯本地审核读取不会启动 FreeCAD。Codex、Claude 与
 WorkBuddy 共享同一 URI/schema，不增加宿主专用公开工具。
 
-当前 follow-on 候选把该资源面闭合为应用工作流：只有 durable observation/proposal 提交完成后，才从同一
+PR #37 已把该资源面闭合为应用工作流：只有 durable observation/proposal 提交完成后，才从同一
 进程中已绑定到 exact invocation/result/receipt 的 Provider evidence 读取坐标，并用封存 normalized PNG
 生成、幂等发布审核图；进程重启后若 evidence 不在内存中，则只返回既有记录，绝不重放 Provider 调用。
 reconstruction 删除会先通过 application-owned cleanup port 发布 observation 永久墓碑，再提交 draft
 tombstone 和删除源图，因此中途失败可按同一 generation 重试。该候选不新增 MCP tool、public/durable
 schema、Task/Revision/HEAD 权威或 CAD 写能力；完成代码门也仍不能单独宣称真实照片端到端结果，后者等待
-用户重新附图后的受控 E2E gate。
+用户重新附图后的受控 E2E gate。该实现已合入 `main@6fc966e`，最新 main CI run `31258950080` 全绿；
+它仍是产品流组件，不单独等价于一个从任意照片自动生成 CAD 的公共工具。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 
@@ -828,7 +829,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已完成；2026-08-04；v0.7.0** |
 | `VCAD-A07` | 启动 S40 Guided Photo V3 普通照片机械重建 | **已批准；2026-08-05** |
 | `VCAD-A08` | 将 S40 作为 v0.8.0 发布，并在发布后启动 S41 派生表达式联动 | **已完成；2026-08-06；v0.8.0** |
-| `VCAD-A09` | 将 S41/S42 发布为 v0.9.0，并启动 Mechanical、F10、M10、F20 四路线 20 小时冲刺 | **已批准；2026-08-07；执行中** |
+| `VCAD-A09` | 将 S41/S42 发布为 v0.9.0，并启动 Mechanical、F10、M10、F20 四路线 20 小时冲刺 | **已完成；2026-08-08；首批能力已合入 main** |
+| `VCAD-A11` | 串联 preflight、显式尺度/标定、证据拟合、参数化候选与 review Resource | **执行中；2026-08-08** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -877,21 +879,58 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - 当前 Task API `program_json` 上限为 512 KiB、program JSON 与 IR node 上限均为 8,192；原有
   3,405-node fixture 以及 S40.3 的 4,427-node host-authored fan IR 均已通过普通 program/durable TaskRun
   round-trip，参数总数上限为 128；
-- `.workbuddy/` 与两份 CAD 课程文档均为用户所有，不在本计划范围。
+- `.workbuddy/` 与两份 CAD 课程文档均为用户所有，不在本计划范围；主工作区出现的未跟踪
+  `* 2.py` / `* 2.json` 副本同样保持用户所有，后续实现继续使用从 `origin/main` 创建的隔离 worktree；
+- VibeCAD-created managed runtime 从 2026-08-08 起默认作为持续环境保留和复用，仅在用户明确要求时
+  清理；每轮 scratch、cache、输入副本、probe 和临时宿主 session 仍在验收后精确清理。下一次真实
+  FreeCAD gate 需重装一次已在旧规则下删除的 runtime，随后不再按轮次删除；
+- Blender 实现等迁移到 M4 mini 后启动，runtime 与开发工作区放在
+  `/Volumes/ExtSSD/DevArchive`；当前主机只允许继续 B10 设计，不安装或执行 Blender。
 
 当前下一动作：
 
 ```text
-v0.8.0 已发布 Guided Photo V3。S41 派生表达式与 S42 语义 Fillet/Chamfer 已完成并合入
-`main@0361aff`，公共 MCP、Task/Revision durable schema、runtime epoch 与单一写入权威均未改变。
-VCAD-A09 已批准从该内容准备 v0.9.0，并在公开发布锚点完成后从同一 tag/merge commit 创建四个
-隔离 worktree：Mechanical S43（之后串行 S44）、F10 Freeform、M10 planar metrology、F20 Mesh/SubD。
-首个并行切片分别限制在现有机械 compiler、新建 freeform 模块、无持久化的本地 metrology kernel、
-以及非权威 derived-artifact contracts/fake adapter；跨路线接线、durable v2、纯曲面 Revision 和
-Mesh/SubD 权威 payload 仍由后续显式集成门处理。
+v0.9.0 已发布。S43/S44、F10、M10/Q10/G10、F20 和 Visual review workflow 已通过
+PR #22–#37 合入 `main@6fc966e`；当前没有开放 PR，最新 main CI 全绿。post-v0.9 main 能力尚未
+进入一个新的公开版本。
+
+VCAD-A11 先并行完成两个无权威切片：一条把 exact sealed ImageSet 读成 deterministic capture-quality
+preflight；一条冻结照片机械重建 readiness/scale/conflict/unknown 的 fail-closed 合同。汇合后串行组成
+ImageSet -> preflight -> Provider evidence -> explicit calibration -> bounded fit -> confirmed
+ParametricDesignIR/ModelProgram -> REQUIRE_REVIEW Task -> FCStd/STEP Resource 的统一产品入口。
+
+该入口在缺尺度、遮挡、冲突或 required fit unknown 时不得创建 CAD Task；成功路径仍停在
+awaiting_user_review，HEAD 不自动前移。随后使用同一候选身份分别完成 Codex、Claude、WorkBuddy
+fresh-process 恢复和 Resource read，再决定下一版本发布。Blender/B10 实现继续等待 M4 mini 迁移。
+
+首个 A11 候选保持无权威：只增加 exact sealed capture preflight 与 deterministic advisory
+readiness receipt。Task 写边界要等后续合同同时证明“校准来源不可替换”和“proposal/IR 所有 evidence
+consumer 完整覆盖”后再接入。旧的公开 `adopt_reconstruction` 入口保持不变，因此当前不能声明照片
+产品或所有旧 adoption 路径已经被全局拦截。
+
+第二个 A11 候选已在不接写路径的前提下冻结这两份合同：planar calibration 只接收 exact
+ImageSet/Provider overview binding、已确认 metric landmarks 与 metric frame，矩阵、eligibility 和 receipt
+digest 全部由内部推导，且 `task_adoption_eligible` 恒为 false；proposal coverage 只接收 exact
+ReconstructionProposal，自动枚举首期矩形 Pad 与可选 Through-All Hole 的全部 CAD-effective consumer，
+拒绝 caller requirements 子集、orphan evidence/claim、未验证 Hole 方向和超出包络的 feature。两者仍只是
+process-local integrity/checklist artifact；confirmation authenticity、evidence/fit evaluator、durable recovery
+和 Task admission 继续是后续独立门。汇合候选完整非慢速门为 6,300 passed、1 个 expected integration
+skip，未增加 public export、MCP tool、durable schema、Provider call、CAD operation 或 Task/Revision/HEAD
+路径。
+
+第三个 A11 候选完成 authority-free evaluator：唯一入口只接 exact Proposal、sealed VisualInputStore、
+Provider image batch、raw Provider feature points 与 confirmed planar landmarks/frame。application 内部重新
+读取 sealed PNG、计算 capture quality、按 profile byte-exact 重建 no-crop batch、生成 calibration、绑定 raw
+evidence、套用固定 fit policy、重跑 geometry fit 并 derive coverage；调用方不能传 capture/evidence/fit/
+receipt/plan/requirements/policy/tolerance/clarification override。矩形 Pad 与可选 1/3/16 Hole 可得到无权威
+`COMPLETE`；空白图、点位偏移/坍缩、替代 batch、缺显式确认、高不确定度与 LINE-only profile 均不能。
+sealed report digest 完整绑定 capture/evidence/fit 记录，`task_adoption_eligible` 仍恒为 false。独立复核发现
+并关闭 4 个 P1；最终完整非慢速门为 6,312 passed、1 skipped、145 deselected。durable admission sidecar
+与 Task creation 仍未实现。
 ```
 
-S41 实现分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39547`，已由 PR #16 合入
+当前 A11 隔离分支均从 `main@6fc966e` 创建；S41 实现分支为
+`codex/s41-derived-expressions`，起始锚点为 `main@9d39547`，已由 PR #16 合入
 `main@3199c61`；S40 历史分支为 `codex/guided-photo-s40`。S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
@@ -901,8 +940,8 @@ S41 实现分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39
 三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。`VCAD-A08`
 已完成 v0.8.0 的版本面、发布候选、PR/main、tag、GitHub Release、PyPI、公开安装与精确清理；
 S41 的结构化仿射合同与 S42 的语义边处理均已闭合；PR #18 合入 `main@5950da2`，收口记录由
-PR #19 合入 `main@0361aff`。当前恢复动作是完成 v0.9.0 same-candidate 发布，然后按 VCAD-A09
-创建四个隔离实现 worktree。`VCAD-A05` 已批准。
+PR #19 合入 `main@0361aff`。v0.9.0 与 A09 首批集成已经完成；当前恢复动作是继续 A11 的
+preflight/readiness 并行切片，随后串行接入统一照片产品流。`VCAD-A05` 已批准。
 
 ## 11. Material event ledger
 
@@ -947,6 +986,10 @@ PR #19 合入 `main@0361aff`。当前恢复动作是完成 v0.9.0 same-candidate
 | `VCAD-E36` | S41 PR/CI/merge closeout | PR #16 从 draft 转为 ready，在无评论、无 review blocker、`CLEAN` 状态下以 merge commit 合入 main | `lint-unit` 2m21s、`runtime-integration` 1m55s；main `3199c61a727a7ed20827ee6372187d2434bc773d`；本地 focused `75 passed, 11 deselected`；完整回归与真实 FreeCAD 证据沿用 E35 | S41 完成；下一动作停在新的产品范围确认，Freeform 仍等待 `VCAD-A05` |
 | `VCAD-E37` | 用户批准 S42 有界语义边处理范围 | ParametricDesignIR v1 仅增加可选 Fillet/Chamfer tail；Body 继续承载稳定 part identity，最后一个 native Part tail 是 result root；选择以 source feature + source sketch geometry + section/sweep role 重建，不新增 MCP、durable、runtime epoch、SelectorV1 或写权威 | 分支 `codex/s42-semantic-edge-treatments` 起始于 `main@c67ba15`；focused contract/compiler/Skill `77 passed`，Task/executor `431 passed`，package/Skill/release `31 passed`；隔离完整回归 `5,950 passed, 133 deselected`；真实 managed FreeCAD 覆盖 Pad/Pocket/Hole/Revolve、变量/常量/逐边独立 Fillet、对称 Chamfer、修改、方向翻转回滚与重开，共 `13 passed`；约 8.1 GB 测试 runtime/cache 与探针已精确清理 | 发布分支 closeout 尚待完成；任意 STEP 边、自动切线链、变量 Chamfer、多点半径律、复杂 blend、语义 merge 和手工拓扑修复均不在范围 |
 | `VCAD-E38` | S42 PR/CI/merge closeout | PR #18 从 draft 转为 ready，在无 review blocker、`CLEAN` 状态下以 merge commit 合入 main；测试 runtime/cache 与探针在合并前已精确清理，用户 FreeCAD app 与未跟踪文件保持不变 | `lint-unit` 3m24s、`runtime-integration` 2m49s；Actions [`31173378976`](https://github.com/wangtao9090/VibeCAD/actions/runs/31173378976) 全绿；main `5950da2a852b3f3b1fa530b6bf06de9f7504d32b`；完整回归和真实 FreeCAD 证据沿用 E37 | S42 完成；任意 STEP 边、自动切线链、变量 Chamfer、多点半径律、复杂 blend、语义 merge 和手工拓扑修复继续不在范围 |
+| `VCAD-E39` | `VCAD-A09` closeout 与用户批准继续并行 A11 | PR #22–#37 将 S43/S44、F10、M10/Q10/G10、F20、evidence/fit/overlay/review workflow 全部合入 main；A11 从模块建设转入统一照片产品流 | `main@6fc966e`；Actions [`31258950080`](https://github.com/wangtao9090/VibeCAD/actions/runs/31258950080) 全绿；没有开放 PR；私有 11-photo blade 为 42 parameters / 5 sketches `DoF=0` / 6 features + Fillet / valid one solid / 4 verifier pass / HEAD unchanged / IoU `0.957064`；恢复动作是并行 preflight 与 readiness，再串行接线 | main 上 post-v0.9 能力尚未发布；私有结果使用独立参考尺寸，只证明 bounded assisted reconstruction，不证明无尺度通用重建；私有输入和工件不入库 |
+| `VCAD-E40` | 用户改变 runtime 保留策略并继续批准并行执行 | VibeCAD-created managed runtime 默认持续保留/复用，只有用户明确要求才删除；scratch/cache/input copies/probes/临时宿主 session 仍可精确清理；Blender 实现等待 M4 mini | 当前私有 pilot runtime 已按旧规则删除，下一真实 FreeCAD gate 重装一次后保留；M4 mini 的 Blender/runtime/workspace 目标根为 `/Volumes/ExtSSD/DevArchive` | runtime fingerprint 或依赖变化仍需显式 conformance；持续环境不是跳过版本、完整性或真实运行时门的理由 |
+| `VCAD-E41` | A11 calibration-source 与 proposal-consumer coverage 合同门 | 私有 in-memory calibration receipt 从 exact ImageSet/Provider overview、confirmed landmarks 和 metric frame 内部拟合；私有 proposal plan 从 exact Proposal 自动枚举矩形 Pad 与可选 Through-All Hole 的完整 CAD consumer，拒绝 requirement 子集、orphan evidence/claim 与未验证 Hole 方向 | 两条实现分别独立 review、三项 calibration 与三项 coverage finding 均补回归闭合；汇合分支 176 focused/adjacent passed，完整非慢速 6,300 passed、1 skipped、145 deselected；Ruff/format/diff/worktree clean | receipt 未认证/未持久化且 `task_adoption_eligible=false`；coverage 尚未评估 confirmation/calibration/evidence/fit；不得接 Task、MCP、Revision/HEAD |
+| `VCAD-E42` | A11 application-owned proposal-evidence evaluator gate | 从 sealed store 与 raw Provider feature 输入内部重算 capture、provider batch、calibration、bound evidence、fit 与完整 coverage；固定 rectangle/Pad/optional Hole 包络，不接受 caller-derived report、policy 或 tolerance | 初审 3 个派生输入 P1 与终审 1 个 digest-binding P1 均补回归闭合；最终独立 review CLEAN；focused/adjacent 150 passed，完整非慢速 6,312 passed、1 skipped、145 deselected；Ruff/diff/worktree clean | report 仍为 process-local authority-free，`task_adoption_eligible=false`；ReconstructionDraft admission sidecar、重启恢复与 Task write seam 尚未实现 |
 
 ## 12. 研究依据
 

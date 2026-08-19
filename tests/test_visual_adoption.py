@@ -17,6 +17,10 @@ from tests.test_visual_service import (
     _stores,
 )
 from vibecad.runtime.contracts import RuntimeDiagnostic
+from vibecad.visual.admission_gate import (
+    VisualAdmissionGateError,
+    VisualAdmissionGateErrorCode,
+)
 from vibecad.visual.adoption import (
     VisualAdoptionAbsenceReceipt,
     VisualAdoptionReceipt,
@@ -91,9 +95,11 @@ class _AdoptionProbe:
         self._reconcile_result = reconcile_result
         self.ensure_calls: list[VisualAdoptionRequest] = []
         self.reconcile_calls: list[VisualAdoptionRequest] = []
+        self.inspect_calls: list[str] = []
 
     def inspect_head(self, project_id: str) -> BaseHeadBinding:
         assert project_id == self._head.project_id
+        self.inspect_calls.append(project_id)
         return self._head
 
     def ensure_review_task(
@@ -148,11 +154,48 @@ class _AdoptionProbe:
         return _receipt(request)
 
 
-def _service(inputs, drafts, provider, adoption=None) -> VisualReconstructionService:
+class _AdmissionProbe:
+    def __init__(
+        self,
+        *,
+        drafts,
+        failure: VisualAdmissionGateErrorCode | None = None,
+    ) -> None:
+        self._drafts = drafts
+        self._failure = failure
+        self.calls: list[tuple[str, int, ReconstructionStatus]] = []
+
+    def require_exact(
+        self,
+        reconstruction_id: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        draft = self._drafts.load(reconstruction_id)
+        assert draft.generation == expected_generation
+        self.calls.append((reconstruction_id, expected_generation, draft.status))
+        if self._failure is not None:
+            raise VisualAdmissionGateError(self._failure)
+
+
+_DEFAULT_ADMISSION = object()
+
+
+def _service(
+    inputs,
+    drafts,
+    provider,
+    adoption=None,
+    *,
+    admission=_DEFAULT_ADMISSION,
+) -> VisualReconstructionService:
+    if admission is _DEFAULT_ADMISSION:
+        admission = _AdmissionProbe(drafts=drafts) if adoption is not None else None
     return VisualReconstructionService(
         inputs=inputs,
         drafts=drafts,
         provider=VisualProviderBinding(provider=provider),
+        admission=admission,
         adoption=adoption,
     )
 
@@ -244,6 +287,79 @@ def test_adoption_head_mismatch_has_no_task_effect(tmp_path: Path) -> None:
     assert service.get(proposed.reconstruction_id) == proposed
 
 
+@pytest.mark.parametrize(
+    ("gate_code", "service_code"),
+    [
+        (VisualAdmissionGateErrorCode.NOT_READY, VisualServiceErrorCode.INVALID_STATE),
+        (
+            VisualAdmissionGateErrorCode.INTEGRITY_FAILURE,
+            VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH,
+        ),
+        (
+            VisualAdmissionGateErrorCode.UNAVAILABLE,
+            VisualServiceErrorCode.ADOPTION_UNAVAILABLE,
+        ),
+    ],
+)
+def test_admission_failure_precedes_head_inspection_and_task_effect(
+    tmp_path: Path,
+    gate_code: VisualAdmissionGateErrorCode,
+    service_code: VisualServiceErrorCode,
+) -> None:
+    inputs, drafts, _, provider, _, proposed, _ = _proposed(tmp_path)
+    adoption = _AdoptionProbe(drafts=drafts)
+    admission = _AdmissionProbe(drafts=drafts, failure=gate_code)
+    service = _service(
+        inputs,
+        drafts,
+        provider,
+        adoption,
+        admission=admission,
+    )
+
+    with pytest.raises(VisualServiceError) as caught:
+        service.adopt(
+            proposed.reconstruction_id,
+            expected_generation=proposed.generation,
+        )
+
+    assert caught.value.code is service_code
+    assert admission.calls == [
+        (
+            proposed.reconstruction_id,
+            proposed.generation,
+            ReconstructionStatus.PROPOSED,
+        )
+    ]
+    assert adoption.inspect_calls == []
+    assert adoption.ensure_calls == []
+    assert adoption.reconcile_calls == []
+    assert service.get(proposed.reconstruction_id) == proposed
+
+
+def test_missing_admission_composition_cannot_reach_adoption_port(tmp_path: Path) -> None:
+    inputs, drafts, _, provider, _, proposed, _ = _proposed(tmp_path)
+    adoption = _AdoptionProbe(drafts=drafts)
+    service = _service(
+        inputs,
+        drafts,
+        provider,
+        adoption,
+        admission=None,
+    )
+
+    with pytest.raises(VisualServiceError) as caught:
+        service.adopt(
+            proposed.reconstruction_id,
+            expected_generation=proposed.generation,
+        )
+
+    assert caught.value.code is VisualServiceErrorCode.INVALID_STATE
+    assert adoption.inspect_calls == []
+    assert adoption.ensure_calls == []
+    assert service.get(proposed.reconstruction_id) == proposed
+
+
 def test_lost_adoption_response_recovers_by_reconcile_without_duplicate_ensure(
     tmp_path: Path,
 ) -> None:
@@ -298,6 +414,58 @@ def test_restart_from_durable_adopting_publishes_recovery_then_only_reconciles(
     assert adopted.status is ReconstructionStatus.ADOPTED
     assert adoption.ensure_calls == []
     assert len(adoption.reconcile_calls) == 1
+
+
+def test_restart_admission_failure_precedes_any_reconcile_task_effect(
+    tmp_path: Path,
+) -> None:
+    inputs, drafts, _, provider, _, proposed, proposal = _proposed(tmp_path)
+    adoption_key, adoption_intent = derive_adoption_identity(
+        proposed.reconstruction_id,
+        proposal.digest,
+        proposed.base_head.sha256,
+    )
+    adopting = drafts.compare_and_set(
+        proposed.reconstruction_id,
+        proposed.generation,
+        dataclasses.replace(
+            proposed,
+            generation=proposed.generation + 1,
+            status=ReconstructionStatus.ADOPTING,
+            adoption_key_sha256=adoption_key,
+            adoption_intent_sha256=adoption_intent,
+        ),
+    )
+    adoption = _AdoptionProbe(drafts=drafts)
+    admission = _AdmissionProbe(
+        drafts=drafts,
+        failure=VisualAdmissionGateErrorCode.INTEGRITY_FAILURE,
+    )
+    service = _service(
+        inputs,
+        drafts,
+        provider,
+        adoption,
+        admission=admission,
+    )
+
+    recovery = service.run(
+        adopting.reconstruction_id,
+        expected_generation=adopting.generation,
+    )
+
+    assert recovery.status is ReconstructionStatus.RECOVERY_REQUIRED
+    assert recovery.last_error.phase == "admission_revalidate"
+    assert admission.calls == [
+        (
+            adopting.reconstruction_id,
+            adopting.generation + 1,
+            ReconstructionStatus.RECOVERY_REQUIRED,
+        )
+    ]
+    assert adoption.inspect_calls == []
+    assert adoption.ensure_calls == []
+    assert adoption.reconcile_calls == []
 
 
 def test_wrong_adoption_receipt_enters_recovery(tmp_path: Path) -> None:

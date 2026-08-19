@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -15,6 +18,28 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vibecad.execution.executor as executor_module
+import vibecad.execution.freecad_part_profile_surface_reviewed_execution as profile_execution
+from tests.test_execution_freecad_part_curve_reviewed_execution import (
+    _reviewed_program as reviewed_curve_program,
+)
+from tests.test_execution_freecad_part_offset_projection_reviewed_execution import (
+    _program as reviewed_offset_program,
+)
+from tests.test_execution_freecad_part_profile_surface_reviewed_execution import (
+    _program as reviewed_profile_surface_program,
+)
+from tests.test_execution_freecad_partdesign_dressup_transform_reviewed_execution import (
+    _lower as lower_reviewed_dressup,
+)
+from tests.test_execution_freecad_partdesign_dressup_transform_reviewed_execution import (
+    _program as reviewed_dressup_program,
+)
+from tests.test_execution_freecad_partdesign_primitive_reviewed_execution import (
+    _program as reviewed_partdesign_primitive_program,
+)
+from tests.test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
+from tests.test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
+from tests.test_reviewed_part_csg_product import reviewed_csg_program
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
@@ -27,6 +52,37 @@ from vibecad.execution.executor import (
     ExecutorError,
     ExecutorErrorCode,
     InProcessCadExecutor,
+)
+from vibecad.execution.freecad_part_offset_projection_reviewed_execution import (
+    PART_OFFSET_RESULT_INVARIANTS,
+    PartOffsetOwnershipClosure,
+)
+from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
+    PART_PROFILE_SURFACE_RESULT_INVARIANTS,
+    PartProfileSurfaceOwnershipClosure,
+)
+from vibecad.execution.freecad_partdesign_dressup_transform_reviewed_execution import (
+    PartDesignDressupOwnershipClosure,
+)
+from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
+    PARTDESIGN_PRIMITIVE_RESULT_INVARIANTS,
+    PartDesignPrimitiveOwnershipClosure,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    REVIEWED_PART_BOX_ROUTE,
+    REVIEWED_PART_CSG_ROUTES,
+    REVIEWED_PART_CURVE_ROUTES,
+    REVIEWED_PART_DATUM_ROUTES,
+    REVIEWED_PART_OFFSET_ROUTES,
+    REVIEWED_PART_PROFILE_SURFACE_ROUTES,
+    REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
+    REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
+    ReviewedIntentExecutionError,
+    ReviewedIntentExecutionErrorCode,
+    ReviewedNativeExecutionResult,
+    _ReviewedFamilyExecutionContext,
+    _ReviewedFamilyNativeExecution,
+    lower_reviewed_intent,
 )
 from vibecad.execution.registry import (
     FieldMetadata,
@@ -43,12 +99,53 @@ from vibecad.execution.revisions import (
     RevisionStoreError,
     RevisionStoreErrorCode,
 )
-from vibecad.execution.selectors import index_entity_identities
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    Provenance,
+    ProvenanceSource,
+    SemanticRole,
+    index_entity_identities,
+)
+from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
+from vibecad.parametric import freecad_partdesign_dressup_transform_rules as dressup_rules
+from vibecad.parametric.freecad_part_core_rules import (
+    PART_CORE_NATIVE_SPECS,
+    PartCoreConformanceReceipt,
+    PartCoreOperation,
+)
+from vibecad.parametric.freecad_part_curve_rules import (
+    PartCurveConformanceReceipt,
+    PartCurveOperation,
+    PartCurveShapeSignature,
+)
+from vibecad.parametric.freecad_part_datum_rules import (
+    PART_DATUM_NATIVE_TYPE_IDS,
+    PartDatumConformanceReceipt,
+    PartDatumOperation,
+)
+from vibecad.parametric.freecad_part_offset_projection_rules import (
+    PartOffsetConformanceReceipt,
+    PartOffsetOperation,
+)
+from vibecad.parametric.freecad_part_profile_surface_rules import (
+    PartProfileSurfaceConformanceReceipt,
+    PartProfileSurfaceOperation,
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    MultiTransformParameters,
+    PartDesignDressupTransformConformanceReceipt,
+    PartDesignDressupTransformOperation,
+)
+from vibecad.parametric.freecad_partdesign_primitive_rules import (
+    PartDesignPrimitiveConformanceReceipt,
+    PartDesignPrimitiveOperation,
+)
 from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 from vibecad.workflow.state import TaskArtifactRef
 
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
@@ -102,6 +199,12 @@ class _FakeShape:
         export_error: BaseException | None = None,
         volume: float = 7200.0,
         area: float = 2400.0,
+        shape_type: str = "Solid",
+        vertex_count: int = 1,
+        edge_count: int = 1,
+        face_count: int = 1,
+        solid_count: int = 1,
+        wire_closed: bool = False,
         bbox: tuple[float, float, float] = (12.0, 20.0, 30.0),
         center: tuple[float, float, float] = (6.0, 10.0, 15.0),
         bbox_center: tuple[float, float, float] | None = None,
@@ -110,12 +213,23 @@ class _FakeShape:
         self.Area = area
         self.BoundBox = _FakeBoundBox(*bbox, center=bbox_center or center)
         self.CenterOfMass = _FakeVector(*center)
-        self.Solids = (object(),)
+        self.ShapeType = shape_type
+        self.Vertexes = tuple(object() for _ in range(vertex_count))
+        self.Edges = tuple(object() for _ in range(edge_count))
+        self.Faces = tuple(object() for _ in range(face_count))
+        self.Solids = tuple(object() for _ in range(solid_count))
+        self.Wires = (
+            (SimpleNamespace(isClosed=lambda: wire_closed),) if shape_type == "Wire" else ()
+        )
+        self.Length = max(bbox)
         self.export_error = export_error
         self.export_calls: list[str] = []
 
     def isValid(self) -> bool:
         return True
+
+    def isNull(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return False
 
     def exportStep(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self.export_calls.append(path)
@@ -123,11 +237,33 @@ class _FakeShape:
             raise self.export_error
         Path(path).write_bytes(b"ISO-10303-21;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n")
 
+    def exportBrepToString(self) -> str:  # noqa: N802 - FreeCAD API spelling
+        return repr(
+            (
+                self.Volume,
+                self.Area,
+                self.BoundBox.XLength,
+                self.BoundBox.YLength,
+                self.BoundBox.ZLength,
+                self.CenterOfMass.x,
+                self.CenterOfMass.y,
+                self.CenterOfMass.z,
+                self.ShapeType,
+                len(self.Edges),
+                len(self.Faces),
+                len(self.Solids),
+            )
+        )
+
     def transformed(self, matrix):
         x, y, z = matrix[:3]
         return _FakeShape(
             volume=self.Volume,
             area=self.Area,
+            shape_type=self.ShapeType,
+            edge_count=len(self.Edges),
+            face_count=len(self.Faces),
+            solid_count=len(self.Solids),
             bbox=(self.BoundBox.XLength, self.BoundBox.YLength, self.BoundBox.ZLength),
             center=(
                 self.CenterOfMass.x + x,
@@ -153,9 +289,35 @@ class _FakeDocument:
         self.recompute_calls = 0
         self.save_calls: list[str] = []
         self.Objects: tuple[object, ...] = ()
+        self._transaction_objects: tuple[object, ...] | None = None
+        self._recompute_observers: list[object] = []
+        self.Name = "FakeDocument"
 
     def recompute(self) -> None:
         self.recompute_calls += 1
+        for obj in self.Objects:
+            for observer in tuple(self._recompute_observers):
+                observer.slotRecomputedObject(obj)
+
+    def isTouched(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return False
+
+    def getObject(self, name: str):  # noqa: N802 - FreeCAD API spelling
+        return next((item for item in self.Objects if getattr(item, "Name", None) == name), None)
+
+    def openTransaction(self, _label: str) -> None:  # noqa: N802 - FreeCAD API spelling
+        self._transaction_objects = tuple(self.Objects)
+
+    def commitTransaction(self) -> None:  # noqa: N802 - FreeCAD API spelling
+        self._transaction_objects = None
+
+    def abortTransaction(self) -> None:  # noqa: N802 - FreeCAD API spelling
+        if self._transaction_objects is not None:
+            self.Objects = self._transaction_objects
+        self._transaction_objects = None
+
+    def removeObject(self, name: str) -> None:  # noqa: N802 - FreeCAD API spelling
+        self.Objects = tuple(item for item in self.Objects if getattr(item, "Name", None) != name)
 
     def saveCopy(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self.save_calls.append(path)
@@ -182,8 +344,64 @@ class _FakeSession:
         self.identity_object.Height = 30.0
         self.identity_object.Placement = _FakePlacement(0.0)
         self.identity_object.Shape = _FakeShape()
+        self.identity_object.State = []
         self.attached_identities: list[tuple[object, object]] = []
         self.result_object: object | None = None
+
+    @contextlib.contextmanager
+    def _transaction(
+        self,
+        _label: str,
+        part: str | None = None,
+        *,
+        claim_new_objects: bool = True,
+    ):
+        del claim_new_objects
+        objects_before = self.doc.Objects
+        object_state_before = tuple(
+            (
+                obj,
+                {
+                    name: copy.deepcopy(getattr(obj, name))
+                    for name in (
+                        "Length",
+                        "Width",
+                        "Height",
+                        "Radius",
+                        "Radius1",
+                        "Radius2",
+                        "Placement",
+                        "Shape",
+                    )
+                    if hasattr(obj, name)
+                },
+            )
+            for obj in objects_before
+        )
+        identities_before = list(self.attached_identities)
+        result_before = self.result_object
+        result_by_part_before = dict(getattr(self, "_result_by_part", {}))
+        parts_before = {
+            name: {**info, "objects": set(info["objects"])}
+            for name, info in getattr(self, "_parts", {}).items()
+        }
+        try:
+            yield
+        except BaseException:
+            self.doc.Objects = objects_before
+            for obj, values in object_state_before:
+                for name, value in values.items():
+                    setattr(obj, name, value)
+            self.attached_identities = identities_before
+            self.result_object = result_before
+            if hasattr(self, "_result_by_part"):
+                self._result_by_part = result_by_part_before
+            if hasattr(self, "_parts"):
+                self._parts = {
+                    name: {**info, "objects": set(info["objects"])}
+                    for name, info in parts_before.items()
+                }
+            raise
 
     def load_document(self, path: Path) -> object:
         self.loaded.append(path)
@@ -212,6 +430,7 @@ class _FakeSession:
         raise KeyError(name)
 
     def attach_object_identity(self, obj: object, identity: object) -> object:
+        obj.Document = self.doc  # type: ignore[attr-defined]
         obj.VibeCADObjectId = identity.object_id  # type: ignore[attr-defined]
         obj.VibeCADFeatureId = identity.feature_id or ""  # type: ignore[attr-defined]
         obj.VibeCADSemanticRole = identity.semantic_role.value  # type: ignore[attr-defined]
@@ -240,6 +459,20 @@ class _FakeSession:
     def set_result_object(self, obj: object, part: str | None = None) -> None:
         del part
         self.result_object = obj
+
+    def get_result_object(self, part: str | None = None) -> object:
+        del part
+        if self.result_object is None:
+            raise RuntimeError("result object missing")
+        return self.result_object
+
+    def assert_valid_solid(self, shape: object) -> None:
+        if not shape.isValid() or shape.Volume <= 0:  # type: ignore[attr-defined]
+            raise RuntimeError("invalid fake solid")
+
+    def owner_of(self, object_name: str) -> str | None:
+        del object_name
+        return None
 
 
 class _FakeRotation:
@@ -325,8 +558,23 @@ class _FakeComponentSession(_FakeSession):
             return
         self._result_by_part[part] = obj
 
+    def get_result_object(self, part: str | None = None) -> object:
+        if part is None:
+            return super().get_result_object()
+        return self._result_by_part[part]
+
+    def _claim_new_objects(self, before: set[str], part: str | None = None) -> None:
+        assert part is not None
+        self._parts[part]["objects"].update(  # type: ignore[attr-defined]
+            obj.Name for obj in self.doc.Objects if obj.Name not in before
+        )
+
     def get_result_shape(self, part_name: str):
         return self._result_by_part[part_name].Shape
+
+    def assert_valid_solid(self, shape: object) -> None:
+        if not shape.isValid() or shape.Volume <= 0:  # type: ignore[attr-defined]
+            raise RuntimeError("invalid fake solid")
 
     def read_component_bom_metadata(self, part_name: str) -> ComponentBomMetadata | None:
         return self._bom_by_part.get(part_name)
@@ -391,6 +639,7 @@ def _fake_add_box(
             position[2] + height / 2,
         ),
     )
+    obj.State = []
     session.doc.Objects = (*session.doc.Objects, obj)
     if part is not None:
         session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
@@ -438,11 +687,245 @@ def _fake_add_cylinder(
             origin + offset for origin, offset in zip(position, center_offset, strict=True)
         ),
     )
+    obj.State = []
     session.doc.Objects = (*session.doc.Objects, obj)
     if part is not None:
         session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
     session.set_result_object(obj, part=part)
     return object()
+
+
+def _axis_quaternion(axis: str) -> tuple[float, float, float, float]:
+    sine = math.sin(math.pi / 4)
+    return {
+        "x": (0.0, sine, 0.0, sine),
+        "y": (-sine, 0.0, 0.0, sine),
+        "z": (0.0, 0.0, 0.0, 1.0),
+    }[axis]
+
+
+def _fake_add_cone(
+    session: _FakeSession,
+    *,
+    radius1: float,
+    height: float,
+    radius2: float = 0.0,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    axis: str = "z",
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedCone", (), {})()
+    obj.Name = "Cone"
+    obj.TypeId = "Part::Cone"
+    obj.Radius1 = radius1
+    obj.Radius2 = radius2
+    obj.Height = height
+    obj.Angle = 360.0
+    obj.Placement = _FakePlacement(*position, q=_axis_quaternion(axis))
+    radius_sum = radius1**2 + radius1 * radius2 + radius2**2
+    center_z = height * (radius1**2 + 2 * radius1 * radius2 + 3 * radius2**2) / (4 * radius_sum)
+    center_offsets = {
+        "x": (center_z, 0.0, 0.0),
+        "y": (0.0, center_z, 0.0),
+        "z": (0.0, 0.0, center_z),
+    }
+    diameter = 2 * max(radius1, radius2)
+    bboxes = {
+        "x": (height, diameter, diameter),
+        "y": (diameter, height, diameter),
+        "z": (diameter, diameter, height),
+    }
+    bbox_offsets = {
+        "x": (height / 2, 0.0, 0.0),
+        "y": (0.0, height / 2, 0.0),
+        "z": (0.0, 0.0, height / 2),
+    }
+    center = tuple(
+        origin + offset for origin, offset in zip(position, center_offsets[axis], strict=True)
+    )
+    bbox_center = tuple(
+        origin + offset for origin, offset in zip(position, bbox_offsets[axis], strict=True)
+    )
+    slant = math.hypot(height, radius1 - radius2)
+    obj.Shape = _FakeShape(
+        volume=math.pi * height * radius_sum / 3,
+        area=math.pi * (radius1**2 + radius2**2 + (radius1 + radius2) * slant),
+        bbox=bboxes[axis],
+        center=center,
+        bbox_center=bbox_center,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
+def _fake_add_sphere(
+    session: _FakeSession,
+    *,
+    radius: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedSphere", (), {})()
+    obj.Name = "Sphere"
+    obj.TypeId = "Part::Sphere"
+    obj.Radius = radius
+    obj.Angle1 = -90.0
+    obj.Angle2 = 90.0
+    obj.Angle3 = 360.0
+    obj.Placement = _FakePlacement(*position)
+    obj.Shape = _FakeShape(
+        volume=4 * math.pi * radius**3 / 3,
+        area=4 * math.pi * radius**2,
+        bbox=(2 * radius, 2 * radius, 2 * radius),
+        center=position,
+        bbox_center=position,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
+def _fake_add_torus(
+    session: _FakeSession,
+    *,
+    radius1: float,
+    radius2: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    axis: str = "z",
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedTorus", (), {})()
+    obj.Name = "Torus"
+    obj.TypeId = "Part::Torus"
+    obj.Radius1 = radius1
+    obj.Radius2 = radius2
+    obj.Angle1 = -180.0
+    obj.Angle2 = 180.0
+    obj.Angle3 = 360.0
+    obj.Placement = _FakePlacement(*position, q=_axis_quaternion(axis))
+    diameter = 2 * (radius1 + radius2)
+    thickness = 2 * radius2
+    bboxes = {
+        "x": (thickness, diameter, diameter),
+        "y": (diameter, thickness, diameter),
+        "z": (diameter, diameter, thickness),
+    }
+    obj.Shape = _FakeShape(
+        volume=2 * math.pi**2 * radius1 * radius2**2,
+        area=4 * math.pi**2 * radius1 * radius2,
+        bbox=bboxes[axis],
+        center=position,
+        bbox_center=position,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
+def _fake_boolean(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+    type_id: str,
+) -> object:
+    base = session.get_object(base_name)
+    tool = session.get_object(tool_name)
+    volume = {
+        "Part::Cut": base.Shape.Volume - tool.Shape.Volume / 2,
+        "Part::Fuse": base.Shape.Volume + tool.Shape.Volume / 2,
+        "Part::Common": min(base.Shape.Volume, tool.Shape.Volume) / 2,
+    }[type_id]
+    obj = type("ManagedBoolean", (), {})()
+    label = type_id.removeprefix("Part::")
+    ordinal = sum(getattr(current, "TypeId", None) == type_id for current in session.doc.Objects)
+    obj.Name = label if ordinal == 0 else f"{label}{ordinal:03d}"
+    obj.TypeId = type_id
+    obj.Base = base
+    obj.Tool = tool
+    obj.Placement = _FakePlacement(0.0)
+    obj.Shape = _FakeShape(
+        volume=volume,
+        area=max(1.0, base.Shape.Area / 2),
+        bbox=(10.0, 10.0, 10.0),
+        center=(5.0, 5.0, 5.0),
+    )
+    obj.State = []
+    session.doc.Objects = (*session.doc.Objects, obj)
+    session.set_result_object(obj, part=session.owner_of(base_name))
+    return object()
+
+
+def _fake_boolean_cut(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Cut",
+    )
+
+
+def _fake_boolean_fuse(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Fuse",
+    )
+
+
+def _fake_boolean_common(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Common",
+    )
+
+
+class _FakeRecomputeObserver:
+    def __init__(self, document: _FakeDocument) -> None:
+        self.document = document
+
+    def __enter__(self) -> executor_module._RecomputeReceipt:
+        receipt = executor_module._RecomputeReceipt(document=self.document, object_ids=set())
+        self.document._recompute_observers.append(self)
+        self.receipt = receipt
+        return receipt
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.document._recompute_observers.remove(self)
+
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        self.receipt.object_ids.add(id(obj))
+
+
+class _FakeMissingDescendantRecomputeObserver(_FakeRecomputeObserver):
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        if getattr(obj, "TypeId", None) not in {"Part::Cut", "Part::Fuse", "Part::Common"}:
+            super().slotRecomputedObject(obj)
 
 
 def _fake_modify_part(
@@ -466,6 +949,43 @@ def _fake_modify_part(
         ),
     )
     return object()
+
+
+def _refresh_fake_boolean_descendants(session: _FakeSession, source: object) -> None:
+    """Refresh the unique fake Boolean consumer chain after one operand edit."""
+
+    current = source
+    while True:
+        matches = tuple(
+            obj
+            for obj in session.doc.Objects
+            if getattr(obj, "TypeId", None) in {"Part::Cut", "Part::Fuse", "Part::Common"}
+            and (getattr(obj, "Base", None) is current or getattr(obj, "Tool", None) is current)
+        )
+        if not matches:
+            return
+        assert len(matches) == 1
+        current = matches[0]
+        base = current.Base
+        tool = current.Tool
+        current.Shape = _FakeShape(
+            volume={
+                "Part::Cut": base.Shape.Volume - tool.Shape.Volume / 2,
+                "Part::Fuse": base.Shape.Volume + tool.Shape.Volume / 2,
+                "Part::Common": min(base.Shape.Volume, tool.Shape.Volume) / 2,
+            }[current.TypeId],
+            area=max(1.0, base.Shape.Area / 2),
+            bbox=(
+                base.Shape.BoundBox.XLength,
+                base.Shape.BoundBox.YLength,
+                base.Shape.BoundBox.ZLength,
+            ),
+            center=(
+                base.Shape.CenterOfMass.x,
+                base.Shape.CenterOfMass.y,
+                base.Shape.CenterOfMass.z,
+            ),
+        )
 
 
 def _fake_move_part(
@@ -570,6 +1090,21 @@ def _fake_rotate_part(
 
 def _store() -> LocalRevisionStore:
     return object.__new__(LocalRevisionStore)
+
+
+def _reviewed_datum_program(operation: PartDatumOperation) -> ReviewedIntentProgramV1:
+    graph = _datum_graph(operation)
+    reviewed = next(
+        item for item in PART_DATUM_MANIFEST.operations if item.operation_id == operation.value
+    )
+    namespace, version, term_id, digest = reviewed.semantic_term.semantic_identity
+    return ReviewedIntentProgramV1(
+        operation_id=f"{PART_DATUM_MANIFEST.family_id}.{operation.value}",
+        semantic_operation=f"{namespace}/{version}/{term_id}@{digest}",
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
+        intent_graph=graph,
+    )
 
 
 def _lease(*, project_id: str = PROJECT_ID, released: bool = False) -> ProjectWriteLease:
@@ -678,6 +1213,15 @@ def _command(
     )
 
 
+@pytest.fixture(autouse=True)
+def _fake_recompute_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if request.node.get_closest_marker("slow") is None:
+        monkeypatch.setattr(executor_module, "_DocumentRecomputeObserver", _FakeRecomputeObserver)
+
+
 def _program() -> ModelProgram:
     return ModelProgram(
         task_id="task-executor",
@@ -754,6 +1298,181 @@ def _six_operation_program() -> ModelProgram:
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-executor-six", criteria=()),
+    )
+
+
+def _part_native_primitives_program() -> ModelProgram:
+    return ModelProgram(
+        task_id="task-executor-part-primitives",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "cone",
+                "create_cone",
+                args={
+                    "base_radius_mm": 6,
+                    "top_radius_mm": 2,
+                    "height_mm": 15,
+                    "position_mm": (1, 2, 3),
+                    "axis": "x",
+                },
+            ),
+            _command(
+                "sphere",
+                "create_sphere",
+                args={"radius_mm": 4, "position_mm": (30, 5, -2)},
+                depends_on=("cone",),
+            ),
+            _command(
+                "torus",
+                "create_torus",
+                args={
+                    "major_radius_mm": 8,
+                    "minor_radius_mm": 2,
+                    "position_mm": (60, 0, 0),
+                    "axis": "y",
+                },
+                depends_on=("sphere",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-part-primitives", criteria=()),
+    )
+
+
+def _part_boolean_program(operation: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=f"task-executor-{operation}",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "base",
+                "create_box",
+                args={"length_mm": 20, "width_mm": 20, "height_mm": 20},
+            ),
+            _command(
+                "tool",
+                "create_box",
+                args={
+                    "length_mm": 10,
+                    "width_mm": 10,
+                    "height_mm": 10,
+                    "position_mm": (5, 5, 5),
+                },
+                depends_on=("base",),
+            ),
+            _command(
+                "boolean",
+                operation,
+                target={
+                    "base": {"command_id": "base", "slot": "object"},
+                    "tool": {"command_id": "tool", "slot": "object"},
+                },
+                depends_on=("base", "tool"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation}", criteria=()),
+    )
+
+
+def _part_boolean_edit_program(operation: str) -> ModelProgram:
+    created = _part_boolean_program(operation).operations
+    return ModelProgram(
+        task_id=f"task-executor-{operation}-edit",
+        base_revision=BASE_REVISION,
+        operations=(
+            *created,
+            _command(
+                "edit",
+                "modify_parameter",
+                target={"object": {"command_id": "base", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 22},
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation}-edit", criteria=()),
+    )
+
+
+def _component_boolean_program(*, include_empty_component: bool = False) -> ModelProgram:
+    operations = (
+        _command("component", "create_component", args={"name": "Bracket"}),
+        _command(
+            "base",
+            "create_box",
+            target={"component": {"command_id": "component", "slot": "component"}},
+            args={"length_mm": 20, "width_mm": 10, "height_mm": 10},
+            depends_on=("component",),
+        ),
+        _command(
+            "tool",
+            "create_box",
+            target={"component": {"command_id": "component", "slot": "component"}},
+            args={
+                "length_mm": 10,
+                "width_mm": 10,
+                "height_mm": 10,
+                "position_mm": (15, 0, 0),
+            },
+            depends_on=("base",),
+        ),
+        _command(
+            "boolean",
+            "boolean_fuse",
+            target={
+                "base": {"command_id": "base", "slot": "object"},
+                "tool": {"command_id": "tool", "slot": "object"},
+            },
+            depends_on=("base", "tool"),
+        ),
+    )
+    if include_empty_component:
+        operations = (
+            *operations,
+            _command(
+                "other",
+                "create_component",
+                args={"name": "Other"},
+                depends_on=("boolean",),
+            ),
+        )
+    return ModelProgram(
+        task_id="task-executor-component-boolean",
+        base_revision=BASE_REVISION,
+        operations=operations,
+        acceptance=AcceptanceSpec(id="acceptance-component-boolean", criteria=()),
+    )
+
+
+def _nested_component_boolean_program() -> ModelProgram:
+    operations = _component_boolean_program().operations
+    return ModelProgram(
+        task_id="task-executor-nested-component-boolean",
+        base_revision=BASE_REVISION,
+        operations=(
+            *operations,
+            _command(
+                "second_tool",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={
+                    "length_mm": 5,
+                    "width_mm": 10,
+                    "height_mm": 10,
+                    "position_mm": (22, 0, 0),
+                },
+                depends_on=("boolean",),
+            ),
+            _command(
+                "second_boolean",
+                "boolean_fuse",
+                target={
+                    "base": {"command_id": "boolean", "slot": "object"},
+                    "tool": {"command_id": "second_tool", "slot": "object"},
+                },
+                depends_on=("boolean", "second_tool"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-nested-component-boolean", criteria=()),
     )
 
 
@@ -954,6 +1673,7 @@ def test_public_contract_and_fixed_redacted_errors() -> None:
         "cad_failure",
         "artifact_failure",
         "integrity_failure",
+        "internal_failure",
     }
     for code in ExecutorErrorCode:
         error = ExecutorError(code)
@@ -966,6 +1686,14 @@ def test_public_contract_and_fixed_redacted_errors() -> None:
         json.dumps(error.to_mapping())
     with pytest.raises(TypeError):
         ExecutorError("secret")  # type: ignore[arg-type]
+
+
+def test_internal_cleanup_failure_supersedes_recoverable_operation_failure() -> None:
+    operation = ExecutorError(ExecutorErrorCode.CAD_FAILURE)
+    cleanup = ExecutorError(ExecutorErrorCode.INTERNAL_FAILURE)
+
+    assert executor_module._prefer_cleanup_failure(operation, cleanup) is cleanup
+    assert executor_module._prefer_cleanup_failure(None, operation) is operation
 
 
 def test_constructor_requires_exact_revision_store() -> None:
@@ -1292,6 +2020,1848 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     }
 
 
+def test_execute_program_applies_one_reviewed_box_and_adopts_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_box_program()
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        obj = session.identity_object
+        obj.Length = 10.0
+        obj.Width = 8.0
+        obj.Height = 6.0
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=480.0,
+            area=376.0,
+            bbox=(10.0, 8.0, 6.0),
+            center=(5.0, 4.0, 3.0),
+        )
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256="a" * 64,
+            plan_content_sha256="b" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="a" * 64,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256="c" * 64,
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-box",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "reviewed_box",
+                "apply_reviewed_intent",
+                args={"intent": reviewed.to_mapping()},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-box", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].result.ok is True
+    result = outcomes[0].result.value
+    identity = session.read_object_identity(session.identity_object)
+    assert result["kind"] == "reviewed_intent_applied"
+    assert result["reviewed_operation_id"] == reviewed.operation_id
+    assert result["object_id"] == identity.object_id
+    assert result["feature_id"] == identity.feature_id
+    assert result["plan_sha256"] == "a" * 64
+    assert session.result_object is session.identity_object
+
+
+class _ManagedDatumFeature:
+    def __init__(self, document: _FakeDocument, name: str, type_id: str) -> None:
+        self.Document = document
+        self.Name = name
+        self.TypeId = type_id
+        self.Placement = _FakePlacement(10.0, 20.0, 30.0)
+        self.State = ("Up-to-date",)
+        self.OriginFeatures: tuple[object, ...] = ()
+
+    def isValid(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return True
+
+
+@pytest.mark.parametrize(
+    ("operation", "owned_type_ids"),
+    (
+        (PartDatumOperation.DATUM_POINT, ("Part::DatumPoint",)),
+        (
+            PartDatumOperation.LOCAL_COORDINATE_SYSTEM,
+            (
+                "Part::LocalCoordinateSystem",
+                "App::Line",
+                "App::Line",
+                "App::Line",
+                "App::Plane",
+                "App::Plane",
+                "App::Plane",
+                "App::Point",
+            ),
+        ),
+    ),
+)
+def test_managed_reviewed_datum_adopts_closure_checkpoints_reopens_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: PartDatumOperation,
+    owned_type_ids: tuple[str, ...],
+) -> None:
+    reviewed = _reviewed_datum_program(operation)
+    route = next(
+        item for item in REVIEWED_PART_DATUM_ROUTES if item.operation_id == reviewed.operation_id
+    )
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        primary_name = f"Managed_{operation.value}_{reviewed.intent_graph_sha256[:16]}"
+        if any(getattr(item, "Name", None) == primary_name for item in session.doc.Objects):
+            raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+        owned = tuple(
+            _ManagedDatumFeature(
+                session.doc,
+                primary_name if index == 0 else f"{primary_name}_Helper{index}",
+                type_id,
+            )
+            for index, type_id in enumerate(owned_type_ids)
+        )
+        owned[0].OriginFeatures = owned[1:]
+        session.doc.Objects = (*session.doc.Objects, *owned)
+        receipt = PartDatumConformanceReceipt(
+            plan_sha256="d" * 64,
+            operation=operation,
+            object_name=primary_name,
+            native_type_id=PART_DATUM_NATIVE_TYPE_IDS[operation],
+            owned_object_names=tuple(item.Name for item in owned),
+        )
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=owned[0],
+            plan_sha256="d" * 64,
+            plan_content_sha256="e" * 64,
+            native_receipt=receipt,
+            owned_objects=owned,
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id=f"task-managed-{operation.value}",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    f"reviewed_{operation.value}",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-datum", criteria=()),
+        )
+    )
+    executor = InProcessCadExecutor(store=_store())
+    session = _FakeSession()
+
+    outcomes = executor.execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is True
+    public_result = outcomes[0].result.value
+    identities = tuple(identity for _, identity in session.attached_identities)
+    assert public_result["object_id"] == identities[0].object_id
+    assert "owned_object_ids" not in public_result
+    assert len(identities) == len(owned_type_ids)
+    assert tuple(item.object_type for item in identities) == owned_type_ids
+    assert all(item.semantic_role is SemanticRole.SUPPORT for item in identities)
+    assert all(item.provenance.source is ProvenanceSource.MODEL for item in identities)
+    assert session.result_object is None
+
+    checkpoint = tmp_path / f"{operation.value}.FCStd"
+    executor.checkpoint_fcstd(session, checkpoint)
+    persisted_identities = tuple(
+        EntityIdentity.from_mapping(identity.to_mapping()) for identity in identities
+    )
+
+    def reopen_factory() -> _FakeSession:
+        reopened = _FakeSession()
+        reopened.doc = copy.deepcopy(session.doc)
+        reopened.attached_identities = list(
+            zip(reopened.doc.Objects, persisted_identities, strict=True)
+        )
+        return reopened
+
+    monkeypatch.setattr(executor_module, "_Session", reopen_factory)
+    reopened = executor.load_fcstd(checkpoint)
+    reopened_identities = tuple(identity for _, identity in reopened.list_object_identities())
+    assert reopened_identities == persisted_identities
+    before_duplicate = tuple(reopened.doc.Objects)
+
+    duplicate = executor.execute_program(
+        program=program,
+        candidate=_active(reopened, tmp_path),
+    )
+
+    assert len(duplicate) == 1 and duplicate[0].result.ok is False
+    assert tuple(reopened.doc.Objects) == before_duplicate
+    assert tuple(identity for _, identity in reopened.list_object_identities()) == (
+        persisted_identities
+    )
+
+
+@pytest.mark.parametrize("failure", ("missing_helper", "extra_helper", "tip_drift"))
+def test_managed_reviewed_datum_validation_failure_restores_document(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    operation = (
+        PartDatumOperation.DATUM_POINT
+        if failure == "tip_drift"
+        else PartDatumOperation.LOCAL_COORDINATE_SYSTEM
+    )
+    reviewed = _reviewed_datum_program(operation)
+
+    class RollbackSession(_FakeSession):
+        def list_object_identities(self) -> tuple[tuple[object, object], ...]:
+            return tuple(self.attached_identities)
+
+    session = RollbackSession()
+    if failure == "tip_drift":
+        body = type(
+            "ExistingBody",
+            (),
+            {"TypeId": "PartDesign::Body", "Tip": object()},
+        )()
+        session.doc.Objects = (body,)
+
+    def fail_after_mutation(session: _FakeSession, value: object) -> object:
+        assert value == reviewed
+        if failure == "tip_drift":
+            session.doc.Objects[0].Tip = object()
+        else:
+            count = 7 if failure == "missing_helper" else 9
+            created = tuple(
+                _ManagedDatumFeature(
+                    session.doc,
+                    f"InvalidLCS_{index}",
+                    "Part::LocalCoordinateSystem" if index == 0 else "App::Line",
+                )
+                for index in range(count)
+            )
+            session.doc.Objects = (*session.doc.Objects, *created)
+        raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_execute_reviewed_intent_native",
+        fail_after_mutation,
+    )
+    program = validate_model_program(
+        ModelProgram(
+            task_id=f"task-managed-rollback-{failure}",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    f"reviewed_rollback_{failure}",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-datum-rollback", criteria=()),
+        )
+    )
+    before_objects = tuple(session.doc.Objects)
+    before_tip = getattr(before_objects[0], "Tip", None) if before_objects else None
+
+    outcome = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcome) == 1 and outcome[0].result.ok is False
+    assert tuple(session.doc.Objects) == before_objects
+    if before_objects:
+        assert before_objects[0].Tip is before_tip
+    assert session.attached_identities == []
+
+
+class _ManagedPartDesignPrimitiveObject(_ManagedDatumFeature):
+    def __init__(self, document: _FakeDocument, name: str, type_id: str) -> None:
+        super().__init__(document, name, type_id)
+        self.Group: tuple[object, ...] = ()
+        self.OriginFeatures: tuple[object, ...] = ()
+        self.BaseFeature: object | None = None
+
+
+def _managed_partdesign_additive_result(
+    session: _FakeSession,
+    reviewed: ReviewedIntentProgramV1,
+) -> ReviewedNativeExecutionResult:
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES
+        if item.operation.operation_id == PartDesignPrimitiveOperation.ADDITIVE_BOX.value
+    )
+    primary_name = f"ManagedAdditiveBox_{reviewed.intent_graph_sha256[:16]}"
+    if session.doc.getObject(primary_name) is not None:
+        raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+    body = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        f"{primary_name}_Body",
+        "PartDesign::Body",
+    )
+    origin = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        f"{primary_name}_Origin",
+        "App::Origin",
+    )
+    helper_types = (
+        "App::Line",
+        "App::Line",
+        "App::Line",
+        "App::Plane",
+        "App::Plane",
+        "App::Plane",
+        "App::Point",
+    )
+    helper_roles = (
+        "X_Axis",
+        "Y_Axis",
+        "Z_Axis",
+        "XY_Plane",
+        "XZ_Plane",
+        "YZ_Plane",
+        "Origin",
+    )
+    helpers = tuple(
+        _ManagedPartDesignPrimitiveObject(
+            session.doc,
+            f"{primary_name}_Helper{index}",
+            type_id,
+        )
+        for index, type_id in enumerate(helper_types)
+    )
+    for helper, role in zip(helpers, helper_roles, strict=True):
+        helper.Role = role
+        helper.InList = (origin,)
+    origin.OriginFeatures = helpers
+    body.Origin = origin
+    primary = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        primary_name,
+        "PartDesign::AdditiveBox",
+    )
+    primary.Shape = _FakeShape(
+        volume=480.0,
+        area=376.0,
+        bbox=(10.0, 8.0, 6.0),
+        center=(5.0, 4.0, 3.0),
+    )
+    body.Group = (primary,)
+    body.Tip = primary
+    body_closure = (body, origin, *helpers)
+    session.doc.Objects = (*session.doc.Objects, *body_closure, primary)
+    plan_sha256 = "7" * 64
+    receipt = PartDesignPrimitiveConformanceReceipt(
+        plan_sha256=plan_sha256,
+        operation=PartDesignPrimitiveOperation.ADDITIVE_BOX,
+        object_name=primary.Name,
+        before_volume_mm3=0.0,
+        after_volume_mm3=480.0,
+    )
+    ownership = PartDesignPrimitiveOwnershipClosure(
+        invariant=PARTDESIGN_PRIMITIVE_RESULT_INVARIANTS[PartDesignPrimitiveOperation.ADDITIVE_BOX],
+        native_receipt=receipt,
+        object=primary,
+        body=body,
+        base=None,
+        body_closure=body_closure,
+        created_body=True,
+        base_shape_sha256=None,
+        result_shape_sha256=hashlib.sha256(primary.Shape.exportBrepToString().encode()).hexdigest(),
+    )
+    return ReviewedNativeExecutionResult(
+        route=route,
+        object=primary,
+        plan_sha256=plan_sha256,
+        plan_content_sha256="8" * 64,
+        native_receipt=ownership,
+        owned_objects=(primary, *body_closure),
+        _verified_execution_context=_ReviewedFamilyExecutionContext(
+            session=session,
+            document=session.doc,
+            source_results=(),
+        ),
+    )
+
+
+def test_managed_first_additive_adopts_ten_objects_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_partdesign_primitive_program(PartDesignPrimitiveOperation.ADDITIVE_BOX)
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        return _managed_partdesign_additive_result(session, reviewed)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-partdesign-first-additive",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "reviewed_additive_box",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-partdesign-first-additive", criteria=()),
+        )
+    )
+    executor = InProcessCadExecutor(store=_store())
+    session = _FakeSession()
+
+    outcomes = executor.execute_program(program=program, candidate=_active(session, tmp_path))
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is True
+    assert len(session.doc.Objects) == 10
+    assert len(session.attached_identities) == 10
+    assert session.result_object is session.doc.Objects[-1]
+    identities = tuple(identity for _, identity in session.attached_identities)
+    assert tuple(identity.semantic_role for identity in identities) == (
+        SemanticRole.FEATURE,
+        SemanticRole.PART,
+        *(SemanticRole.SUPPORT,) * 8,
+    )
+    assert tuple(item.TypeId for item in session.doc.Objects) == (
+        "PartDesign::Body",
+        "App::Origin",
+        "App::Line",
+        "App::Line",
+        "App::Line",
+        "App::Plane",
+        "App::Plane",
+        "App::Plane",
+        "App::Point",
+        "PartDesign::AdditiveBox",
+    )
+    before_duplicate = tuple(session.doc.Objects)
+    identities_before_duplicate = tuple(session.attached_identities)
+
+    duplicate = executor.execute_program(program=program, candidate=_active(session, tmp_path))
+
+    assert len(duplicate) == 1 and duplicate[0].result.ok is False
+    assert tuple(session.doc.Objects) == before_duplicate
+    assert tuple(session.attached_identities) == identities_before_duplicate
+
+
+def test_managed_first_additive_rolls_back_ten_objects_after_late_adoption_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_partdesign_primitive_program(PartDesignPrimitiveOperation.ADDITIVE_BOX)
+
+    class FailingAttachSession(_FakeSession):
+        def attach_object_identity(self, obj: object, identity: object) -> object:
+            if len(self.attached_identities) == 4:
+                raise RuntimeError("bounded late adoption failure")
+            return super().attach_object_identity(obj, identity)
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        return _managed_partdesign_additive_result(session, reviewed)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-partdesign-first-additive-rollback",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "reviewed_additive_box_rollback",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(
+                id="accept-managed-partdesign-first-additive-rollback",
+                criteria=(),
+            ),
+        )
+    )
+    session = FailingAttachSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is False
+    assert session.doc.Objects == ()
+    assert session.attached_identities == []
+    assert session.result_object is None
+
+
+class _ManagedMultiTransformFeature:
+    def __init__(
+        self,
+        document: _FakeDocument,
+        name: str,
+        type_id: str,
+        *,
+        volume: float,
+    ) -> None:
+        self.Document = document
+        self.Name = name
+        self.TypeId = type_id
+        self.Placement = _FakePlacement(0.0)
+        self.State = ("Up-to-date",)
+        self.Shape = _FakeShape(volume=volume)
+        self.BaseFeature = None
+
+    def isValid(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return True
+
+
+def test_managed_multitransform_adopts_full_closure_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_base = reviewed_box_program()
+    reviewed_multi = reviewed_dressup_program(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    _, _, _, plan, _ = lower_reviewed_dressup(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    assert type(plan.parameters) is MultiTransformParameters
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if item.operation.operation_id == "multi_transform"
+    )
+    plan_document = route.manifest.plan_document(plan.canonical_bytes, plan.plan_sha256)
+
+    def execute(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_base:
+            assert source_results == ()
+            base = _ManagedMultiTransformFeature(
+                session.doc,
+                "ReviewedBase",
+                REVIEWED_PART_BOX_ROUTE.operation.native_type_id,
+                volume=10.0,
+            )
+            base.Length = 5.0
+            base.Width = 2.0
+            base.Height = 1.0
+            session.doc.Objects = (*session.doc.Objects, base)
+            return ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=base,
+                plan_sha256="a" * 64,
+                plan_content_sha256="b" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="a" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=base.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        base.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+        assert value == reviewed_multi
+        assert len(source_results) == 1 and source_results[0].route is REVIEWED_PART_BOX_ROUTE
+        primary_name = f"ManagedMulti_{reviewed_multi.intent_graph_sha256[:16]}"
+        if session.doc.getObject(primary_name) is not None:
+            raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+        type_ids = (
+            route.operation.native_type_id,
+            *(
+                dressup_rules._NATIVE_STEP_SPECS[step.kind].type_id  # noqa: SLF001
+                for step in plan.parameters.steps
+            ),
+        )
+        owned = tuple(
+            _ManagedMultiTransformFeature(
+                session.doc,
+                primary_name if index == 0 else f"{primary_name}_Child{index}",
+                type_id,
+                volume=15.0 if index == 0 else 1.0,
+            )
+            for index, type_id in enumerate(type_ids)
+        )
+        owned[0].BaseFeature = source_results[0].object
+        session.doc.Objects = (*session.doc.Objects, *owned)
+        native_receipt = PartDesignDressupTransformConformanceReceipt(
+            plan_sha256=plan.plan_sha256,
+            operation=PartDesignDressupTransformOperation.MULTI_TRANSFORM,
+            object_names=tuple(item.Name for item in owned),
+            before_volume_mm3=10.0,
+            after_volume_mm3=15.0,
+        )
+        receipt = PartDesignDressupOwnershipClosure(
+            native_receipt=native_receipt,
+            body_id=plan.body_id,
+            node_id=plan.node_id,
+            result_id=plan.result_id,
+            plan_content_sha256=plan_document.content_sha256,
+            result_shape_sha256=hashlib.sha256(
+                owned[0].Shape.exportBrepToString().encode()
+            ).hexdigest(),
+            native_type_id=route.operation.native_type_id,
+        )
+        native = _ReviewedFamilyNativeExecution(
+            object=owned[0],
+            receipt=receipt,
+            owned_objects=owned,
+        )
+        resolution = route.family.resolve_dynamic_product_result(
+            plan,
+            plan_document,
+            route.operation,
+            native,
+        )
+        assert resolution is not None
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=owned[0],
+            plan_sha256=plan_document.document_digest,
+            plan_content_sha256=plan_document.content_sha256,
+            native_receipt=receipt,
+            owned_objects=owned,
+            _verified_execution_context=_ReviewedFamilyExecutionContext(
+                session=session,
+                document=session.doc,
+                source_results=source_results,
+            ),
+            _verified_dynamic_resolution=resolution,
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    source_ref = ({"command_id": "source", "slot": "object"},)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-multi-transform",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "source",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_base.to_mapping()},
+                ),
+                _command(
+                    "multi",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_multi.to_mapping(), "sources": source_ref},
+                    depends_on=("source",),
+                ),
+                _command(
+                    "multi_duplicate",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_multi.to_mapping(), "sources": source_ref},
+                    depends_on=("source",),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-multi-transform", criteria=()),
+        )
+    )
+    session = _FakeSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert tuple(item.result.ok for item in outcomes) == (True, True, False)
+    closure_identities = tuple(identity for _, identity in session.attached_identities[1:])
+    assert tuple(item.semantic_role for item in closure_identities) == (
+        SemanticRole.FEATURE,
+        SemanticRole.SUPPORT,
+        SemanticRole.SUPPORT,
+    )
+    assert tuple(item.object_type for item in closure_identities) == (
+        "PartDesign::MultiTransform",
+        "PartDesign::Scaled",
+        "PartDesign::Mirrored",
+    )
+    assert all(item.provenance.operation_id == "multi" for item in closure_identities)
+    assert session.result_object is session.doc.Objects[1]
+    assert len(session.doc.Objects) == 4
+
+
+def test_managed_multitransform_failure_rolls_back_full_closure_and_body_tip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_dressup_program(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    _, _, _, plan, _ = lower_reviewed_dressup(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if item.operation.operation_id == "multi_transform"
+    )
+    plan_document = route.manifest.plan_document(plan.canonical_bytes, plan.plan_sha256)
+    session = _FakeSession()
+    old_tip = object()
+    body = _ManagedDatumFeature(session.doc, "Body", "PartDesign::Body")
+    body.Tip = old_tip
+    session.attach_object_identity(
+        body,
+        EntityIdentity(
+            object_id="object_" + "1" * 32,
+            feature_id="feature_" + "2" * 32,
+            object_type="PartDesign::Body",
+            semantic_role=SemanticRole.SUPPORT,
+            provenance=Provenance(
+                source=ProvenanceSource.MODEL,
+                operation_id="existing_body",
+            ),
+        ),
+    )
+
+    def fail_after_mutation(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...],
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed and len(source_results) == 1
+        body.Tip = object()
+        created = tuple(
+            _ManagedMultiTransformFeature(
+                session.doc,
+                f"InvalidMulti{index}",
+                type_id,
+                volume=15.0 if index == 0 else 1.0,
+            )
+            for index, type_id in enumerate(
+                (
+                    "PartDesign::MultiTransform",
+                    "PartDesign::Scaled",
+                    "PartDesign::Mirrored",
+                    "PartDesign::Scaled",
+                )
+            )
+        )
+        session.doc.Objects = (*session.doc.Objects, *created)
+        native_receipt = PartDesignDressupTransformConformanceReceipt(
+            plan_sha256=plan.plan_sha256,
+            operation=PartDesignDressupTransformOperation.MULTI_TRANSFORM,
+            object_names=tuple(item.Name for item in created),
+            before_volume_mm3=10.0,
+            after_volume_mm3=15.0,
+        )
+        receipt = PartDesignDressupOwnershipClosure(
+            native_receipt=native_receipt,
+            body_id=plan.body_id,
+            node_id=plan.node_id,
+            result_id=plan.result_id,
+            plan_content_sha256=plan_document.content_sha256,
+            result_shape_sha256=hashlib.sha256(
+                created[0].Shape.exportBrepToString().encode()
+            ).hexdigest(),
+            native_type_id=route.operation.native_type_id,
+        )
+        native = _ReviewedFamilyNativeExecution(
+            object=created[0],
+            receipt=receipt,
+            owned_objects=created,
+        )
+        route.family.resolve_dynamic_product_result(
+            plan,
+            plan_document,
+            route.operation,
+            native,
+        )
+        raise AssertionError("extra child must fail in the dynamic resolver")
+
+    base_result: ReviewedNativeExecutionResult | None = None
+
+    def execute(
+        current: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        nonlocal base_result
+        if value != reviewed:
+            base = _ManagedMultiTransformFeature(
+                current.doc,
+                "RollbackBase",
+                "Part::Box",
+                volume=10.0,
+            )
+            base.Length = 5.0
+            base.Width = 2.0
+            base.Height = 1.0
+            current.doc.Objects = (*current.doc.Objects, base)
+            base_result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=base,
+                plan_sha256="1" * 64,
+                plan_content_sha256="2" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="1" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=base.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256="3" * 64,
+                ),
+            )
+            return base_result
+        return fail_after_mutation(current, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    base = reviewed_box_program()
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-multi-rollback",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "source",
+                    "apply_reviewed_intent",
+                    args={"intent": base.to_mapping()},
+                ),
+                _command(
+                    "multi",
+                    "apply_reviewed_intent",
+                    args={
+                        "intent": reviewed.to_mapping(),
+                        "sources": ({"command_id": "source", "slot": "object"},),
+                    },
+                    depends_on=("source",),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-multi-rollback", criteria=()),
+        )
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert tuple(item.result.ok for item in outcomes) == (True, False)
+    assert body.Tip is old_tip
+    assert tuple(item.Name for item in session.doc.Objects) == ("Body", "RollbackBase")
+    assert len(session.attached_identities) == 2
+    assert base_result is not None
+
+
+@pytest.mark.parametrize("source_interface", ("legacy_pair", "ordered_collection"))
+def test_execute_program_resolves_two_prior_reviewed_outputs_for_csg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_interface: str,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    primitive_results: list[ReviewedNativeExecutionResult] = []
+    dependency_sources: list[tuple[ReviewedNativeExecutionResult, ...]] = []
+
+    def execute_primitive(
+        session: _FakeSession,
+        value: object,
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed_box
+        index = len(primitive_results)
+        obj = type("ManagedReviewedBox", (), {})()
+        obj.Name = f"ReviewedBox{index}"
+        obj.TypeId = "Part::Box"
+        obj.Length = 10.0
+        obj.Width = 8.0
+        obj.Height = 6.0
+        obj.Placement = _FakePlacement(float(index) * 2.0)
+        obj.Shape = _FakeShape(
+            volume=480.0,
+            area=376.0,
+            bbox=(10.0, 8.0, 6.0),
+            center=(5.0 + float(index) * 2.0, 4.0, 3.0),
+        )
+        obj.State = []
+        session.doc.Objects = (*session.doc.Objects, obj)
+        plan_sha256 = f"{index + 1:x}" * 64
+        result = ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256=plan_sha256,
+            plan_content_sha256=f"{index + 3:x}" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256=plan_sha256,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+        primitive_results.append(result)
+        return result
+
+    def execute_csg(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...],
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed_cut
+        assert source_results == tuple(primitive_results)
+        dependency_sources.append(source_results)
+        obj = type("ManagedReviewedCut", (), {})()
+        obj.Name = "ReviewedCut"
+        obj.TypeId = "Part::Cut"
+        obj.Base = source_results[0].object
+        obj.Tool = source_results[1].object
+        obj.Refine = True
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=240.0,
+            area=300.0,
+            bbox=(8.0, 8.0, 6.0),
+            center=(4.0, 4.0, 3.0),
+        )
+        obj.State = []
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_CSG_ROUTES[0],
+            object=obj,
+            plan_sha256="5" * 64,
+            plan_content_sha256="6" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="5" * 64,
+                operation=PartCoreOperation.CUT,
+                object_name=obj.Name,
+                source_shape_sha256s=tuple(
+                    item.native_receipt.result_shape_sha256 for item in source_results
+                ),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            return execute_primitive(session, value)
+        return execute_csg(session, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    dependent_args = {"intent": reviewed_cut.to_mapping()}
+    if source_interface == "legacy_pair":
+        dependent_args.update(
+            {
+                "source_a": {"command_id": "source_a", "slot": "object"},
+                "source_b": {"command_id": "source_b", "slot": "object"},
+            }
+        )
+    else:
+        dependent_args["sources"] = (
+            {"command_id": "source_a", "slot": "object"},
+            {"command_id": "source_b", "slot": "object"},
+        )
+    program = ModelProgram(
+        task_id="task-reviewed-csg",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "source_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "source_b",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args=dependent_args,
+                depends_on=("source_a", "source_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 3
+    assert all(item.result.ok for item in outcomes)
+    assert len(dependency_sources) == 1
+    assert outcomes[-1].result.value["reviewed_operation_id"] == "freecad_part_core.cut"
+    source_identities = tuple(
+        session.read_object_identity(item.object) for item in dependency_sources[0]
+    )
+    assert tuple(item.provenance.operation_id for item in source_identities) == (
+        "source_a",
+        "source_b",
+    )
+    result_identity = session.read_object_identity(session.result_object)
+    assert result_identity.semantic_role.value == "feature"
+    assert result_identity.provenance.operation_id == "csg_cut"
+
+
+@pytest.mark.parametrize("source_interface", ("legacy_pair", "ordered_collection"))
+def test_reviewed_csg_rejects_non_reviewed_result_slots_before_dependency_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_interface: str,
+) -> None:
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    dependency_called = False
+
+    def add_box(session: _FakeSession, **kwargs: object) -> object:
+        return _fake_add_box(session, **kwargs)  # type: ignore[arg-type]
+
+    def execute_csg(*_args: object, **_kwargs: object) -> ReviewedNativeExecutionResult:
+        nonlocal dependency_called
+        dependency_called = True
+        raise AssertionError("dependency leaf must stay inert")
+
+    monkeypatch.setattr(executor_module, "_add_box", add_box)
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_csg)
+    session = _FakeSession()
+    dependent_args = {"intent": reviewed_cut.to_mapping()}
+    if source_interface == "legacy_pair":
+        dependent_args.update(
+            {
+                "source_a": {"command_id": "plain_a", "slot": "object"},
+                "source_b": {"command_id": "plain_b", "slot": "object"},
+            }
+        )
+    else:
+        dependent_args["sources"] = (
+            {"command_id": "plain_a", "slot": "object"},
+            {"command_id": "plain_b", "slot": "object"},
+        )
+    program = ModelProgram(
+        task_id="task-reviewed-csg-wrong-slots",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "plain_a",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 8, "height_mm": 6},
+            ),
+            _command(
+                "plain_b",
+                "create_box",
+                args={"length_mm": 8, "width_mm": 6, "height_mm": 4},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args=dependent_args,
+                depends_on=("plain_a", "plain_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg-wrong-slots", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, False]
+    assert dependency_called is False
+    assert len(session.doc.Objects) == 2
+
+
+def test_reviewed_csg_rejects_incomplete_source_pair_without_native_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    dependency_called = False
+
+    def execute_primitive(
+        session: _FakeSession,
+        _value: object,
+    ) -> ReviewedNativeExecutionResult:
+        obj = session.identity_object
+        obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256="7" * 64,
+            plan_content_sha256="8" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="7" * 64,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    def execute_csg(*_args: object, **_kwargs: object) -> ReviewedNativeExecutionResult:
+        nonlocal dependency_called
+        dependency_called = True
+        raise AssertionError("dependency leaf must stay inert")
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            return execute_primitive(session, value)
+        return execute_csg(session, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-csg-incomplete",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "source_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_cut.to_mapping(),
+                    "source_a": {"command_id": "source_a", "slot": "object"},
+                },
+                depends_on=("source_a",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg-incomplete", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, False]
+    assert dependency_called is False
+    assert len(session.doc.Objects) == 1
+
+
+def test_execute_program_adopts_reviewed_face_as_managed_non_solid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_face = reviewed_profile_surface_program(PartProfileSurfaceOperation.FACE)
+    source_result: ReviewedNativeExecutionResult | None = None
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        nonlocal source_result
+        if value == reviewed_box:
+            assert source_results == ()
+            obj = session.identity_object
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            session.doc.Objects = (*session.doc.Objects, obj)
+            source_result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256="1" * 64,
+                plan_content_sha256="2" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="1" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            return source_result
+        assert value == reviewed_face
+        assert source_results == (source_result,)
+        obj = type("ManagedReviewedFace", (), {})()
+        obj.Name = "ReviewedFace"
+        obj.TypeId = REVIEWED_PART_PROFILE_SURFACE_ROUTES[-1].operation.native_type_id
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=0.0,
+            area=64.0,
+            shape_type="Face",
+            edge_count=4,
+            face_count=1,
+            solid_count=0,
+            bbox=(8.0, 8.0, 0.0),
+            center=(4.0, 4.0, 0.0),
+        )
+        obj.State = ("Up-to-date",)
+        obj.isValid = lambda: True
+        session.doc.Objects = (*session.doc.Objects, obj)
+        receipt = PartProfileSurfaceConformanceReceipt(
+            plan_sha256="3" * 64,
+            operation=PartProfileSurfaceOperation.FACE,
+            object_name=obj.Name,
+            source_shape_sha256s=(source_results[0].native_receipt.result_shape_sha256,),
+            result_shape_sha256=hashlib.sha256(obj.Shape.exportBrepToString().encode()).hexdigest(),
+        )
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_PROFILE_SURFACE_ROUTES[-1],
+            object=obj,
+            plan_sha256="3" * 64,
+            plan_content_sha256="4" * 64,
+            native_receipt=PartProfileSurfaceOwnershipClosure(
+                invariant=PART_PROFILE_SURFACE_RESULT_INVARIANTS[PartProfileSurfaceOperation.FACE],
+                native_receipt=receipt,
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-face",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "boundary",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "face",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_face.to_mapping(),
+                    "source_a": {"command_id": "boundary", "slot": "object"},
+                },
+                depends_on=("boundary",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-face", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True]
+    face_result = outcomes[-1].result.value
+    assert face_result["reviewed_operation_id"].endswith(".face")
+    identity = next(
+        identity
+        for _, identity in session.attached_identities
+        if identity.object_id == face_result["object_id"]
+    )
+    observation = face_result["after"]
+    assert identity.semantic_role.value == "feature"
+    assert observation["solid_count"] == 0
+    assert observation["area_mm2"] == 64.0
+    assert observation["volume_mm3"] == 0.0
+    assert session.result_object is source_result.object
+
+
+def test_three_managed_reviewed_wires_loft_in_order_from_same_run_side_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_profile = reviewed_curve_program(PartCurveOperation.REGULAR_POLYGON)
+    reviewed_loft = reviewed_profile_surface_program(
+        PartProfileSurfaceOperation.LOFT,
+        source_count=3,
+    )
+    curve_route = next(
+        route
+        for route in REVIEWED_PART_CURVE_ROUTES
+        if route.operation.operation_id == PartCurveOperation.REGULAR_POLYGON.value
+    )
+    produced_profiles: list[ReviewedNativeExecutionResult] = []
+    resolved_profile_names: tuple[str, ...] | None = None
+    bound_profile_names: tuple[str, ...] | None = None
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_profile:
+            assert source_results == ()
+            index = len(produced_profiles)
+            obj = type("ManagedReviewedProfile", (), {})()
+            obj.Name = f"ReviewedProfile{index}"
+            obj.TypeId = curve_route.operation.native_type_id
+            obj.Placement = _FakePlacement(0.0, 0.0, float(index) * 5.0)
+            obj.Shape = _FakeShape(
+                volume=0.0,
+                area=0.0,
+                shape_type="Wire",
+                vertex_count=3,
+                edge_count=3,
+                face_count=0,
+                solid_count=0,
+                wire_closed=True,
+                bbox=(6.0, 6.0, 0.0),
+                center=(0.0, 0.0, float(index) * 5.0),
+            )
+            obj.State = ()
+            obj.Document = session.doc
+            obj.isValid = lambda: True
+            session.doc.Objects = (*session.doc.Objects, obj)
+            plan_sha256 = hashlib.sha256(f"profile-plan:{index}".encode()).hexdigest()
+            result = ReviewedNativeExecutionResult(
+                route=curve_route,
+                object=obj,
+                plan_sha256=plan_sha256,
+                plan_content_sha256=hashlib.sha256(f"profile-content:{index}".encode()).hexdigest(),
+                native_receipt=PartCurveConformanceReceipt(
+                    plan_sha256=plan_sha256,
+                    operation=PartCurveOperation.REGULAR_POLYGON,
+                    object_name=obj.Name,
+                    shape=PartCurveShapeSignature(
+                        shape_type="Wire",
+                        vertex_count=len(obj.Shape.Vertexes),
+                        edge_count=len(obj.Shape.Edges),
+                        face_count=len(obj.Shape.Faces),
+                        length_mm=obj.Shape.Length,
+                        area_mm2=obj.Shape.Area,
+                    ),
+                ),
+            )
+            produced_profiles.append(result)
+            return result
+        assert value == reviewed_loft
+        nonlocal resolved_profile_names
+        resolved_profile_names = tuple(item.object.Name for item in source_results)
+        lowered = lower_reviewed_intent(value)
+        native = profile_execution.execute_part_profile_surface_reviewed_plan(
+            session.doc,
+            lowered.plan,
+            lowered.payload,
+            lowered.result.plan_document,
+            lowered.route.operation,
+            _ReviewedFamilyExecutionContext(
+                session=session,
+                document=session.doc,
+                source_results=source_results,
+            ),
+        )
+        return ReviewedNativeExecutionResult(
+            route=lowered.route,
+            object=native.object,
+            plan_sha256=lowered.result.plan_document.document_digest,
+            plan_content_sha256=lowered.result.plan_document.content_sha256,
+            native_receipt=native.receipt,
+        )
+
+    def apply_loft(
+        raw: bytes,
+        *,
+        expected_content_sha256: str,
+        expected_plan_sha256: str,
+        bindings: object,
+    ) -> PartProfileSurfaceConformanceReceipt:
+        nonlocal bound_profile_names
+        assert raw
+        assert len(expected_content_sha256) == len(expected_plan_sha256) == 64
+        bound_profile_names = tuple(item.object.Name for item in bindings.sources)
+        obj = type("ManagedReviewedLoft", (), {})()
+        obj.Name = "ReviewedLoft"
+        obj.TypeId = REVIEWED_PART_PROFILE_SURFACE_ROUTES[2].operation.native_type_id
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=240.0,
+            area=180.0,
+            shape_type="Solid",
+            vertex_count=6,
+            edge_count=9,
+            face_count=5,
+            solid_count=1,
+            bbox=(6.0, 6.0, 10.0),
+            center=(0.0, 0.0, 5.0),
+        )
+        obj.State = ("Up-to-date",)
+        obj.Document = bindings.document
+        obj.isValid = lambda: True
+        bindings.document.Objects = (*bindings.document.Objects, obj)
+        return PartProfileSurfaceConformanceReceipt(
+            plan_sha256=expected_plan_sha256,
+            operation=PartProfileSurfaceOperation.LOFT,
+            object_name=obj.Name,
+            source_shape_sha256s=tuple(
+                hashlib.sha256(item.object.Shape.exportBrepToString().encode()).hexdigest()
+                for item in bindings.sources
+            ),
+            result_shape_sha256=hashlib.sha256(obj.Shape.exportBrepToString().encode()).hexdigest(),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    monkeypatch.setattr(profile_execution, "apply_part_profile_surface_plan", apply_loft)
+    session = _FakeSession()
+    source_ids = ("profile_0", "profile_1", "profile_2")
+    requested_order = ("profile_2", "profile_0", "profile_1")
+    program = ModelProgram(
+        task_id="task-reviewed-three-profile-loft",
+        base_revision=BASE_REVISION,
+        operations=(
+            *(
+                _command(
+                    source_id,
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_profile.to_mapping()},
+                )
+                for source_id in source_ids
+            ),
+            _command(
+                "loft",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_loft.to_mapping(),
+                    "sources": tuple(
+                        {"command_id": source_id, "slot": "object"} for source_id in requested_order
+                    ),
+                },
+                depends_on=source_ids,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-three-profile-loft", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    expected_order = (
+        "ReviewedProfile2",
+        "ReviewedProfile0",
+        "ReviewedProfile1",
+    )
+    assert [item.result.ok for item in outcomes] == [True, True, True, True]
+    assert resolved_profile_names == bound_profile_names == expected_order
+    assert len(produced_profiles) == 3
+    assert len(session.doc.Objects) == len(session.attached_identities) == 4
+    assert session.result_object is session.doc.Objects[-1]
+    assert session.result_object.TypeId == "Part::Loft"
+    identities = tuple(identity for _, identity in session.attached_identities)
+    assert all(identity.semantic_role.value == "primitive" for identity in identities[:3])
+    assert identities[-1].semantic_role.value == "feature"
+
+
+def test_two_reviewed_primitives_cannot_masquerade_as_ordered_loft_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_loft = reviewed_profile_surface_program(PartProfileSurfaceOperation.LOFT)
+    source_results: list[ReviewedNativeExecutionResult] = []
+    native_called = False
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            index = len(source_results_holder)
+            obj = type("ManagedReviewedSolid", (), {})()
+            obj.Name = f"ReviewedSolid{index}"
+            obj.TypeId = "Part::Box"
+            obj.Length = 10.0
+            obj.Width = 8.0
+            obj.Height = 6.0
+            obj.Placement = _FakePlacement(float(index))
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            obj.State = []
+            session.doc.Objects = (*session.doc.Objects, obj)
+            digest = f"{index + 5:x}" * 64
+            result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256=digest,
+                plan_content_sha256=f"{index + 7:x}" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256=digest,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            source_results_holder.append(result)
+            return result
+        assert value == reviewed_loft
+        assert source_results == tuple(source_results_holder)
+        lowered = lower_reviewed_intent(value)
+        return profile_execution.execute_part_profile_surface_reviewed_plan(
+            session.doc,
+            lowered.plan,
+            lowered.payload,
+            lowered.result.plan_document,
+            lowered.route.operation,
+            _ReviewedFamilyExecutionContext(
+                session=session,
+                document=session.doc,
+                source_results=source_results,
+            ),
+        )
+
+    source_results_holder = source_results
+
+    def apply(*args: object, **kwargs: object) -> object:
+        nonlocal native_called
+        del args, kwargs
+        native_called = True
+        raise AssertionError("solid primitives must not reach profile native apply")
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    monkeypatch.setattr(profile_execution, "apply_part_profile_surface_plan", apply)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-loft-source-rejection",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "solid_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "solid_b",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "loft",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_loft.to_mapping(),
+                    "sources": (
+                        {"command_id": "solid_a", "slot": "object"},
+                        {"command_id": "solid_b", "slot": "object"},
+                    ),
+                },
+                depends_on=("solid_a", "solid_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-loft-rejection", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, False]
+    assert native_called is False
+    assert len(session.doc.Objects) == 2
+
+
+@pytest.mark.parametrize(
+    ("operation", "shape_type", "source_count"),
+    (
+        (PartOffsetOperation.PLANAR_WIRE_OFFSET, "Wire", 1),
+        (PartOffsetOperation.EDGE_ON_FACE_PROJECTION, "Compound", 2),
+    ),
+)
+def test_execute_program_adopts_reviewed_offset_non_solids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: PartOffsetOperation,
+    shape_type: str,
+    source_count: int,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_offset = reviewed_offset_program(operation)
+    primitive_results: list[ReviewedNativeExecutionResult] = []
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            index = len(primitive_results)
+            obj = type("ManagedReviewedOffsetSource", (), {})()
+            obj.Name = f"ReviewedOffsetSource{index}"
+            obj.TypeId = "Part::Box"
+            obj.Length = 10.0
+            obj.Width = 8.0
+            obj.Height = 6.0
+            obj.Placement = _FakePlacement(float(index))
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            obj.State = []
+            session.doc.Objects = (*session.doc.Objects, obj)
+            plan_sha256 = f"{index + 1:x}" * 64
+            result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256=plan_sha256,
+                plan_content_sha256=f"{index + 3:x}" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256=plan_sha256,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            primitive_results.append(result)
+            return result
+
+        assert value == reviewed_offset
+        assert source_results == tuple(primitive_results)
+        route = next(
+            item
+            for item in REVIEWED_PART_OFFSET_ROUTES
+            if item.operation.operation_id == operation.value
+        )
+        obj = type("ManagedReviewedOffsetResult", (), {})()
+        obj.Name = f"Reviewed{shape_type}Offset"
+        obj.TypeId = route.operation.native_type_id
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=0.0,
+            area=64.0,
+            shape_type=shape_type,
+            edge_count=1,
+            face_count=0,
+            solid_count=0,
+            bbox=(8.0, 8.0, 1.0),
+            center=(4.0, 4.0, 0.5),
+        )
+        obj.State = ("Up-to-date",)
+        obj.isValid = lambda: True
+        session.doc.Objects = (*session.doc.Objects, obj)
+        plan_sha256 = "9" * 64
+        source_shape_sha256s = tuple(
+            item.native_receipt.result_shape_sha256 for item in source_results
+        )
+        receipt = PartOffsetConformanceReceipt(
+            plan_sha256=plan_sha256,
+            operation=operation,
+            object_name=obj.Name,
+            native_type_id=obj.TypeId,
+            source_object_names=tuple(item.object.Name for item in source_results),
+        )
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=obj,
+            plan_sha256=plan_sha256,
+            plan_content_sha256="a" * 64,
+            native_receipt=PartOffsetOwnershipClosure(
+                invariant=PART_OFFSET_RESULT_INVARIANTS[operation],
+                native_receipt=receipt,
+                source_shape_sha256s=source_shape_sha256s,
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    source_commands = tuple(
+        _command(
+            f"source_{index}",
+            "apply_reviewed_intent",
+            args={"intent": reviewed_box.to_mapping()},
+        )
+        for index in range(source_count)
+    )
+    offset_args: dict[str, object] = {
+        "intent": reviewed_offset.to_mapping(),
+        "sources": tuple(
+            {"command_id": f"source_{index}", "slot": "object"} for index in range(source_count)
+        ),
+    }
+    program = ModelProgram(
+        task_id=f"task-reviewed-{operation.value}",
+        base_revision=BASE_REVISION,
+        operations=(
+            *source_commands,
+            _command(
+                "offset",
+                "apply_reviewed_intent",
+                args=offset_args,
+                depends_on=tuple(f"source_{index}" for index in range(source_count)),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation.value}", criteria=()),
+    )
+    session = _FakeSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert all(item.result.ok for item in outcomes)
+    observation = outcomes[-1].result.value["after"]
+    result_object, identity = next(
+        (item, item_identity)
+        for item, item_identity in session.attached_identities
+        if item_identity.object_id == observation["object_id"]
+    )
+    assert identity.semantic_role.value == "feature"
+    assert result_object.Shape.ShapeType == shape_type
+    assert observation["solid_count"] == 0
+    assert observation["volume_mm3"] == 0.0
+
+
+@pytest.mark.slow
+def test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_duplicate(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    source_root = Path(__file__).parents[1] / "src"
+    operations = (
+        PartCoreOperation.BOX,
+        PartCoreOperation.CONE,
+        PartCoreOperation.CYLINDER,
+        PartCoreOperation.ELLIPSOID,
+        PartCoreOperation.PRISM,
+        PartCoreOperation.SPHERE,
+        PartCoreOperation.TORUS,
+        PartCoreOperation.WEDGE,
+    )
+    reviewed_mappings = tuple(
+        reviewed_primitive_program(operation).to_mapping() for operation in operations
+    )
+    expected_types = tuple(PART_CORE_NATIVE_SPECS[operation].type_id for operation in operations)
+    code = (
+        f"import sys; sys.path.insert(0, {str(source_root)!r})\n"
+        + "import os\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import "
+        + "InProcessCadExecutor, _entity_observations, _same_import_observations\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import "
+        + "AcceptanceSpec, ModelCommand, ModelProgram, ValueSource\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + "native_root = root / 'freecad-native-cache'\n"
+        + "native_root.mkdir(mode=0o700)\n"
+        + "os.environ['FREECAD_USER_TEMP'] = str(native_root)\n"
+        + f"reviewed_mappings = {reviewed_mappings!r}\n"
+        + f"expected_types = {expected_types!r}\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "commands = tuple(ModelCommand(id=f'reviewed_{index}', "
+        + "op='apply_reviewed_intent', target={}, args={'intent': mapping}, "
+        + "depends_on=(), preserve=(), source=ValueSource.MODEL) "
+        + "for index, mapping in enumerate(reviewed_mappings))\n"
+        + "program = ModelProgram(task_id='task-real-reviewed-primitives', "
+        + "base_revision=base_revision, operations=commands, "
+        + "acceptance=AcceptanceSpec(id='accept-real-reviewed-primitives', criteria=()))\n"
+        + "store = object.__new__(LocalRevisionStore)\n"
+        + "executor = InProcessCadExecutor(store=store)\n"
+        + "session = executor.create_empty(revision_id=candidate_revision)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0, "
+        + "revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head, "
+        + "binding=SessionBinding(project_id=project_id, revision_id=candidate_revision, "
+        + "session=session), model_path=root / 'model.FCStd', "
+        + "step_path=root / 'model.step')\n"
+        + "    validated = executor.validate_program(program)\n"
+        + "    outcomes = executor.execute_program(program=validated, candidate=candidate)\n"
+        + "    assert len(outcomes) == len(reviewed_mappings), "
+        + "tuple(item.result.to_mapping() for item in outcomes)\n"
+        + "    assert all(item.result.ok for item in outcomes)\n"
+        + "    assert all(item.result.value['kind'] == 'reviewed_intent_applied' "
+        + "for item in outcomes)\n"
+        + "    entities = _entity_observations(session)\n"
+        + "    assert len(entities) == len(expected_types)\n"
+        + "    assert {item.object_type for item in entities} == set(expected_types)\n"
+        + "    assert all(item.valid_shape and item.solid_count == 1 "
+        + "and item.volume_mm3 is not None and item.volume_mm3 > 0 for item in entities), "
+        + "tuple(item.to_mapping() for item in entities)\n"
+        + "    assert session.get_result_object().Name.startswith('VcPart_wedge_')\n"
+        + "    before_duplicate = tuple(session.doc.Objects)\n"
+        + "    duplicate = executor.execute_program(program=validated, candidate=candidate)\n"
+        + "    assert len(duplicate) == 1 and not duplicate[0].result.ok\n"
+        + "    assert tuple(session.doc.Objects) == before_duplicate\n"
+        + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
+        + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
+        + "    reloaded = _entity_observations(loaded)\n"
+        + "    assert _same_import_observations(reloaded, entities)\n"
+        + "    assert loaded.get_result_object().Name == session.get_result_object().Name\n"
+        + "    print('REAL_REVIEWED_PRIMITIVES_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    session.close_document()\n"
+        + "assert tuple(native_root.iterdir()) == ()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_REVIEWED_PRIMITIVES_OK" in result.stdout
+
+
 def test_execute_program_supplies_trusted_profile_version_and_object_counter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1402,6 +3972,491 @@ def test_execute_program_runs_all_six_managed_operations_with_fixed_traces(
     assert len({identity.object_id for identity in identities}) == 2
     assert values[0]["object_id"] == identities[0].object_id  # type: ignore[index]
     assert values[1]["object_id"] == identities[1].object_id  # type: ignore[index]
+
+
+def test_execute_program_creates_native_cone_sphere_and_torus_with_live_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_cone", _fake_add_cone)
+    monkeypatch.setattr(executor_module, "_add_sphere", _fake_add_sphere)
+    monkeypatch.setattr(executor_module, "_add_torus", _fake_add_torus)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_native_primitives_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True]
+    assert [outcome.result.operation_id for outcome in outcomes] == ["cone", "sphere", "torus"]
+    values = [outcome.result.value for outcome in outcomes]
+    assert [value["operation"] for value in values] == [  # type: ignore[index]
+        "create_cone",
+        "create_sphere",
+        "create_torus",
+    ]
+    assert [value["after"]["object_type"] for value in values] == [  # type: ignore[index]
+        "Part::Cone",
+        "Part::Sphere",
+        "Part::Torus",
+    ]
+    identities = [identity for _, identity in session.attached_identities]
+    assert [identity.provenance.operation_id for identity in identities] == [
+        "cone",
+        "sphere",
+        "torus",
+    ]
+    assert len({identity.object_id for identity in identities}) == 3
+
+
+@pytest.mark.parametrize(
+    ("operation", "leaf", "object_type", "relation"),
+    (
+        ("boolean_cut", _fake_boolean_cut, "Part::Cut", "cut"),
+        ("boolean_fuse", _fake_boolean_fuse, "Part::Fuse", "fuse"),
+        ("boolean_common", _fake_boolean_common, "Part::Common", "common"),
+    ),
+)
+def test_execute_program_creates_managed_native_boolean_feature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    leaf: object,
+    object_type: str,
+    relation: str,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, f"_{operation}_uncommitted", leaf)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_program(operation)),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True]
+    value = outcomes[-1].result.value
+    assert value["kind"] == "boolean_created"  # type: ignore[index]
+    assert value["operation"] == operation  # type: ignore[index]
+    assert value["after"]["object_type"] == object_type  # type: ignore[index]
+    assert value["after"]["semantic_role"] == "feature"  # type: ignore[index]
+    parameters = {
+        item["name"]: item["value"]
+        for item in value["after"]["parameters"]  # type: ignore[index]
+    }
+    assert parameters == {
+        "base_object_id": value["base_object_id"],  # type: ignore[index]
+        "operation": relation,
+        "tool_object_id": value["tool_object_id"],  # type: ignore[index]
+    }
+    assert session.result_object is session.doc.Objects[-1]
+
+
+def test_managed_boolean_rolls_back_creation_when_identity_attachment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+    session = _FakeSession()
+    original_attach = session.attach_object_identity
+
+    def attach(obj: object, identity: object) -> object:
+        if getattr(obj, "TypeId", None) == "Part::Cut":
+            raise RuntimeError("private identity fault")
+        return original_attach(obj, identity)
+
+    session.attach_object_identity = attach  # type: ignore[method-assign]
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, False]
+    assert [obj.TypeId for obj in session.doc.Objects] == ["Part::Box", "Part::Box"]
+    assert session.result_object is session.doc.Objects[-1]
+    assert all(identity.object_type != "Part::Cut" for _, identity in session.attached_identities)
+
+
+def test_managed_boolean_rolls_back_identity_owner_and_root_after_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+    session = _FakeSession()
+    original_attach = session.attach_object_identity
+
+    def attach_then_corrupt(obj: object, identity: object) -> object:
+        attached = original_attach(obj, identity)
+        if getattr(obj, "TypeId", None) == "Part::Cut":
+            obj.Shape = _FakeShape(volume=0.0)  # type: ignore[attr-defined]
+        return attached
+
+    session.attach_object_identity = attach_then_corrupt  # type: ignore[method-assign]
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_part_boolean_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, False]
+    assert [obj.TypeId for obj in session.doc.Objects] == ["Part::Box", "Part::Box"]
+    assert session.result_object is session.doc.Objects[-1]
+    assert all(identity.object_type != "Part::Cut" for _, identity in session.attached_identities)
+
+
+@pytest.mark.parametrize(
+    ("operation", "leaf"),
+    (
+        ("boolean_cut", _fake_boolean_cut),
+        ("boolean_fuse", _fake_boolean_fuse),
+        ("boolean_common", _fake_boolean_common),
+    ),
+)
+def test_managed_boolean_operand_edit_propagates_to_each_native_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    leaf: object,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, f"_{operation}_uncommitted", leaf)
+
+    def modify(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        result = _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+        _refresh_fake_boolean_descendants(session, session.get_object(str(kwargs["name"])))
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, "_modify_part_uncommitted", modify)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_edit_program(operation)),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+    assert session.doc.Objects[-1].Shape.BoundBox.XLength == 22
+
+
+def test_managed_boolean_operand_edit_rejects_stale_descendant_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+
+    def modify_without_recompute(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        return _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        executor_module,
+        "_modify_part_uncommitted",
+        modify_without_recompute,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_DocumentRecomputeObserver",
+        _FakeMissingDescendantRecomputeObserver,
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_edit_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, False]
+    assert session.doc.Objects[0].Length == 20
+    assert session.doc.Objects[-1].Shape.Volume == 7500
+
+
+def test_boolean_recompute_receipt_rejects_missing_target_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+
+    class DescendantOnly(_FakeRecomputeObserver):
+        def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+            if getattr(obj, "TypeId", None) == "Part::Cut":
+                super().slotRecomputedObject(obj)
+
+    monkeypatch.setattr(executor_module, "_DocumentRecomputeObserver", DescendantOnly)
+
+    def modify(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        result = _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+        _refresh_fake_boolean_descendants(session, session.get_object(str(kwargs["name"])))
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, "_modify_part_uncommitted", modify)
+    session = _FakeSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_part_boolean_edit_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, True, False]
+    assert session.doc.Objects[0].Length == 20
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments", "private_leaf"),
+    (
+        ("move_part", {"position_mm": (1, 0, 0)}, "_move_part_uncommitted"),
+        ("rotate_part", {"axis": "z", "angle_deg": 90}, "_rotate_part_uncommitted"),
+    ),
+)
+def test_managed_boolean_operand_transform_propagates_inside_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    arguments: dict[str, object],
+    private_leaf: str,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+
+    def transform(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        target = session.get_object(str(kwargs["name"]))
+        result = (
+            _fake_move_part(session, **kwargs)  # type: ignore[arg-type]
+            if operation == "move_part"
+            else _fake_rotate_part(session, **kwargs)  # type: ignore[arg-type]
+        )
+        _refresh_fake_boolean_descendants(session, target)
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, private_leaf, transform)
+    created = _part_boolean_program("boolean_cut").operations
+    program = ModelProgram(
+        task_id=f"task-executor-boolean-{operation}",
+        base_revision=BASE_REVISION,
+        operations=(
+            *created,
+            _command(
+                "transform",
+                operation,
+                target={"object": {"command_id": "base", "slot": "object"}},
+                args=arguments,
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-boolean-{operation}", criteria=()),
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+
+
+def test_managed_boolean_remains_owned_by_its_explicit_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    program = _component_boolean_program()
+    session = _FakeComponentSession()
+    executor = InProcessCadExecutor(store=_store())
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+    result = session.doc.Objects[-1]
+    assert session.owner_of(result.Name) == "Bracket"
+    assert session.get_result_object("Bracket") is result
+    records = session.list_component_identity_records()
+    assert sorted(identity.object_type for _obj, identity in records[0][3]) == [
+        "Part::Box",
+        "Part::Box",
+        "Part::Fuse",
+    ]
+
+
+def test_component_boolean_can_add_another_tool_and_close_a_nested_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_nested_component_boolean_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True] * 6
+    records = session.list_component_identity_records()
+    assert len(records[0][3]) == 5
+    assert sum(identity.object_type == "Part::Fuse" for _obj, identity in records[0][3]) == 2
+    assert executor_module._component_observations(session)[0].solid_count == 1
+
+
+def test_component_delivery_rejects_an_unconsumed_second_solid_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    program = ModelProgram(
+        task_id="task-executor-incomplete-component",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command("component", "create_component", args={"name": "Bracket"}),
+            _command(
+                "first",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={"length_mm": 20, "width_mm": 10, "height_mm": 10},
+                depends_on=("component",),
+            ),
+            _command(
+                "second",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={
+                    "length_mm": 5,
+                    "width_mm": 5,
+                    "height_mm": 5,
+                    "position_mm": (30, 0, 0),
+                },
+                depends_on=("first",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-incomplete-component", criteria=()),
+    )
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._managed_assembly_shape(session)
+
+
+def test_component_boolean_observation_rejects_consumed_result_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_component_boolean_program()),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+    base = next(obj for obj in session.doc.Objects if obj.TypeId == "Part::Box")
+    session._result_by_part["Bracket"] = base
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._managed_assembly_shape(session)
+
+
+def test_component_boolean_observation_rejects_cross_component_operand(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(
+            _component_boolean_program(include_empty_component=True),
+        ),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+    tool = next(
+        obj
+        for obj in session.doc.Objects
+        if obj.TypeId == "Part::Box" and obj.Placement.Base.x == 15
+    )
+    session._parts["Bracket"]["objects"].remove(tool.Name)  # type: ignore[attr-defined]
+    session._parts["Other"]["objects"].add(tool.Name)  # type: ignore[attr-defined]
+    session._result_by_part["Other"] = tool
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._entity_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+
+
+def test_managed_boolean_rejects_reusing_an_already_consumed_operand(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+    program = ModelProgram(
+        task_id="task-executor-reused-boolean-operand",
+        base_revision=BASE_REVISION,
+        operations=(
+            *_part_boolean_program("boolean_cut").operations,
+            _command(
+                "reuse",
+                "boolean_cut",
+                target={
+                    "base": {"command_id": "base", "slot": "object"},
+                    "tool": {"command_id": "boolean", "slot": "object"},
+                },
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reused-boolean-operand", criteria=()),
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, False]
+    assert outcomes[-1].result.error is not None
+    assert outcomes[-1].result.error.category.value == "runtime"
 
 
 def test_execute_program_builds_places_and_inspects_explicit_components(
@@ -1689,6 +4744,291 @@ def test_real_freecad_component_program_checkpoints_reloads_and_exports_step(
     assert "REAL_COMPONENT_PROGRAM_OK" in result.stdout
 
 
+@pytest.mark.slow
+def test_real_freecad_native_booleans_edit_reopen_and_export_step(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import (\n"
+        + "    InProcessCadExecutor, _entity_observations, _export_session_step, "
+        + "_shape_observation,\n"
+        + ")\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import (\n"
+        + "    AcceptanceSpec, ModelCommand, ModelProgram, ValueSource,\n"
+        + ")\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "def command(identifier, operation, *, target=None, args=None, depends=()):\n"
+        + "    return ModelCommand(\n"
+        + "        id=identifier, op=operation, target=target or {}, args=args or {},\n"
+        + "        depends_on=depends, preserve=(), source=ValueSource.MODEL,\n"
+        + "    )\n"
+        + "def ref(identifier):\n"
+        + "    return {'command_id': identifier, 'slot': 'object'}\n"
+        + "program = ModelProgram(\n"
+        + "    task_id='task-real-native-booleans', base_revision=base_revision, operations=(\n"
+        + "        command('cut_base', 'create_box',\n"
+        + "            args={'length_mm': 20, 'width_mm': 20, 'height_mm': 20}),\n"
+        + "        command('cut_tool', 'create_cylinder',\n"
+        + "            args={'radius_mm': 3, 'height_mm': 20,\n"
+        + "                'position_mm': [10, 10, 0], 'axis': 'z'},\n"
+        + "            depends=('cut_base',)),\n"
+        + "        command('cut', 'boolean_cut',\n"
+        + "            target={'base': ref('cut_base'), 'tool': ref('cut_tool')},\n"
+        + "            depends=('cut_base', 'cut_tool')),\n"
+        + "        command('edit_cut_tool', 'modify_parameter',\n"
+        + "            target={'object': ref('cut_tool')},\n"
+        + "            args={'parameter': 'radius', 'value_mm': 4},\n"
+        + "            depends=('cut_tool', 'cut')),\n"
+        + "        command('fuse_base', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 6, 'height_mm': 10,\n"
+        + "                'position_mm': [40, 0, 0]}, depends=('edit_cut_tool',)),\n"
+        + "        command('fuse_tool', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [45, 0, 0]}, depends=('fuse_base',)),\n"
+        + "        command('fuse', 'boolean_fuse',\n"
+        + "            target={'base': ref('fuse_base'), 'tool': ref('fuse_tool')},\n"
+        + "            depends=('fuse_base', 'fuse_tool')),\n"
+        + "        command('edit_fuse_base', 'modify_parameter',\n"
+        + "            target={'object': ref('fuse_base')},\n"
+        + "            args={'parameter': 'length', 'value_mm': 16},\n"
+        + "            depends=('fuse_base', 'fuse')),\n"
+        + "        command('rotate_fuse_base', 'rotate_part',\n"
+        + "            target={'object': ref('fuse_base')},\n"
+        + "            args={'axis': 'z', 'angle_deg': 90},\n"
+        + "            depends=('edit_fuse_base', 'fuse')),\n"
+        + "        command('common_base', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [80, 0, 0]}, depends=('rotate_fuse_base',)),\n"
+        + "        command('common_tool', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [85, 0, 0]}, depends=('common_base',)),\n"
+        + "        command('common', 'boolean_common',\n"
+        + "            target={'base': ref('common_base'), 'tool': ref('common_tool')},\n"
+        + "            depends=('common_base', 'common_tool')),\n"
+        + "        command('edit_common_base', 'modify_parameter',\n"
+        + "            target={'object': ref('common_base')},\n"
+        + "            args={'parameter': 'length', 'value_mm': 12},\n"
+        + "            depends=('common_base', 'common')),\n"
+        + "        command('move_common_base', 'move_part',\n"
+        + "            target={'object': ref('common_base')},\n"
+        + "            args={'position_mm': [79, 0, 0]},\n"
+        + "            depends=('edit_common_base', 'common')),\n"
+        + "        command('contained_base', 'create_box',\n"
+        + "            args={'length_mm': 20, 'width_mm': 20, 'height_mm': 20,\n"
+        + "                'position_mm': [120, 0, 0]}, depends=('move_common_base',)),\n"
+        + "        command('contained_tool', 'create_box',\n"
+        + "            args={'length_mm': 5, 'width_mm': 5, 'height_mm': 5,\n"
+        + "                'position_mm': [122, 2, 2]}, depends=('contained_base',)),\n"
+        + "        command('contained_fuse', 'boolean_fuse',\n"
+        + "            target={'base': ref('contained_base'), 'tool': ref('contained_tool')},\n"
+        + "            depends=('contained_base', 'contained_tool')),\n"
+        + "        command('move_contained_tool', 'move_part',\n"
+        + "            target={'object': ref('contained_tool')},\n"
+        + "            args={'position_mm': [130, 2, 2]},\n"
+        + "            depends=('contained_tool', 'contained_fuse')),\n"
+        + "        command('inspect', 'inspect_model', depends=('move_contained_tool',)),\n"
+        + "    ), acceptance=AcceptanceSpec(id='accept-real-booleans', criteria=()),\n"
+        + ")\n"
+        + "store = object.__new__(LocalRevisionStore)\n"
+        + "executor = InProcessCadExecutor(store=store)\n"
+        + "session = executor.create_empty(revision_id=candidate_revision)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0,\n"
+        + "        revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head,\n"
+        + "        binding=SessionBinding(project_id=project_id,\n"
+        + "            revision_id=candidate_revision, session=session),\n"
+        + "        model_path=root / 'model.FCStd', step_path=root / 'model.step')\n"
+        + "    outcomes = executor.execute_program(\n"
+        + "        program=executor.validate_program(program), candidate=candidate)\n"
+        + "    assert len(outcomes) == 19 and all(item.result.ok for item in outcomes), "
+        + "[item.result.to_mapping() for item in outcomes]\n"
+        + "    observed = _entity_observations(session)\n"
+        + "    by_operation = {item.provenance['operation_id']: item for item in observed}\n"
+        + "    assert by_operation['cut'].object_type == 'Part::Cut'\n"
+        + "    assert by_operation['fuse'].object_type == 'Part::Fuse'\n"
+        + "    assert by_operation['common'].object_type == 'Part::Common'\n"
+        + "    assert by_operation['cut'].semantic_role == 'feature'\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['cut'].parameters) == {\n"
+        + "        'base_object_id': by_operation['cut_base'].object_id,\n"
+        + "        'operation': 'cut',\n"
+        + "        'tool_object_id': by_operation['cut_tool'].object_id,\n"
+        + "    }\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['cut_tool'].parameters) "
+        + "['radius'] == 4\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['fuse_base'].parameters) "
+        + "['length'] == 16\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['common_base'].parameters) "
+        + "['length'] == 12\n"
+        + "    assert by_operation['fuse_base'].placement[3:] != (0, 0, 0, 1)\n"
+        + "    assert by_operation['common_base'].placement[:3] == (79, 0, 0)\n"
+        + "    assert by_operation['contained_tool'].placement[:3] == (130, 2, 2)\n"
+        + "    assert abs(by_operation['contained_fuse'].volume_mm3 - 8000) <= 1e-7\n"
+        + "    assert by_operation['cut'].volume_mm3 < 8000\n"
+        + "    shape_before = _shape_observation(session)\n"
+        + "    assert shape_before.solid_count == 4, shape_before.to_mapping()\n"
+        + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
+        + "    (root / 'model.step').touch(mode=0o600)\n"
+        + "    _export_session_step(session=session, model_path=root / 'model.FCStd',\n"
+        + "        step_path=root / 'model.step')\n"
+        + "    assert (root / 'model.step').stat().st_size > 0\n"
+        + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
+        + "    loaded_observed = _entity_observations(loaded)\n"
+        + "    assert [item.object_id for item in loaded_observed] == "
+        + "[item.object_id for item in observed]\n"
+        + "    assert all((item.object_id, item.feature_id, item.object_type, "
+        + "item.semantic_role, dict(item.provenance)) == "
+        + "(loaded_item.object_id, loaded_item.feature_id, loaded_item.object_type, "
+        + "loaded_item.semantic_role, dict(loaded_item.provenance)) "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.parameters == loaded_item.parameters "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.placement == loaded_item.placement "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.valid_shape == loaded_item.valid_shape "
+        + "and item.solid_count == loaded_item.solid_count "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(abs(item.volume_mm3 - loaded_item.volume_mm3) <= 1e-7 "
+        + "and abs(item.area_mm2 - loaded_item.area_mm2) <= 1e-7 "
+        + "and all(abs(a-b) <= 1e-7 for a,b in zip(item.bbox_mm, loaded_item.bbox_mm)) "
+        + "and all(abs(a-b) <= 1e-7 for a,b in zip(item.center_of_mass_mm, "
+        + "loaded_item.center_of_mass_mm)) for item, loaded_item in "
+        + "zip(observed, loaded_observed))\n"
+        + "    loaded_shape = _shape_observation(loaded)\n"
+        + "    assert loaded_shape.target == shape_before.target\n"
+        + "    assert loaded_shape.valid_shape == shape_before.valid_shape\n"
+        + "    assert loaded_shape.solid_count == shape_before.solid_count\n"
+        + "    assert abs(loaded_shape.volume_mm3 - shape_before.volume_mm3) <= 1e-7\n"
+        + "    assert abs(loaded_shape.area_mm2 - shape_before.area_mm2) <= 1e-7\n"
+        + "    assert all(abs(a-b) <= 1e-7 for a,b in "
+        + "zip(loaded_shape.bbox_mm, shape_before.bbox_mm))\n"
+        + "    assert all(abs(a-b) <= 1e-7 for a,b in "
+        + "zip(loaded_shape.center_of_mass_mm, shape_before.center_of_mass_mm))\n"
+        + "    print('REAL_NATIVE_BOOLEANS_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    session.close_document()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_NATIVE_BOOLEANS_OK" in result.stdout
+
+
+@pytest.mark.slow
+def test_real_freecad_component_boolean_owner_root_reopen_and_export_step(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import (InProcessCadExecutor, "
+        + "_component_observations, _entity_observations, _export_session_step)\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import (AcceptanceSpec, ModelCommand, "
+        + "ModelProgram, ValueSource)\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "def command(identifier, operation, *, target=None, args=None, depends=()):\n"
+        + "    return ModelCommand(id=identifier, op=operation, target=target or {}, "
+        + "args=args or {}, depends_on=depends, preserve=(), source=ValueSource.MODEL)\n"
+        + "def ref(identifier): return {'command_id': identifier, 'slot': 'object'}\n"
+        + "program = ModelProgram(task_id='task-real-component-boolean', "
+        + "base_revision=base_revision, operations=(\n"
+        + "    command('component', 'create_component', args={'name': 'Bracket'}),\n"
+        + "    command('base', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 20, 'width_mm': 10, "
+        + "'height_mm': 10}, depends=('component',)),\n"
+        + "    command('tool', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 10, 'width_mm': 10, "
+        + "'height_mm': 10, 'position_mm': [15, 0, 0]}, depends=('base',)),\n"
+        + "    command('fuse', 'boolean_fuse', target={'base': ref('base'), "
+        + "'tool': ref('tool')}, depends=('base', 'tool')),\n"
+        + "    command('second_tool', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 5, 'width_mm': 10, "
+        + "'height_mm': 10, 'position_mm': [22, 0, 0]}, depends=('fuse',)),\n"
+        + "    command('second_fuse', 'boolean_fuse', target={'base': ref('fuse'), "
+        + "'tool': ref('second_tool')}, depends=('fuse', 'second_tool')),\n"
+        + "    command('inspect', 'inspect_model', depends=('second_fuse',)),\n"
+        + "), acceptance=AcceptanceSpec(id='accept-real-component-boolean', criteria=()))\n"
+        + "executor = InProcessCadExecutor(store=object.__new__(LocalRevisionStore))\n"
+        + "session = executor.create_empty(revision_id=candidate_revision); loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0, "
+        + "revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head, "
+        + "binding=SessionBinding(project_id=project_id, revision_id=candidate_revision, "
+        + "session=session), model_path=root/'model.FCStd', step_path=root/'model.step')\n"
+        + "    outcomes = executor.execute_program(program=executor.validate_program(program), "
+        + "candidate=candidate)\n"
+        + "    assert len(outcomes) == 7 and all(item.result.ok for item in outcomes), "
+        + "[item.result.to_mapping() for item in outcomes]\n"
+        + "    observed = _entity_observations(session); components = "
+        + "_component_observations(session)\n"
+        + "    fuses = [item for item in observed if item.object_type == 'Part::Fuse']\n"
+        + "    assert len(fuses) == 2 and all(item.semantic_role == 'feature' for item in fuses)\n"
+        + "    assert len(components) == 1 and components[0].member_object_ids == "
+        + "tuple(sorted(item.object_id for item in observed if item.object_type != 'App::Part'))\n"
+        + "    executor.checkpoint_fcstd(session, root/'model.FCStd')\n"
+        + "    (root/'model.step').touch(mode=0o600)\n"
+        + "    _export_session_step(session=session, model_path=root/'model.FCStd', "
+        + "step_path=root/'model.step')\n"
+        + "    loaded = executor.load_fcstd(root/'model.FCStd')\n"
+        + "    assert [item.object_id for item in _entity_observations(loaded)] == "
+        + "[item.object_id for item in observed]\n"
+        + "    assert _component_observations(loaded)[0].member_object_ids == "
+        + "components[0].member_object_ids\n"
+        + "    print('REAL_COMPONENT_BOOLEAN_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None: loaded.close_document()\n"
+        + "    session.close_document()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_COMPONENT_BOOLEAN_OK" in result.stdout
+
+
 def test_rotate_rejects_requested_quaternion_with_wrong_translation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1958,6 +5298,40 @@ def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:
     assert observation.solid_count == 2
     assert entity_geometry["center_of_mass_mm"] == (20.0, 2.0, 4.0)
     assert entity_geometry["solid_count"] == 2
+
+
+def test_zero_volume_valid_shape_uses_bound_box_center_when_mass_is_undefined() -> None:
+    class WireShape:
+        Volume = 0.0
+        Area = 0.0
+        Solids = ()
+        BoundBox = SimpleNamespace(
+            XMin=-5.0,
+            XMax=15.0,
+            YMin=-2.0,
+            YMax=4.0,
+            ZMin=0.0,
+            ZMax=0.0,
+            XLength=20.0,
+            YLength=6.0,
+            ZLength=0.0,
+        )
+
+        @property
+        def CenterOfMass(self):  # noqa: N802 - native spelling
+            raise RuntimeError("undefined for a wire")
+
+        def isNull(self) -> bool:  # noqa: N802 - native spelling
+            return False
+
+        def isValid(self) -> bool:  # noqa: N802 - native spelling
+            return True
+
+    assert executor_module._entity_geometry(WireShape())["center_of_mass_mm"] == (
+        5.0,
+        1.0,
+        0.0,
+    )
 
 
 def test_derived_geometry_tolerance_accepts_roundoff_but_rejects_material_error() -> None:

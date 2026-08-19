@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_visual_adoption import _AdoptionProbe
+from tests.test_visual_adoption import _AdmissionProbe, _AdoptionProbe
 from tests.test_visual_service import (
     _budget,
     _head,
@@ -41,6 +41,7 @@ def _service(inputs, drafts, provider, adoption=None) -> VisualReconstructionSer
         inputs=inputs,
         drafts=drafts,
         provider=VisualProviderBinding(provider=provider),
+        admission=(_AdmissionProbe(drafts=drafts) if adoption is not None else None),
         adoption=adoption,
     )
 

@@ -31,6 +31,7 @@ _STABLE_PUBLIC_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -124,7 +125,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_five_private_operations():
+def test_default_registry_exposes_six_direct_and_twelve_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -132,13 +133,20 @@ def test_default_registry_exposes_six_direct_and_five_private_operations():
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_cone",
+        "create_sphere",
+        "create_torus",
+        "boolean_cut",
+        "boolean_fuse",
+        "boolean_common",
         "create_component",
         "set_component_bom",
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
+        "apply_reviewed_intent",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 11
+    assert len(DEFAULT_OPERATION_REGISTRY) == 18
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -228,7 +236,7 @@ def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
     names = tuple(spec.name for spec in public_tool_specs())
 
     assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
-    assert len(names) == len(set(names)) == 38
+    assert len(names) == len(set(names)) == 39
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():
@@ -239,11 +247,18 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_cone",
+        "create_sphere",
+        "create_torus",
+        "boolean_cut",
+        "boolean_fuse",
+        "boolean_common",
         "create_component",
         "set_component_bom",
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
+        "apply_reviewed_intent",
     )
 
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
@@ -269,6 +284,12 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
     assert all(
         not DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
         for name in (
+            "create_cone",
+            "create_sphere",
+            "create_torus",
+            "boolean_cut",
+            "boolean_fuse",
+            "boolean_common",
             "create_component",
             "set_component_bom",
             "place_component",
@@ -304,12 +325,37 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "vector3",
         "quantity",
         "result_ref",
+        "result_ref_collection",
         "object_selector",
         "object_id",
         "entity_target",
         "angle_degrees",
         "parametric_design_ir",
+        "reviewed_intent",
     }
+
+
+def test_reviewed_intent_declares_one_bounded_ordered_source_collection() -> None:
+    metadata = DEFAULT_OPERATION_REGISTRY.lookup("apply_reviewed_intent")
+    fields = {item.name: item for item in metadata.argument_fields}
+
+    assert set(fields) == {"intent", "source_a", "source_b", "sources"}
+    assert fields["sources"] == FieldMetadata(
+        "sources",
+        "sources",
+        ValueShape.RESULT_REF_COLLECTION,
+        required=False,
+        referenced_value_shape=ValueShape.OBJECT_ID,
+    )
+    assert registry_module._matches_value_shape((), ValueShape.RESULT_REF_COLLECTION)  # noqa: SLF001
+    assert registry_module._matches_value_shape(  # noqa: SLF001
+        tuple({"command_id": f"source_{index}", "slot": "object"} for index in range(8)),
+        ValueShape.RESULT_REF_COLLECTION,
+    )
+    assert not registry_module._matches_value_shape(  # noqa: SLF001
+        tuple({"command_id": f"source_{index}", "slot": "object"} for index in range(9)),
+        ValueShape.RESULT_REF_COLLECTION,
+    )
 
 
 def test_component_selector_shape_accepts_only_explicit_app_part_objects():
@@ -441,9 +487,13 @@ def test_result_slot_and_result_ref_metadata_fail_closed():
         FieldMetadata("object", "name", ValueShape.RESULT_REF)
     assert caught.value.code is RegistryErrorCode.INVALID_METADATA
 
-    with pytest.raises(RegistryError) as caught:
-        ResultSlotMetadata("object", "name", ValueShape.RESULT_REF)
-    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+    for reference_shape in (
+        ValueShape.RESULT_REF,
+        ValueShape.RESULT_REF_COLLECTION,
+    ):
+        with pytest.raises(RegistryError) as caught:
+            ResultSlotMetadata("object", "name", reference_shape)
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
 
     with pytest.raises(RegistryError) as caught:
         _operation(result_slots=(slot, slot))
@@ -458,6 +508,12 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "move_part": ("move_part", RiskClass.MUTATING, True),
         "rotate_part": ("rotate_part", RiskClass.MUTATING, True),
         "inspect_model": ("inspect_model", RiskClass.READ_ONLY, False),
+        "create_cone": ("create_cone", RiskClass.MUTATING, True),
+        "create_sphere": ("create_sphere", RiskClass.MUTATING, True),
+        "create_torus": ("create_torus", RiskClass.MUTATING, True),
+        "boolean_cut": ("boolean_cut", RiskClass.MUTATING, True),
+        "boolean_fuse": ("boolean_fuse", RiskClass.MUTATING, True),
+        "boolean_common": ("boolean_common", RiskClass.MUTATING, True),
         "create_component": ("create_component", RiskClass.MUTATING, True),
         "set_component_bom": ("set_component_bom", RiskClass.MUTATING, True),
         "place_component": ("place_component", RiskClass.MUTATING, True),
@@ -468,6 +524,11 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         ),
         "modify_parametric_parameter": (
             "modify_parametric_parameter",
+            RiskClass.MUTATING,
+            True,
+        ),
+        "apply_reviewed_intent": (
+            "apply_reviewed_intent",
             RiskClass.MUTATING,
             True,
         ),
@@ -511,6 +572,44 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     )
     assert create_cylinder.argument_fields[3].enum_values == ("x", "y", "z")
 
+    create_cone = DEFAULT_OPERATION_REGISTRY.lookup("create_cone")
+    assert _fields(create_cone.argument_fields) == (
+        ("base_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER, True),
+        ("top_radius_mm", "radius2", ValueShape.POSITIVE_NUMBER, False),
+        ("height_mm", "height", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+        ("axis", "axis", ValueShape.ENUM, False),
+    )
+    assert create_cone.argument_fields[-1].enum_values == ("x", "y", "z")
+
+    create_sphere = DEFAULT_OPERATION_REGISTRY.lookup("create_sphere")
+    assert _fields(create_sphere.argument_fields) == (
+        ("radius_mm", "radius", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+    )
+
+    create_torus = DEFAULT_OPERATION_REGISTRY.lookup("create_torus")
+    assert _fields(create_torus.argument_fields) == (
+        ("major_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER, True),
+        ("minor_radius_mm", "radius2", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+        ("axis", "axis", ValueShape.ENUM, False),
+    )
+    assert create_torus.argument_fields[-1].enum_values == ("x", "y", "z")
+
+    for operation in ("boolean_cut", "boolean_fuse", "boolean_common"):
+        metadata = DEFAULT_OPERATION_REGISTRY.lookup(operation)
+        assert _fields(metadata.target_fields) == (
+            ("base", "base", ValueShape.ENTITY_TARGET, True),
+            ("tool", "tool", ValueShape.ENTITY_TARGET, True),
+        )
+        assert all(
+            field.referenced_value_shape is ValueShape.OBJECT_ID for field in metadata.target_fields
+        )
+        assert metadata.argument_fields == ()
+        assert metadata.direct_exposed is False
+        assert tuple(slot.name for slot in metadata.result_slots) == ("object",)
+
     modify_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert _fields(modify_parameter.target_fields) == (
         ("object", "target", ValueShape.ENTITY_TARGET, True),
@@ -521,9 +620,13 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
         ("value_mm", "value", ValueShape.POSITIVE_NUMBER, True),
     )
     assert modify_parameter.argument_fields[0].enum_values == (
+        "base_radius",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "radius",
+        "top_radius",
         "width",
     )
 
@@ -619,15 +722,19 @@ def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():
     expected = (
         "angle",
         "area_mm2",
+        "base_radius",
         "bbox_mm",
         "center_of_mass_mm",
         "geometry",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "parameters",
         "placement",
         "radius",
         "solid_count",
+        "top_radius",
         "valid_shape",
         "volume_mm3",
         "width",
@@ -707,6 +814,18 @@ def test_entity_target_metadata_requires_object_id_result_authority():
                 "object",
                 "target",
                 ValueShape.ENTITY_TARGET,
+                referenced_value_shape=referenced_shape,
+            )
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_result_ref_collection_metadata_requires_object_id_result_authority():
+    for referenced_shape in (None, ValueShape.NONBLANK_STRING, ValueShape.RESULT_REF):
+        with pytest.raises(RegistryError) as caught:
+            FieldMetadata(
+                "sources",
+                "sources",
+                ValueShape.RESULT_REF_COLLECTION,
                 referenced_value_shape=referenced_shape,
             )
         assert caught.value.code is RegistryErrorCode.INVALID_METADATA
@@ -1044,14 +1163,14 @@ def test_hostile_iterators_preserve_registry_errors_and_do_not_catch_base_except
 
 def test_unknown_lookup_fails_with_a_stable_machine_readable_error():
     with pytest.raises(RegistryError) as caught:
-        DEFAULT_OPERATION_REGISTRY.lookup("create_sphere")
+        DEFAULT_OPERATION_REGISTRY.lookup("create_prism")
 
     assert caught.value.code is RegistryErrorCode.UNKNOWN_OPERATION
-    assert caught.value.operation == "create_sphere"
+    assert caught.value.operation == "create_prism"
     assert caught.value.to_mapping() == {
         "schema_version": 1,
         "code": "unknown_operation",
-        "operation": "create_sphere",
+        "operation": "create_prism",
         "field": None,
         "message": "operation is not registered",
     }

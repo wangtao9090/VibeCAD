@@ -61,6 +61,7 @@ STABLE_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -526,6 +527,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "ensure_runtime": (False, True, True, True),
         "uninstall_runtime": (False, True, True, False),
         "get_capabilities": (True, False, True, False),
+        "query_freecad_runtime_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),
@@ -581,6 +583,7 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "ensure_runtime": (),
         "uninstall_runtime": ("confirm",),
         "get_capabilities": ("schema_version",),
+        "query_freecad_runtime_capabilities": ("schema_version",),
         "create_project": ("schema_version", "create_key", "kind"),
         "get_project": ("schema_version", "project_id"),
         "list_projects": ("schema_version",),
@@ -1090,9 +1093,13 @@ def test_mutator_schema_uses_full_selector_v1_and_never_result_ref():
     assert selector["properties"]["provenance"]["additionalProperties"] is False
     arguments = spec.input_schema["properties"]["arguments"]
     assert arguments["properties"]["parameter"]["enum"] == (
+        "base_radius",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "radius",
+        "top_radius",
         "width",
     )
     expected_preserve = DEFAULT_OPERATION_REGISTRY.operations[
@@ -1427,7 +1434,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 38
+    assert len(result.tools) == 39
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1457,7 +1464,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 30_415
+    assert len(frame) == 31_504
     assert len(frame) <= 32_768
 
 
@@ -1472,7 +1479,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 38
+    assert len(tools) == 39
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -3245,7 +3252,7 @@ os.environ['VIBECAD_HOME'] = {str(home)!r}
 import vibecad.server as server
 result = anyio.run(server._handle_call_tool, 'get_capabilities', {{'schema_version': 1}})
 assert result.isError is False
-assert len(result.structuredContent['result']['operations']) == 11
+assert len(result.structuredContent['result']['operations']) == 18
 assert 'vibecad.application.agent' not in sys.modules
 assert 'vibecad.interaction.cad' not in sys.modules
 assert 'FreeCAD' not in sys.modules and 'Part' not in sys.modules

@@ -113,6 +113,35 @@ def _default_visual_provider_factory():
     return DeterministicFakeVisualProvider({})
 
 
+def _task_input_cad_port_factory(
+    *,
+    task_input_snapshot_provider: object | None = None,
+    task_input_preflight: object | None = None,
+):
+    """Bind trusted task-input dependencies without widening task operations."""
+
+    if task_input_snapshot_provider is None and task_input_preflight is None:
+        return _default_cad_port_factory
+    from vibecad.execution.freecad_reviewed_artifact_host import (
+        TaskInputProgramPreflight,
+        TaskInputSnapshotProvider,
+    )
+
+    if (
+        task_input_snapshot_provider is not None
+        and not isinstance(task_input_snapshot_provider, TaskInputSnapshotProvider)
+    ) or (
+        task_input_preflight is not None
+        and not isinstance(task_input_preflight, TaskInputProgramPreflight)
+    ):
+        raise TypeError("invalid CAD task input composition")
+    return partial(
+        _default_cad_port_factory,
+        task_input_snapshot_provider=task_input_snapshot_provider,
+        task_input_preflight=task_input_preflight,
+    )
+
+
 def _close_runtime(runtime: object) -> bool:
     try:
         return runtime.close() is True
@@ -221,12 +250,14 @@ class AgentApplication:
         "_release_api",
         "_release_service",
         "_release_store",
+        "_reviewed_inputs",
         "_revision_store",
         "_runtime_factory",
         "_runtimes",
         "_task_api",
         "_task_store",
         "_visual_adoption",
+        "_visual_admission",
         "_visual_api",
         "_visual_drafts",
         "_visual_gate",
@@ -295,8 +326,22 @@ class AgentApplication:
         ):
             raise TypeError("invalid AgentApplication composition")
         self._checkouts = checkouts
+        from vibecad.application.reviewed_input_ingress import ReviewedInputCatalogStore
+
+        reviewed_inputs = ReviewedInputCatalogStore(
+            application_root=layout.root,
+            expected_root_identity=layout.identity_for(layout.root),
+        )
         self._runtime_factory = runtime_factory
-        self._cad_port_factory = cad_port_factory
+        self._reviewed_inputs = reviewed_inputs
+        self._cad_port_factory = (
+            _task_input_cad_port_factory(
+                task_input_snapshot_provider=reviewed_inputs,
+                task_input_preflight=reviewed_inputs,
+            )
+            if cad_port_factory is _default_cad_port_factory
+            else cad_port_factory
+        )
         self._visual_provider_factory = visual_provider_factory
         self._runtimes: OrderedDict[str, object] = OrderedDict()
         self._cad_gate = _PROCESS_CAD_GATE
@@ -328,6 +373,7 @@ class AgentApplication:
         self._visual_drafts = None
         self._visual_review_port = None
         self._visual_reviews = None
+        self._visual_admission = None
         self._visual_adoption = None
         self._visual_service = None
         self._visual_api = None
@@ -406,7 +452,11 @@ class AgentApplication:
                 and application._task_store is tasks
                 and application._revision_store is revisions
                 and application._runtime_factory is runtime_factory
-                and application._cad_port_factory is cad_port_factory
+                and (
+                    cad_port_factory is _default_cad_port_factory
+                    or application._cad_port_factory is cad_port_factory
+                )
+                and application._reviewed_inputs is not None
                 and application._visual_provider_factory is visual_provider_factory
             ):
                 raise TypeError("invalid AgentApplication composition")
@@ -623,6 +673,78 @@ class AgentApplication:
         self._ensure_live()
         return store.seal(request, sources)
 
+    def seal_reviewed_task_inputs(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        base_revision: str,
+        inputs: tuple[object, ...],
+    ):
+        """Bind trusted attachment bytes/FDs to one task before program submission."""
+
+        self._ensure_live()
+        from vibecad.application.reviewed_input_ingress import (
+            ReviewedInputIngressError,
+            ReviewedInputIngressErrorCode,
+        )
+
+        try:
+            stored = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError:
+            raise ReviewedInputIngressError(
+                ReviewedInputIngressErrorCode.AUTHORITY_VIOLATION
+            ) from None
+        task = stored.task_run
+        if (
+            task.id != task_id
+            or task.project_id != project_id
+            or task.base_revision != base_revision
+            or task.status is not TaskStatus.NEEDS_PLAN
+        ):
+            raise ReviewedInputIngressError(ReviewedInputIngressErrorCode.AUTHORITY_VIOLATION)
+        self._ensure_live()
+        return self._reviewed_inputs.seal(
+            task_id=task_id,
+            project_id=project_id,
+            base_revision=base_revision,
+            inputs=inputs,
+        )
+
+    def discard_reviewed_task_inputs(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        base_revision: str,
+    ) -> None:
+        """Discard one exact task input catalog after cancellation or terminal use."""
+
+        self._ensure_live()
+        from vibecad.application.reviewed_input_ingress import (
+            ReviewedInputIngressError,
+            ReviewedInputIngressErrorCode,
+        )
+
+        try:
+            stored = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError:
+            raise ReviewedInputIngressError(
+                ReviewedInputIngressErrorCode.AUTHORITY_VIOLATION
+            ) from None
+        task = stored.task_run
+        if (
+            task.id != task_id
+            or task.project_id != project_id
+            or task.base_revision != base_revision
+        ):
+            raise ReviewedInputIngressError(ReviewedInputIngressErrorCode.AUTHORITY_VIOLATION)
+        self._reviewed_inputs.discard(
+            task_id=task_id,
+            project_id=project_id,
+            base_revision=base_revision,
+        )
+
     def _visual_bundle_for_request(self):
         """Lazily compose the A02 visual service behind the application authority."""
 
@@ -636,6 +758,9 @@ class AgentApplication:
             api = self._visual_api
             service = self._visual_service
             if api is None or service is None:
+                from vibecad.application.visual_admission import (
+                    ApplicationVisualAdmissionGate,
+                )
                 from vibecad.application.visual_adoption import (
                     ApplicationVisualAdoptionPort,
                 )
@@ -668,6 +793,12 @@ class AgentApplication:
                 adoption = self._visual_adoption
                 if adoption is None:
                     adoption = ApplicationVisualAdoptionPort(application=self)
+                admission = self._visual_admission
+                if admission is None:
+                    admission = ApplicationVisualAdmissionGate(
+                        reconstruction_store=drafts,
+                        visual_input_store=inputs,
+                    )
                 review_store = self._visual_reviews
                 if review_store is None:
                     review_store = VisualReviewArtifactStore(
@@ -686,6 +817,7 @@ class AgentApplication:
                         inputs=inputs,
                         drafts=drafts,
                         provider=VisualProviderBinding(provider=provider),
+                        admission=admission,
                         adoption=adoption,
                         review_cleanup=review_port,
                     )
@@ -693,6 +825,7 @@ class AgentApplication:
                     api = VisualApi(service=service)
                 self._visual_inputs = inputs
                 self._visual_drafts = drafts
+                self._visual_admission = admission
                 self._visual_adoption = adoption
                 self._visual_reviews = review_store
                 self._visual_review_port = review_port
@@ -2749,6 +2882,13 @@ class AgentApplication:
                 if store is not None:
                     try:
                         store.close()
+                    except Exception as error:
+                        if close_error is None:
+                            close_error = error
+                reviewed_inputs = self._reviewed_inputs
+                if reviewed_inputs is not None:
+                    try:
+                        reviewed_inputs.close()
                     except Exception as error:
                         if close_error is None:
                             close_error = error

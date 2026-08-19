@@ -12,6 +12,7 @@ EXPECTED_PUBLIC_TOOLS = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -226,7 +227,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "export_task_artifacts",
         "notifications/cancelled",
         "0.9.0",
-        "38 tools",
+        "39 tools",
         "daemon",
         "Task Kernel",
         "G1",
@@ -244,7 +245,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "defaults to the deterministic fake Provider",
         "create_reconstruction",
         "Direct WorkBuddy attachment ingress into VibeCAD's sealed store remains unverified",
-        "38-tool discovery",
+        "39-tool discovery",
         "WorkBuddy (verified)",
     ):
         assert required in english_readme
@@ -262,7 +263,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "export_task_artifacts",
         "notifications/cancelled",
         "0.9.0",
-        "38 个工具",
+        "39 个工具",
         "daemon",
         "Task Kernel",
         "G1",
@@ -280,7 +281,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "默认使用 deterministic fake Provider",
         "create_reconstruction",
         "WorkBuddy 附件直接进入 VibeCAD sealed store 仍未验证",
-        "38-tool discovery",
+        "39-tool discovery",
         "WorkBuddy（已验证）",
     ):
         assert required in chinese_readme
@@ -303,7 +304,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "0.9.0",
-        "38-tool 公共 MCP、durable review/release/visual",
+        "39-tool 公共 MCP、durable review/release/visual",
         "host-neutral skill",
         "P0-B core backend（已完成）",
         "durable active cancellation",

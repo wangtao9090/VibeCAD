@@ -786,7 +786,12 @@ def bootstrap_import_project(
         _close(root_fd)
 
 
-def _default_cad_port_factory(*, revision_store):
+def _default_cad_port_factory(
+    *,
+    revision_store,
+    task_input_snapshot_provider=None,
+    task_input_preflight=None,
+):
     from vibecad.execution.worker_port import WorkerCadExecutionPort
     from vibecad.interaction.cad_runtime import (
         CAD_EXECUTE_PROGRAM_V1,
@@ -795,7 +800,11 @@ def _default_cad_port_factory(*, revision_store):
         CadRuntimeRouter,
     )
 
-    worker = WorkerCadExecutionPort(store=revision_store)
+    worker = WorkerCadExecutionPort(
+        store=revision_store,
+        task_input_snapshot_provider=task_input_snapshot_provider,
+        task_input_preflight=task_input_preflight,
+    )
     registry = CadRuntimeAdapterRegistry((worker,))
     service = CadDomainService(CadRuntimeRouter(registry))
     selected = service.adapter_for(

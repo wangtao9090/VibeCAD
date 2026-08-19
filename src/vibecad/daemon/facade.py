@@ -78,7 +78,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
 )
 KERNEL_API_EPOCH = 1
 KERNEL_API_NAME = "vibecad.task-kernel"
-KERNEL_BUILD_ID = "vcad-a10-visual-review-workflow"
+KERNEL_BUILD_ID = "vcad-a12-native-part-booleans"
 
 _DIRECT_OPERATIONS = frozenset(
     {

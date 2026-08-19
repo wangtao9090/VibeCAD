@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic_ns as _monotonic_ns
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from vibecad.execution.registry import (
     ExecutionProfile,
@@ -95,6 +95,11 @@ class AdapterError(ValueError):
             "code": self.code.value,
             "message": self.message,
         }
+
+
+@runtime_checkable
+class _RunResource(Protocol):
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -775,11 +780,13 @@ class _ValidatedProgramExecution:
 
     __slots__ = (
         "_execution_profile",
+        "_closed",
         "_next_index",
         "_object_count",
         "_outcomes",
         "_plan",
         "_result_values",
+        "_run_resource",
         "_trusted_revision",
     )
 
@@ -798,11 +805,15 @@ class _ValidatedProgramExecution:
         self._next_index = 0
         self._outcomes: list[NormalizedToolOutcome] = []
         self._result_values: dict[str, Mapping[str, object]] = {}
+        self._run_resource: _RunResource | None = None
+        self._closed = False
 
     @property
     def done(self) -> bool:
-        return self._next_index >= len(self._plan) or (
-            bool(self._outcomes) and not self._outcomes[-1].result.ok
+        return (
+            self._closed
+            or self._next_index >= len(self._plan)
+            or (bool(self._outcomes) and not self._outcomes[-1].result.ok)
         )
 
     @property
@@ -815,7 +826,44 @@ class _ValidatedProgramExecution:
     def outcomes(self) -> tuple[NormalizedToolOutcome, ...]:
         return tuple(self._outcomes)
 
+    def _bind_run_resource(self, resource: object) -> None:
+        """Bind one private closer before the first command starts."""
+
+        if (
+            resource is None
+            or self._closed
+            or self._next_index != 0
+            or self._outcomes
+            or self._run_resource is not None
+            or not isinstance(resource, _RunResource)
+        ):
+            raise _invalid_program()
+        self._run_resource = resource
+
+    def close(self) -> None:
+        """Close the optional run resource exactly once and seal this cursor."""
+
+        if self._closed:
+            return
+        self._closed = True
+        resource = self._run_resource
+        self._run_resource = None
+        if resource is not None:
+            resource.close()
+
     def step(self) -> NormalizedToolOutcome:
+        if self.done:
+            raise _invalid_program()
+        try:
+            outcome = self._step_once()
+        except BaseException:
+            self.close()
+            raise
+        if self.done:
+            self.close()
+        return outcome
+
+    def _step_once(self) -> NormalizedToolOutcome:
         if self.done:
             raise _invalid_program()
         command = self._plan[self._next_index]

@@ -2561,8 +2561,8 @@ def make_rejected_import_source(label: str, *, mixed: bool) -> Path:
             box.Length = 3
             box.Width = 4
             box.Height = 5
-        sphere = document.addObject("Part::Sphere", "UnsupportedSphere")
-        sphere.Radius = 2
+        unsupported = document.addObject("Part::Feature", "UnsupportedFeature")
+        unsupported.Shape = Part.makeSphere(2)
         document.recompute()
         document.saveAs(str(source))
     finally:

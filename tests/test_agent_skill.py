@@ -38,6 +38,7 @@ PUBLIC_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -229,12 +230,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_thirty_eight_tool_agent_first_flow():
+def test_skill_teaches_the_exact_thirty_nine_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b38(?:-tool| tools?)\b|38\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b39(?:-tool| tools?)\b|39\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -270,6 +271,10 @@ def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress(
     for forbidden in ("path", "base64", "resource uri"):
         assert forbidden in normalized
     assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
+    assert "exact-evidence admission" in normalized
+    assert "complete" in normalized
+    assert "fails closed before task creation" in normalized
+    assert "instead of blindly retrying" in normalized
 
 
 def test_skill_freezes_the_multi_view_mechanical_envelope_and_safe_failures():
@@ -614,7 +619,7 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     assert path_rule is not None
     assert re.search(r"never|must not|禁止|不得|不能", path_rule, re.IGNORECASE)
 
-    retired_rule = _paragraph_with(body, "retired", "38")
+    retired_rule = _paragraph_with(body, "retired", "39")
     assert re.search(r"never|must not|禁止|不得|不能", retired_rule, re.IGNORECASE)
     code_rule = _paragraph_with(body, "Python", "FreeCAD", "code")
     assert re.search(r"never|must not|禁止|不得|不能", code_rule, re.IGNORECASE)
@@ -703,7 +708,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_9_0():
+def test_manifest_projection_and_all_package_versions_target_0_10_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -722,9 +727,9 @@ def test_manifest_projection_and_all_package_versions_target_0_9_0():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.9.0"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.9.0"
-    assert spec.VIBECAD_VERSION == "0.9.0"
+    assert locked == ["0.10.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.10.0"
+    assert spec.VIBECAD_VERSION == "0.10.0"
 
 
 def test_release_documents_project_the_0_9_0_backend_truth():
@@ -760,7 +765,7 @@ def test_release_documents_project_the_0_9_0_backend_truth():
         )
     }
     for path, normalized in product_documents.items():
-        assert any(claim in normalized for claim in ("38-tool", "38 个工具", "38 个公开工具")), path
+        assert any(claim in normalized for claim in ("39-tool", "39 个工具", "39 个公开工具")), path
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 
@@ -817,6 +822,15 @@ def test_release_documents_project_the_0_9_0_backend_truth():
     assert "vibecad-agent-skill-0.9.0.zip" in release_notes
     assert "epoch stays at 4" in release_notes
     assert "tool count stays at 38" in release_notes
+
+    current_release = _normalized(_read(ROOT / "docs" / "releases" / "v0.10.0.md"))
+    assert current_release.startswith("# vibecad v0.10.0 ")
+    assert "evidence-gated" in current_release
+    assert "1–16 circular locations" in current_release
+    assert "reversed `through_all` hole" in current_release
+    assert "loggedin=false" in current_release
+    assert "runtime epoch 4" in current_release
+    assert "38-tool public mcp surface" in current_release
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():
