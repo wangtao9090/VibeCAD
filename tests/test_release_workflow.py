@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from vibecad.runtime import spec
+
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / ".github" / "scripts" / "check_release_versions.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -256,10 +258,7 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     assert "fresh-install the exact wheel and sdist" in package_body
     assert 'uv pip install --python "$environment/bin/python" --no-deps "$artifact"' in package_body
     assert 'vibecad.__version__ == os.environ["EXPECTED_VERSION"]' in package_body
-    assert (
-        "spec.PUBLIC_SURFACE_SHA256 == "
-        '"fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d"'
-    ) in package_body
+    assert f'spec.PUBLIC_SURFACE_SHA256 == "{spec.PUBLIC_SURFACE_SHA256}"' in package_body
     assert "assert len(public_tool_specs()) == 39" in package_body
 
     assert managed_body.count("actions/download-artifact@v4") == 2
