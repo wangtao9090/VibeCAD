@@ -48,7 +48,7 @@ from vibecad.worker.codec import (
     encode_worker_request,
     encode_worker_response,
 )
-from vibecad.worker.generation import _SpawnedProcess, _WorkerProcess
+from vibecad.worker.generation import _minimal_environment, _SpawnedProcess, _WorkerProcess
 from vibecad.worker.service import WorkerService, _recv_header_with_descriptors, serve_worker
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
@@ -988,6 +988,27 @@ def _wait_gone(pid: int, timeout: float = 2.0) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def test_worker_environment_canonicalizes_private_freecad_roots(tmp_path: Path) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir(mode=0o700)
+    alias_root = tmp_path / "alias"
+    alias_root.symlink_to(real_root, target_is_directory=True)
+    home = alias_root / "worker"
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+
+    environment = _minimal_environment(
+        source_root=Path(__file__).parents[1] / "src",
+        home=home,
+        python=Path(sys.executable).resolve(),
+    )
+
+    for name in ("FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP"):
+        path = Path(environment[name])
+        assert path == path.resolve(strict=True)
+        assert path.is_relative_to(real_root.resolve(strict=True))
 
 
 def test_worker_codec_is_canonical_bounded_and_exact() -> None:

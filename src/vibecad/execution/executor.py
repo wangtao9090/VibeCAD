@@ -4360,7 +4360,7 @@ class InProcessCadExecutor(CadExecutionPort):
 
         if not isinstance(path, Path) or path.suffix.lower() != ".fcstd":
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
-        session = self.load_fcstd(path)
+        session = self._load_fcstd(path, require_identities=False)
         normalized: tuple[EntityObservation, ...] | None = None
         failed: ExecutorError | None = None
         try:
@@ -4663,6 +4663,11 @@ class InProcessCadExecutor(CadExecutionPort):
     def load_fcstd(self, path: Path) -> object:
         """Load one validated FCStd into a newly owned Session."""
 
+        return self._load_fcstd(path, require_identities=True)
+
+    def _load_fcstd(self, path: Path, *, require_identities: bool) -> object:
+        """Load one FCStd, optionally before import identity normalization."""
+
         try:
             _read_artifact(path, "fcstd")
         except _ArtifactReadFailure:
@@ -4673,7 +4678,8 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
             session.load_document(path)
-            _entity_observations(session)
+            if require_identities:
+                _entity_observations(session)
         except _SessionLifecycleError:
             raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:

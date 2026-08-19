@@ -1254,6 +1254,7 @@ def test_validate_import_normalizes_box_identity_checkpoints_and_reloads(
 ) -> None:
     saved_identities: list[object] = []
     made: list[ImportSession] = []
+    observed_identity_counts: list[int] = []
 
     class ImportObject:
         Name = "Box"
@@ -1320,6 +1321,9 @@ def test_validate_import_normalizes_box_identity_checkpoints_and_reloads(
             self.close_calls += 1
 
     def observations(session: ImportSession) -> tuple[object, ...]:
+        observed_identity_counts.append(len(session.identities))
+        if not session.identities:
+            raise AssertionError("raw imports must be normalized before identity observation")
         return tuple(
             (
                 identity.object_id,
@@ -1344,6 +1348,7 @@ def test_validate_import_normalizes_box_identity_checkpoints_and_reloads(
         size_bytes=len(raw),
     )
     assert len(made) == 2
+    assert observed_identity_counts and set(observed_identity_counts) == {1}
     assert made[0].doc.recompute_calls >= 1
     assert made[0].doc.transactions == ["VibeCAD Import Identity Normalization"]
     assert made[0].doc.commits == 1
@@ -1422,8 +1427,8 @@ def test_validate_import_rejects_unobserved_app_featurepython_object(
     closed: list[object] = []
     monkeypatch.setattr(
         InProcessCadExecutor,
-        "load_fcstd",
-        lambda self, path: next(sessions),
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
     )
     monkeypatch.setattr(
         InProcessCadExecutor,
@@ -1467,8 +1472,8 @@ def test_validate_import_rejects_reload_identity_or_geometry_drift(
     closed: list[object] = []
     monkeypatch.setattr(
         InProcessCadExecutor,
-        "load_fcstd",
-        lambda self, path: next(sessions),
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
     )
     monkeypatch.setattr(
         InProcessCadExecutor,
@@ -1533,8 +1538,8 @@ def test_validate_import_accepts_bounded_occ_reload_noise(
     closed: list[object] = []
     monkeypatch.setattr(
         InProcessCadExecutor,
-        "load_fcstd",
-        lambda self, path: next(sessions),
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
     )
     monkeypatch.setattr(
         InProcessCadExecutor,
@@ -1605,8 +1610,8 @@ def test_validate_import_rejects_direct_parameter_drift_within_geometry_toleranc
     closed: list[object] = []
     monkeypatch.setattr(
         InProcessCadExecutor,
-        "load_fcstd",
-        lambda self, path: next(sessions),
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
     )
     monkeypatch.setattr(
         InProcessCadExecutor,
@@ -1669,7 +1674,11 @@ def test_validate_import_rejects_large_coordinate_translation_drift(
 
     sessions = iter((Session(), Session()))
     closed: list[object] = []
-    monkeypatch.setattr(InProcessCadExecutor, "load_fcstd", lambda self, path: next(sessions))
+    monkeypatch.setattr(
+        InProcessCadExecutor,
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
+    )
     monkeypatch.setattr(
         InProcessCadExecutor,
         "checkpoint_fcstd",
@@ -1725,8 +1734,8 @@ def test_validate_import_rejects_staging_swap_during_reload(
 
     monkeypatch.setattr(
         InProcessCadExecutor,
-        "load_fcstd",
-        lambda self, path: next(sessions),
+        "_load_fcstd",
+        lambda self, path, *, require_identities: next(sessions),
     )
     monkeypatch.setattr(
         InProcessCadExecutor,

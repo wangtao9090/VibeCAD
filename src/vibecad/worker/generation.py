@@ -180,7 +180,7 @@ def _private_child_directory(parent: Path, name: str) -> Path:
     child = parent / name
     child.mkdir(mode=0o700)
     child.chmod(0o700)
-    return child
+    return child.resolve(strict=True)
 
 
 def _remove_private_home(home: Path) -> bool:
