@@ -505,8 +505,22 @@ class _StagedImportLease:
                     path,
                     directory=False,
                 )
+                canonical_root = Path(self._root_capability.path)
+                canonical_directory = Path(self._directory_capability.path)
+                canonical_path = Path(self._path_capability.path)
             except (OSError, TypeError, ValueError):
                 _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            if (
+                canonical_directory.parent != canonical_root
+                or canonical_path.parent != canonical_directory
+            ):
+                _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            # The capability captures the exact long Win32 spelling returned by
+            # the opened HANDLE.  Keep that spelling as the lease authority: a
+            # hosted runner may supply a lexically different DOS alias even
+            # though it names the same pinned object.
+            self._directory = canonical_directory
+            self._path = canonical_path
 
     @property
     def path(self) -> Path:

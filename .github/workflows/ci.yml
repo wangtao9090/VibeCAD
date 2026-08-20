@@ -59,47 +59,7 @@ jobs:
       - name: exact packaged reviewed-attestation gate
         shell: pwsh
         run: |
-          $diagnostic = @'
-          import importlib.util
-          import sys
-          import traceback
-
-          import vibecad.execution.freecad_reviewed_verification_wave_d as wave_d
-
-          original = wave_d._execute_wave_d_case
-
-          def traced(freecad, case, challenge_sha256):
-              descriptor = wave_d._DESCRIPTOR_BY_CASE_SHA256.get(case.case_sha256)
-              label = case.case_id if descriptor is None else (
-                  f"{descriptor.family_id}/{descriptor.operation_id}/{descriptor.facet.value}"
-              )
-              try:
-                  return original(freecad, case, challenge_sha256)
-              except BaseException as exc:
-                  print(
-                      "TRUSTED_WAVE_D_FAILURE "
-                      f"case={label} type={type(exc).__module__}.{type(exc).__qualname__} "
-                      f"code={getattr(exc, 'code', None)!r} path={getattr(exc, 'path', None)!r} "
-                      f"detail={exc!r} documents={tuple(freecad.listDocuments())!r}",
-                      file=sys.stderr,
-                      flush=True,
-                  )
-                  traceback.print_exception(exc, file=sys.stderr)
-                  raise
-
-          wave_d._execute_wave_d_case = traced
-          name = "vibecad_pr_attestation_generator"
-          spec = importlib.util.spec_from_file_location(
-              name,
-              ".github/scripts/generate_freecad_reviewed_release_attestation.py",
-          )
-          module = importlib.util.module_from_spec(spec)
-          sys.modules[name] = module
-          spec.loader.exec_module(module)
-          sys.argv = [sys.argv[0], "--check"]
-          raise SystemExit(module.main())
-          '@
-          & $env:VIBECAD_MANAGED_FREECAD_PYTHON -I -c $diagnostic
+          & $env:VIBECAD_MANAGED_FREECAD_PYTHON -I .github\scripts\generate_freecad_reviewed_release_attestation.py --check
           if ($LASTEXITCODE -ne 0) { throw "reviewed-attestation gate failed" }
   runtime-integration:
     needs: lint-unit
