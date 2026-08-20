@@ -224,9 +224,7 @@ def test_windows_uninstall_marker_and_journal_bind_private_file_ids(monkeypatch,
     assert recovered.windows_capability == target.windows_capability
     payload = json.loads(uninstall.paths.removal_record().read_text(encoding="utf-8"))
     assert payload["schema"] == 2
-    assert payload["windows_capability"]["file_id"] == (
-        f"{target.windows_capability.file_id:032x}"
-    )
+    assert payload["windows_capability"]["file_id"] == (f"{target.windows_capability.file_id:032x}")
     assert record_capability.owner_sid == marker_identity.owner_sid
 
     uninstall._clear_removal_record()
@@ -958,7 +956,10 @@ def test_pending_uninstall_holds_home_lock_until_marker_is_cleared(monkeypatch, 
     try:
         assert uninstall.perform_pending_uninstall() is True
     finally:
-        repair.join(timeout=3)
+        # The repair itself has a five-second bounded maintenance-lock wait.
+        # Give a loaded CI runner enough time to finish that bounded path before
+        # asserting liveness; this does not relax the product timeout.
+        repair.join(timeout=7)
 
     assert not repair.is_alive()
     assert published.is_set()

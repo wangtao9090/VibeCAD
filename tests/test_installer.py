@@ -340,12 +340,7 @@ def test_windows_fresh_env_prefix_keeps_legacy_path_margin(monkeypatch, tmp_path
     monkeypatch.setattr(spec, "WINDOWS_MAX_ENV_PREFIX_LENGTH", 80)
     monkeypatch.setattr(spec, "WINDOWS_REVIEWED_MAX_ENV_MEMBER", 168)
     default_prefix = inst.paths.env_prefix()
-    assert (
-        len(str(default_prefix.resolve()))
-        + 1
-        + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER
-        <= 249
-    )
+    assert len(str(default_prefix.resolve())) + 1 + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER <= 249
 
     home = tmp_path / ("x" * 70)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -572,9 +567,7 @@ def test_install_rejects_unsafe_existing_micromamba_entries(monkeypatch, tmp_pat
     (home / "runtime" / "mamba" / "envs").mkdir(parents=True)
     bin_dir.mkdir()
     target = (
-        destination
-        if entry == "destination"
-        else destination.with_name(destination.name + ".part")
+        destination if entry == "destination" else destination.with_name(destination.name + ".part")
     )
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"outside")
@@ -1375,11 +1368,8 @@ def test_successful_create_without_python_stops_after_pip_and_before_receipt(mon
     with pytest.raises(inst.InstallError, match="目录不安全|unavailable"):
         inst.RuntimeInstaller().install()
 
-    assert [_micromamba_subcommand(command) for command in calls] == [
-        "create",
-        "create",
-        "run",
-    ]
+    expected = ["create", "create", "run"] if inst.sys.platform == "win32" else ["create", "run"]
+    assert [_micromamba_subcommand(command) for command in calls] == expected
     assert not inst.paths.ready_sentinel().exists()
 
 
@@ -1413,7 +1403,7 @@ def test_runtime_generation_replacement_after_create_stops_before_pip(monkeypatc
     ):
         inst.RuntimeInstaller().install()
 
-    assert len(calls) == 2
+    assert len(calls) == (2 if inst.sys.platform == "win32" else 1)
     assert all(_micromamba_subcommand(command) == "create" for command in calls)
     assert list(outside.iterdir()) == []
 

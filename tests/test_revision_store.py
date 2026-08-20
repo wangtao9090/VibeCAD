@@ -8862,6 +8862,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "re": {"fullmatch"},
         "secrets": {"token_hex"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "sys": {"platform"},
         "threading": {"RLock", "current_thread", "main_thread"},
         "time": {"sleep"},
         "vibecad.execution._resource_compat": {
@@ -8890,6 +8891,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "re": {"fullmatch"},
         "secrets": {"token_hex"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "sys": set(),
         "threading": {"RLock", "current_thread", "main_thread"},
         "time": {"sleep"},
         "vibecad.execution._resource_compat": {"getrlimit", "setrlimit"},

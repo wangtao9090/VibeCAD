@@ -1303,6 +1303,7 @@ def test_file_lock_wait_never_recreates_a_missing_parent(tmp_path):
 
 
 @pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows compatibility contract")
 def test_windows_compatibility_path_keeps_status_receipt_and_lock_working(
     monkeypatch,
     tmp_path,
@@ -1397,14 +1398,10 @@ def test_windows_maintenance_claim_handle_is_inherited_released_and_reacquired(
 
     with status.runtime_maintenance_lock(timeout=5.0, poll_interval=0.02) as claim:
         handle = claim.inheritable_claim_handle()
-        owner, owner_capability = claim._read_windows_owner(
-            claim._windows_claim_capability
-        )
+        owner, owner_capability = claim._read_windows_owner(claim._windows_claim_capability)
         assert owner_capability is not None
         assert owner is not None
-        assert owner["started_filetime"] == status._windows_process_created_filetime(
-            os.getpid()
-        )
+        assert owner["started_filetime"] == status._windows_process_created_filetime(os.getpid())
         capability = status.validate_windows_handle_path(
             handle,
             status.paths.maintenance_lock(),

@@ -424,7 +424,14 @@ def _require_capabilities() -> None:
     required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
     if any(type(getattr(os, name, None)) is not int for name in required):
         raise StorageFailure("required local storage capability is unavailable")
-    if os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
+    # ``os`` is the module-local Win32 adapter.  On POSIX its bound wrapper
+    # methods delegate to the native module, but bound methods are not members
+    # of CPython's native capability sets.  Query the native callables so the
+    # existing Darwin/Linux dir-fd contract remains discoverable.
+    if (
+        _native_os.open not in _native_os.supports_dir_fd
+        or _native_os.stat not in _native_os.supports_dir_fd
+    ):
         raise StorageFailure("required dir-fd capability is unavailable")
 
 

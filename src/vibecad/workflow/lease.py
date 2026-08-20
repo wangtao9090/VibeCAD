@@ -610,6 +610,10 @@ class ResourceLeaseManager:
     def __init__(self, lock_root, *, trust) -> None:
         if type(trust) is not LeaseRootTrust or trust is not LeaseRootTrust.TRUSTED_LOCAL:
             raise LeaseError(LeaseErrorCode.UNTRUSTED_ROOT)
+        if sys.platform != "win32" or os.name != "nt":
+            # Preserve the POSIX admission order: capability discovery must
+            # fail before parsing or opening anything below the supplied root.
+            _require_posix_capabilities(os)
         adapter = _new_platform_adapter()
         creator_pid = os.getpid()
         parts = _coerce_root(lock_root)
@@ -622,7 +626,6 @@ class ResourceLeaseManager:
                 raise LeaseError(LeaseErrorCode.UNSAFE_ROOT) from None
             root_identity = (root_capability.volume, root_capability.file_id)
         else:
-            _require_posix_capabilities(os)
             root_fd, root_stat = _open_root(parts)
             close_failed = False
             try:
@@ -889,10 +892,7 @@ def _require_current_lease(lease) -> None:
             issuer._adapter.platform_key == "windows"
             and type(entry_capability) is not WindowsPathCapability
         )
-        or (
-            issuer._adapter.platform_key != "windows"
-            and entry_capability is not None
-        )
+        or (issuer._adapter.platform_key != "windows" and entry_capability is not None)
     ):
         raise LeaseError(LeaseErrorCode.INVALID_LEASE)
     with _PROCESS_REGISTRY_LOCK:
@@ -921,8 +921,7 @@ def _require_current_lease(lease) -> None:
                 opened = os.fstat(fd)
                 if (
                     (int(opened.st_dev), int(opened.st_ino)) != entry_identity
-                    or entry_identity
-                    != (entry_capability.volume, entry_capability.file_id)
+                    or entry_identity != (entry_capability.volume, entry_capability.file_id)
                     or registry_key
                     != (
                         "windows",
