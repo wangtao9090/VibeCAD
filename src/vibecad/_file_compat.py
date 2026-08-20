@@ -32,6 +32,7 @@ if sys.platform == "win32":
     _TOKEN_USER = 1
     _TOKEN_OWNER = 4
     _ADMINISTRATORS_SID = "S-1-5-32-544"
+    _WIN_ACCOUNT_ADMINISTRATOR_SID = 38
     _SE_FILE_OBJECT = 1
     _OWNER_SECURITY_INFORMATION = 0x00000001
     _DACL_SECURITY_INFORMATION = 0x00000004
@@ -197,6 +198,12 @@ if sys.platform == "win32":
     _convert_sid = _advapi32.ConvertSidToStringSidW
     _convert_sid.argtypes = (wintypes.LPVOID, ctypes.POINTER(ctypes.c_wchar_p))
     _convert_sid.restype = wintypes.BOOL
+    _convert_string_sid = _advapi32.ConvertStringSidToSidW
+    _convert_string_sid.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID))
+    _convert_string_sid.restype = wintypes.BOOL
+    _is_well_known_sid = _advapi32.IsWellKnownSid
+    _is_well_known_sid.argtypes = (wintypes.LPVOID, wintypes.DWORD)
+    _is_well_known_sid.restype = wintypes.BOOL
     _get_named_security = _advapi32.GetNamedSecurityInfoW
     _get_named_security.argtypes = (
         wintypes.LPCWSTR,
@@ -607,6 +614,18 @@ def _trusted_windows_owner_sids() -> frozenset[str]:
     return frozenset((user,))
 
 
+def _sid_is_well_known(sid: str, sid_type: int) -> bool:
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "Windows SID is unavailable")
+    pointer = wintypes.LPVOID()  # type: ignore[name-defined]
+    if not _convert_string_sid(sid, ctypes.byref(pointer)):  # type: ignore[name-defined]
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[name-defined]
+    try:
+        return bool(_is_well_known_sid(pointer, sid_type))  # type: ignore[name-defined]
+    finally:
+        _local_free(pointer)  # type: ignore[name-defined]
+
+
 def _windows_security(path: Path) -> tuple[str, str]:
     owner = wintypes.LPVOID()  # type: ignore[name-defined]
     descriptor = wintypes.LPVOID()  # type: ignore[name-defined]
@@ -717,19 +736,17 @@ def _validate_windows_security(owner: str, sddl: str) -> None:
         raise OSError(errno.EACCES, "Windows capability DACL is not protected")
     # An allow ACE for any principal other than the current user, LocalSystem,
     # or Administrators would make replacement possible across trust domains.
+    allowed_trustees = {sid, "OW", "SY", "BA"}
+    if _sid_is_well_known(
+        sid,
+        _WIN_ACCOUNT_ADMINISTRATOR_SID,  # type: ignore[name-defined]
+    ):
+        # ConvertSecurityDescriptorToStringSecurityDescriptorW renders the
+        # built-in local Administrator account as the canonical ``LA`` alias.
+        allowed_trustees.add("LA")
     for ace in re.findall(r"\(([^()]*)\)", sddl):
         fields = ace.split(";")
-        if (
-            len(fields) == 6
-            and fields[0] in {"A", "OA"}
-            and fields[5]
-            not in {
-                sid,
-                "OW",
-                "SY",
-                "BA",
-            }
-        ):
+        if len(fields) == 6 and fields[0] in {"A", "OA"} and fields[5] not in allowed_trustees:
             raise OSError(errno.EACCES, "Windows capability DACL grants foreign access")
 
 

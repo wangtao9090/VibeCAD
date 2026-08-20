@@ -53,6 +53,17 @@ def test_only_the_tokens_administrators_default_owner_is_trusted(monkeypatch) ->
     )
     _file_compat._validate_windows_security(administrators, protected)
 
+    local_administrator_dacl = f"O:{administrators}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;LA)"
+    monkeypatch.setattr(_file_compat, "_sid_is_well_known", lambda sid, kind: True)
+    _file_compat._validate_windows_security(administrators, local_administrator_dacl)
+
+    monkeypatch.setattr(_file_compat, "_sid_is_well_known", lambda sid, kind: False)
+    with pytest.raises(OSError, match="grants foreign access"):
+        _file_compat._validate_windows_security(
+            administrators,
+            local_administrator_dacl,
+        )
+
     monkeypatch.setattr(
         _file_compat,
         "_current_default_owner_sid",
