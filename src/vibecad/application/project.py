@@ -120,18 +120,7 @@ def _borrow_root(
         owns_fd = False
     else:
         raise StorageFailure("bootstrap root binding is invalid")
-    if sys.platform == "win32":
-        try:
-            requested = capture_windows_path(root_path, directory=True)
-            root_matches = (
-                requested.volume,
-                requested.file_id,
-            ) == selected.identity
-        except (OSError, TypeError, ValueError):
-            root_matches = False
-    else:
-        root_matches = selected.path == root_path
-    if not root_matches:
+    if selected.path != root_path:
         if owns_fd:
             _close(selected_fd)
         raise StorageFailure("bootstrap root binding is invalid")
@@ -159,10 +148,14 @@ def _descriptor_root_path(root: SafeRoot, root_fd: int) -> Path:
             )
         except (OSError, TypeError, ValueError):
             raise StorageFailure("bootstrap root identity changed") from None
-        if named != capability or (
-            capability.volume,
-            capability.file_id,
-        ) != root.identity:
+        if (
+            named != capability
+            or (
+                capability.volume,
+                capability.file_id,
+            )
+            != root.identity
+        ):
             raise StorageFailure("bootstrap root identity changed")
         return root.path
     if os.name != "posix":
@@ -253,9 +246,7 @@ def _validate_import_from_pinned_root(port, root: SafeRoot, root_fd: int, name: 
         result = None
         try:
             root_capability = capture_windows_fd(root_fd, directory=True)
-            if (
-                (root_capability.volume, root_capability.file_id) != root.identity
-            ):
+            if (root_capability.volume, root_capability.file_id) != root.identity:
                 raise OSError
             stage = root.path / name
             before = capture_windows_path(stage, directory=False)

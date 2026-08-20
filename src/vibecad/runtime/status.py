@@ -1244,8 +1244,7 @@ def _ensure_maintenance_write_root() -> Path:
                     capability = ensure_private_directory(home)
                 except OSError:
                     capability = protect_windows_path(home, directory=True)
-                if validate_windows_path(capability, directory=True) != home:
-                    raise OSError("Windows VibeCAD home binding changed")
+                validate_windows_path(capability, directory=True)
             except (OSError, TypeError, ValueError):
                 raise ValueError("Windows VibeCAD home is unsafe") from None
             return home
@@ -2454,10 +2453,15 @@ class FileLock:
                 directory=False,
                 generation_token=capability.generation_token,
             )
+            live = capture_windows_path(
+                path,
+                directory=False,
+                generation_token=capability.generation_token,
+            )
             if (
                 _exact_identity(before) != _exact_identity(after)
                 or recaptured != capability
-                or validate_windows_path(capability, directory=False) != path
+                or live != capability
             ):
                 return None, None
             value = json.loads(raw)
@@ -2751,10 +2755,20 @@ class FileLock:
                 return False
             os.close(descriptor)
             descriptor = -1
-            if validate_windows_path(claim_capability, directory=False) != claim_path:
+            live_claim = capture_windows_path(
+                claim_path,
+                directory=False,
+                generation_token=claim_capability.generation_token,
+            )
+            if live_claim != claim_capability:
                 return False
 
-            if validate_windows_path(lock_capability, directory=True) != self.path:
+            live_lock = capture_windows_path(
+                self.path,
+                directory=True,
+                generation_token=lock_capability.generation_token,
+            )
+            if live_lock != lock_capability:
                 return False
             final_names = set(os.listdir(self.path))
             if not final_names.issubset({"owner.json", ".reclaim"}):
