@@ -22,7 +22,9 @@ from types import MappingProxyType
 import anyio
 import pytest
 
+from vibecad import _file_compat
 from vibecad.application.task_api import TaskServicePortErrorCode, TaskServicePortFailure
+from vibecad.daemon import windows_ipc
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
     FieldMetadata,
@@ -979,6 +981,16 @@ def test_revision_compare_and_artifact_manifest_schemas_are_closed_and_exact() -
         "revision_id",
         "draft_id",
     )
+    draft_scope = manifest_input["properties"]["draft_id"]["oneOf"]
+    assert draft_scope == (
+        {"type": "string", "pattern": r"^draft_[0-9a-f]{32}$"},
+        {"type": "string", "const": "committed"},
+        {"type": "null"},
+    )
+    assert (
+        specs["export_task_artifacts"].input_schema["properties"]["draft_id"]["oneOf"]
+        == draft_scope
+    )
     manifest_result = specs["get_artifact_manifest"].output_schema["properties"]["result"]["anyOf"][
         0
     ]
@@ -1464,7 +1476,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 31_504
+    assert len(frame) == 31_580
     assert len(frame) <= 32_768
 
 
@@ -1721,8 +1733,14 @@ def test_owned_stdio_initialization_failure_precedes_worker_and_input_start(monk
 
 
 def test_real_owned_worker_can_lazy_open_daemon_client_after_process_initialization() -> None:
-    home = Path(tempfile.mkdtemp(prefix="vc-c13-owned-", dir="/private/tmp"))
-    home.chmod(0o700)
+    # macOS spells its temporary directory through the /var -> /private/var
+    # system alias. The production root correctly rejects alias ancestors, so
+    # exercise the same physical directory through its canonical spelling.
+    home = Path(tempfile.mkdtemp(prefix="vc-c13-owned-")).resolve(strict=True)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(home)
+    else:
+        home.chmod(0o700)
     data_root = home / "data"
     script = """
 from vibecad import server
@@ -1811,7 +1829,10 @@ server.main()
         receipt = json.loads((data_root / "daemon" / "receipt.json").read_text())
         daemon_pid = receipt["pid"]
         assert type(daemon_pid) is int and daemon_pid > 1
-        os.kill(daemon_pid, 0)
+        if sys.platform == "win32":
+            assert windows_ipc.process_start_ns(daemon_pid) > 0
+        else:
+            os.kill(daemon_pid, 0)
     finally:
         if process is not None and process.poll() is None:
             process.kill()
@@ -1822,14 +1843,20 @@ server.main()
             if type(daemon_pid) is int and daemon_pid > 1:
                 try:
                     os.kill(daemon_pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (OSError, ProcessLookupError):
                     pass
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    try:
-                        os.kill(daemon_pid, 0)
-                    except ProcessLookupError:
-                        break
+                    if sys.platform == "win32":
+                        try:
+                            windows_ipc.process_start_ns(daemon_pid)
+                        except OSError:
+                            break
+                    else:
+                        try:
+                            os.kill(daemon_pid, 0)
+                        except ProcessLookupError:
+                            break
                     time.sleep(0.01)
         shutil.rmtree(home, ignore_errors=True)
 

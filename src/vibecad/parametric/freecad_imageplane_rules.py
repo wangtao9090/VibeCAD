@@ -20,8 +20,10 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
 import struct
+import sys
 import tempfile
 import zlib
 from dataclasses import dataclass, field
@@ -30,6 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Self
 
+from vibecad import _file_compat
 from vibecad.engine.document_assets import (
     DocumentAssetWorkspace,
     DocumentAssetWorkspaceError,
@@ -631,6 +634,12 @@ def _private_root_identity(path: object) -> tuple[Path, int, int]:
         info = path.lstat()
     except (OSError, ValueError, RuntimeError):
         _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/stager/root")
+    if sys.platform == "win32":
+        try:
+            capability = _file_compat.capture_windows_path(path, directory=True)
+        except (OSError, TypeError, ValueError):
+            _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/stager/root")
+        return path, capability.volume, capability.file_id
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISDIR(info.st_mode)
@@ -642,12 +651,38 @@ def _private_root_identity(path: object) -> tuple[Path, int, int]:
 
 
 class _StagedImageLease:
-    __slots__ = ("_active", "_directory", "_path")
+    __slots__ = (
+        "_active",
+        "_directory",
+        "_directory_capability",
+        "_path",
+        "_path_capability",
+        "_root_capability",
+    )
 
     def __init__(self, directory: Path, path: Path) -> None:
         self._active = True
         self._directory = directory
         self._path = path
+        self._root_capability = None
+        self._directory_capability = None
+        self._path_capability = None
+        if sys.platform == "win32":
+            try:
+                self._root_capability = _file_compat.capture_windows_path(
+                    directory.parent,
+                    directory=True,
+                )
+                self._directory_capability = _file_compat.capture_windows_path(
+                    directory,
+                    directory=True,
+                )
+                self._path_capability = _file_compat.capture_windows_path(
+                    path,
+                    directory=False,
+                )
+            except (OSError, TypeError, ValueError):
+                _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
 
     @property
     def path(self) -> Path:
@@ -658,6 +693,30 @@ class _StagedImageLease:
     def verify(self) -> None:
         if not self._active:
             _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
+        if sys.platform == "win32":
+            try:
+                root = _file_compat.validate_windows_path(
+                    self._root_capability,
+                    directory=True,
+                )
+                directory = _file_compat.validate_windows_path(
+                    self._directory_capability,
+                    directory=True,
+                )
+                path = _file_compat.validate_windows_path(
+                    self._path_capability,
+                    directory=False,
+                )
+            except (OSError, TypeError, ValueError):
+                _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            if (
+                directory.parent != root
+                or path.parent != directory
+                or path != self._path
+                or directory != self._directory
+            ):
+                _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            return
         try:
             directory_info = self._directory.lstat()
             info = self._path.lstat()
@@ -682,8 +741,20 @@ class _StagedImageLease:
             return
         self.verify()
         try:
-            self._path.unlink()
-            self._directory.rmdir()
+            if sys.platform == "win32":
+                _file_compat.delete_windows_file(
+                    self._path,
+                    parent=self._directory_capability,
+                    expected=self._path_capability,
+                )
+                _file_compat.delete_windows_directory(
+                    self._directory,
+                    parent=self._root_capability,
+                    expected=self._directory_capability,
+                )
+            else:
+                self._path.unlink()
+                self._directory.rmdir()
         except OSError:
             _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/cleanup")
         self._active = False
@@ -738,14 +809,45 @@ class HostOwnedImageStager:
         directory: Path | None = None
         staged: Path | None = None
         descriptor: int | None = None
+        root_capability: _file_compat.WindowsPathCapability | None = None
+        directory_capability: _file_compat.WindowsPathCapability | None = None
+        staged_capability: _file_compat.WindowsPathCapability | None = None
         transferred = False
         try:
-            directory = Path(tempfile.mkdtemp(prefix=".vibecad-image-stage-", dir=root))
-            os.chmod(directory, 0o700)
+            if sys.platform == "win32":
+                root_capability = _file_compat.capture_windows_path(
+                    root,
+                    directory=True,
+                )
+                for _attempt in range(32):
+                    directory = root / (".vibecad-image-stage-" + secrets.token_hex(16))
+                    try:
+                        directory_capability = _file_compat.ensure_private_directory(
+                            directory,
+                            expected_parent=root_capability,
+                            exclusive=True,
+                        )
+                    except FileExistsError:
+                        continue
+                    break
+                if directory_capability is None:
+                    raise OSError("private staging namespace exhausted")
+            else:
+                directory = Path(tempfile.mkdtemp(prefix=".vibecad-image-stage-", dir=root))
+                os.chmod(directory, 0o700)
             staged = directory / f"source{suffix}"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(staged, flags, 0o600)
+            if sys.platform == "win32":
+                descriptor, staged_capability = _file_compat.open_private_file(
+                    staged,
+                    create=True,
+                    read_write=True,
+                    exclusive=True,
+                    expected_parent=directory_capability,
+                )
+            else:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(staged, flags, 0o600)
             offset = 0
             while offset < len(payload):
                 written = os.write(descriptor, payload[offset:])
@@ -771,12 +873,34 @@ class HostOwnedImageStager:
                     pass
             if not transferred and staged is not None:
                 try:
-                    staged.unlink(missing_ok=True)
+                    if (
+                        sys.platform == "win32"
+                        and staged_capability is not None
+                        and directory_capability is not None
+                    ):
+                        _file_compat.delete_windows_file(
+                            staged,
+                            parent=directory_capability,
+                            expected=staged_capability,
+                        )
+                    else:
+                        staged.unlink(missing_ok=True)
                 except OSError:
                     pass
             if not transferred and directory is not None:
                 try:
-                    directory.rmdir()
+                    if (
+                        sys.platform == "win32"
+                        and directory_capability is not None
+                        and root_capability is not None
+                    ):
+                        _file_compat.delete_windows_directory(
+                            directory,
+                            parent=root_capability,
+                            expected=directory_capability,
+                        )
+                    else:
+                        directory.rmdir()
                 except OSError:
                     pass
 
@@ -964,27 +1088,59 @@ def _read_regular_digest(
     minimum: int = 1,
 ) -> tuple[int, str]:
     descriptor = -1
+    parent_capability: _file_compat.WindowsPathCapability | None = None
+    file_capability: _file_compat.WindowsPathCapability | None = None
     try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+        if sys.platform == "win32":
+            parent_capability = _file_compat.capture_windows_path(
+                path.parent,
+                directory=True,
+            )
+            descriptor, file_capability = _file_compat.open_private_file(
+                path,
+                create=False,
+                read_write=False,
+                share_delete=True,
+                expected_parent=parent_capability,
+            )
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.geteuid()
             or before.st_nlink != 1
-            or before.st_mode & 0o077
             or not minimum <= before.st_size <= maximum
+            or (
+                sys.platform != "win32"
+                and (before.st_uid != os.geteuid() or before.st_mode & 0o077)
+            )
         ):
             _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
         remaining = before.st_size
+        offset = 0
         digest = hashlib.sha256()
         while remaining:
-            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            chunk = (
+                _file_compat.pread(
+                    descriptor,
+                    min(remaining, 1024 * 1024),
+                    offset,
+                )
+                if sys.platform == "win32"
+                else os.read(descriptor, min(remaining, 1024 * 1024))
+            )
             if not chunk:
                 _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
             digest.update(chunk)
             remaining -= len(chunk)
-        if os.read(descriptor, 1):
+            offset += len(chunk)
+        trailing = (
+            _file_compat.pread(descriptor, 1, offset)
+            if sys.platform == "win32"
+            else os.read(descriptor, 1)
+        )
+        if trailing:
             _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
         after = os.fstat(descriptor)
         live = path.lstat()
@@ -997,6 +1153,23 @@ def _read_regular_digest(
         )
         if identity(before) != identity(after) or identity(after) != identity(live):
             _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
+        if sys.platform == "win32":
+            validated = _file_compat.validate_windows_path(
+                file_capability,
+                directory=False,
+            )
+            _file_compat.validate_windows_path(
+                parent_capability,
+                directory=True,
+            )
+            if validated != path or (
+                int(live.st_dev),
+                int(live.st_ino),
+            ) != (
+                file_capability.volume,
+                file_capability.file_id,
+            ):
+                _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
         return before.st_size, digest.hexdigest()
     except ImagePlaneRuleError:
         raise
@@ -1029,6 +1202,40 @@ def _retained_signature(
     return size, digest
 
 
+def _protect_new_windows_retained_file(
+    feature: object,
+    workspace: Path,
+    *,
+    alias: str,
+) -> None:
+    """Promote FreeCAD's new inherited ACL to an exact private capability."""
+
+    if sys.platform != "win32":
+        return
+    try:
+        path = Path(str(feature.ImageFile))
+        info = path.lstat()
+        if (
+            path.parent != workspace
+            or path.name != alias
+            or stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+        ):
+            raise OSError
+        workspace_capability = _file_compat.capture_windows_path(
+            workspace,
+            directory=True,
+        )
+        retained = _file_compat.protect_windows_path(path, directory=False)
+        retained = _file_compat.clear_windows_readonly(path, expected=retained)
+        _file_compat.validate_windows_path(workspace_capability, directory=True)
+        if retained.volume != workspace_capability.volume:
+            raise OSError
+    except (OSError, TypeError, ValueError, RuntimeError):
+        _fail(ImagePlaneRuleErrorCode.CONFORMANCE_FAILED, "/result/image_file")
+
+
 def _workspace_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
     result: list[tuple[str, str, int, str]] = []
     total_bytes = 0
@@ -1037,9 +1244,15 @@ def _workspace_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
         nonlocal total_bytes
         if depth > _MAX_WORKSPACE_DEPTH:
             _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/workspace")
+        directory_capability = None
         try:
+            if sys.platform == "win32":
+                directory_capability = _file_compat.capture_windows_path(
+                    directory,
+                    directory=True,
+                )
             entries = tuple(sorted(os.scandir(directory), key=lambda item: item.name))
-        except OSError:
+        except (OSError, TypeError, ValueError):
             _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/workspace")
         for entry in entries:
             if len(result) >= _MAX_WORKSPACE_ENTRIES:
@@ -1053,6 +1266,14 @@ def _workspace_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
             if stat.S_ISLNK(info.st_mode):
                 _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/workspace")
             if stat.S_ISDIR(info.st_mode):
+                if sys.platform == "win32":
+                    try:
+                        _file_compat.capture_windows_path(path, directory=True)
+                    except (OSError, TypeError, ValueError):
+                        _fail(
+                            ImagePlaneRuleErrorCode.PRECONDITION_FAILED,
+                            "/document/workspace",
+                        )
                 result.append((relative, "directory", 0, ""))
                 visit(path, depth + 1)
             elif stat.S_ISREG(info.st_mode):
@@ -1069,6 +1290,14 @@ def _workspace_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
                     )
                 result.append((relative, "file", size, digest))
             else:
+                _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/workspace")
+        if sys.platform == "win32":
+            try:
+                _file_compat.validate_windows_path(
+                    directory_capability,
+                    directory=True,
+                )
+            except (OSError, TypeError, ValueError):
                 _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/workspace")
 
     visit(root, 0)
@@ -1265,6 +1494,30 @@ def apply_imageplane_plan(
             _fail(ImagePlaneRuleErrorCode.PRECONDITION_FAILED, "/document/binding")
         if existing is not None:
             _validate_bound_feature(existing, plan)
+            if sys.platform == "win32":
+                retained_path = Path(str(existing.ImageFile))
+                if (
+                    retained_path.suffix != spec.suffix
+                    or _SHA256.fullmatch(retained_path.stem) is None
+                ):
+                    _fail(
+                        ImagePlaneRuleErrorCode.CONFORMANCE_FAILED,
+                        "/result/image_file",
+                    )
+                _protect_new_windows_retained_file(
+                    existing,
+                    workspace,
+                    alias=retained_path.name,
+                )
+                _size, retained_digest = _read_regular_digest(
+                    retained_path,
+                    maximum=MAX_IMAGEPLANE_ARTIFACT_BYTES,
+                )
+                if not hmac.compare_digest(retained_digest, retained_path.stem):
+                    _fail(
+                        ImagePlaneRuleErrorCode.CONFORMANCE_FAILED,
+                        "/result/image_file",
+                    )
         before_objects = tuple(document.Objects)
         before_workspace = _workspace_manifest(workspace)
         before_existing = (
@@ -1352,6 +1605,11 @@ def apply_imageplane_plan(
             if not hmac.compare_digest(current_digest or "", plan.artifact_content_sha256):
                 lease.verify()
                 feature.ImageFile = (str(lease.path), alias)
+                _protect_new_windows_retained_file(
+                    feature,
+                    workspace,
+                    alias=alias,
+                )
             feature.XSize = config["x_size_mm"]
             feature.YSize = config["y_size_mm"]
             placement = config["placement"]

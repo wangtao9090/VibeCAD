@@ -17,6 +17,12 @@ import pytest
 import vibecad.application.agent as agent_module
 import vibecad.application.data as data_module
 import vibecad.execution.revisions as revisions_module
+from vibecad._file_compat import (
+    capture_windows_path,
+    set_private_dacl,
+    validate_windows_path,
+    windows_extended_path,
+)
 from vibecad.application.agent import AgentApplication
 from vibecad.application.artifacts import (
     ArtifactDependencyError,
@@ -98,11 +104,13 @@ def _tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix().encode()
-        value = path.lstat()
+        native_path = windows_extended_path(path) if sys.platform == "win32" else path
+        value = os.lstat(native_path)
         digest.update(relative)
         digest.update(str(value.st_mode).encode())
-        if path.is_file() and not path.is_symlink():
-            digest.update(path.read_bytes())
+        if stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+            with open(native_path, "rb") as source:
+                digest.update(source.read())
     return digest.hexdigest()
 
 
@@ -326,13 +334,19 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
     ):
         value = path.lstat()
         assert stat.S_ISDIR(value.st_mode)
-        assert stat.S_IMODE(value.st_mode) == 0o700
-        assert value.st_uid == os.geteuid()
+        if os.name == "nt":
+            capability = capture_windows_path(path, directory=True)
+            assert validate_windows_path(capability, directory=True) == path
+        else:
+            assert stat.S_IMODE(value.st_mode) == 0o700
+            assert value.st_uid == os.geteuid()
 
 
 def test_data_layout_adds_visual_roots_without_replacing_legacy_siblings(tmp_path: Path):
     data = _data_root(tmp_path)
     data.mkdir(mode=0o700)
+    if os.name == "nt":
+        set_private_dacl(data)
     legacy_names = (
         "locks",
         "tasks",
@@ -344,6 +358,8 @@ def test_data_layout_adds_visual_roots_without_replacing_legacy_siblings(tmp_pat
     )
     for name in legacy_names:
         (data / name).mkdir(mode=0o700)
+        if os.name == "nt":
+            set_private_dacl(data / name)
     before = {name: (data / name).stat().st_ino for name in legacy_names}
 
     layout = ApplicationDataLayout.open(data)
@@ -426,18 +442,28 @@ def test_data_layout_fails_closed_if_root_is_swapped_before_child_creation(
     data = _data_root(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o700)
-    original = data_module._create_private
+    original = (
+        data_module.ensure_private_directory if os.name == "nt" else data_module._create_private
+    )
     swapped = False
 
-    def swap_after_root(path: Path) -> None:
+    def swap_after_root(path: Path, *, expected_parent=None):
         nonlocal swapped
-        original(path)
+        if os.name == "nt":
+            result = original(path, expected_parent=expected_parent)
+        else:
+            result = original(path)
         if path == data and not swapped:
             swapped = True
             data.rename(data.with_name("detached-data"))
             data.symlink_to(outside, target_is_directory=True)
+        return result
 
-    monkeypatch.setattr(data_module, "_create_private", swap_after_root)
+    monkeypatch.setattr(
+        data_module,
+        "ensure_private_directory" if os.name == "nt" else "_create_private",
+        swap_after_root,
+    )
     with pytest.raises(ApplicationDataError) as caught:
         ApplicationDataLayout.open(data)
     assert caught.value.code is ApplicationDataErrorCode.UNSAFE_ROOT
@@ -1491,7 +1517,10 @@ def test_descriptor_project_request_preserves_public_envelope_without_a_path(
         "kind": "import_fcstd",
     }
     locator = bind_v2_import_locator(request, source.stat())
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = os.open(
+        source,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
     try:
         result = app.import_project_descriptor_request(
             request,

@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 import pickle
+import sys
 from pathlib import Path
 
 import pytest
 
+from vibecad import _file_compat
 from vibecad.execution.freecad_reviewed_artifact_host import (
     REVIEWED_ARTIFACT_MANIFEST_NAME,
     REVIEWED_ARTIFACT_SNAPSHOT_KIND,
@@ -72,6 +74,10 @@ def _snapshot_directory(tmp_path: Path, snapshot: ReviewedArtifactCatalogSnapsho
     payload = root / snapshot.records[0].artifact_id
     payload.write_bytes(_PAYLOAD)
     payload.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(root)
+        _file_compat.set_private_dacl(manifest)
+        _file_compat.set_private_dacl(payload)
     return root
 
 
@@ -88,11 +94,17 @@ def _open_directory(root: Path) -> int:
 def test_snapshot_lease_validates_exact_directory_and_duplicates_capability(tmp_path: Path) -> None:
     snapshot = _snapshot()
     root = _snapshot_directory(tmp_path, snapshot)
-    source_fd = _open_directory(root)
-    try:
-        lease = TaskInputSnapshotLease(snapshot=snapshot, directory_fd=source_fd)
-    finally:
-        os.close(source_fd)
+    if sys.platform == "win32":
+        lease = TaskInputSnapshotLease(
+            snapshot=snapshot,
+            directory_capability=_file_compat.capture_windows_path(root, directory=True),
+        )
+    else:
+        source_fd = _open_directory(root)
+        try:
+            lease = TaskInputSnapshotLease(snapshot=snapshot, directory_fd=source_fd)
+        finally:
+            os.close(source_fd)
 
     expected = {
         "base_revision": _BASE_REVISION,
@@ -104,13 +116,19 @@ def test_snapshot_lease_validates_exact_directory_and_duplicates_capability(tmp_
         "task_id": _TASK_ID,
     }
     assert lease.descriptor_mapping() == expected
-    duplicate = lease.duplicate_directory_fd()
-    assert os.get_inheritable(duplicate) is False
-    assert (os.fstat(duplicate).st_dev, os.fstat(duplicate).st_ino) == (
-        os.stat(root).st_dev,
-        os.stat(root).st_ino,
-    )
-    os.close(duplicate)
+    if sys.platform == "win32":
+        capability = _file_compat.WindowsPathCapability.from_mapping(
+            lease.windows_capability_mapping()
+        )
+        assert _file_compat.validate_windows_path(capability, directory=True) == root
+    else:
+        duplicate = lease.duplicate_directory_fd()
+        assert os.get_inheritable(duplicate) is False
+        assert (os.fstat(duplicate).st_dev, os.fstat(duplicate).st_ino) == (
+            os.stat(root).st_dev,
+            os.stat(root).st_ino,
+        )
+        os.close(duplicate)
 
     with pytest.raises(TypeError):
         copy.copy(lease)
@@ -143,13 +161,23 @@ def test_snapshot_lease_rejects_nonexact_or_tampered_directory(
     elif tamper == "payload":
         payload.write_bytes(b"wrong-cad-input!")
     elif tamper == "mode":
-        payload.chmod(0o640)
+        if sys.platform == "win32":
+            os.link(payload, tmp_path / "second-link")
+        else:
+            payload.chmod(0o640)
     else:
         (root / REVIEWED_ARTIFACT_MANIFEST_NAME).write_bytes(b"{}")
-    descriptor = _open_directory(root)
-    try:
+    if sys.platform == "win32":
         with pytest.raises(TaskInputSnapshotError) as caught:
-            TaskInputSnapshotLease(snapshot=snapshot, directory_fd=descriptor)
-    finally:
-        os.close(descriptor)
+            TaskInputSnapshotLease(
+                snapshot=snapshot,
+                directory_capability=_file_compat.capture_windows_path(root, directory=True),
+            )
+    else:
+        descriptor = _open_directory(root)
+        try:
+            with pytest.raises(TaskInputSnapshotError) as caught:
+                TaskInputSnapshotLease(snapshot=snapshot, directory_fd=descriptor)
+        finally:
+            os.close(descriptor)
     assert caught.value.code is TaskInputSnapshotErrorCode.INTEGRITY_FAILURE

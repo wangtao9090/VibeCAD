@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+import os as _native_os
 import re
 import secrets
 import stat
@@ -11,6 +11,19 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from vibecad._file_compat import (
+    WindowsExternalFileCapability,
+    capture_windows_external_fd,
+    capture_windows_fd,
+    capture_windows_path,
+    delete_windows_file,
+    open_private_file,
+    open_windows_external_file,
+    set_private_dacl,
+    validate_windows_external_file,
+    validate_windows_path,
+    windows_extended_path,
+)
 from vibecad.execution.revisions import (
     ProjectHead,
     RevisionRef,
@@ -18,6 +31,9 @@ from vibecad.execution.revisions import (
     _candidate_file_limit,
 )
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
+
+os = _storage_os if sys.platform == "win32" else _native_os
 
 __all__ = ("ProjectBootstrapResult",)
 
@@ -27,6 +43,7 @@ _CLEANUP_RECORD_BYTES = 16_384
 _PROJECT_ID = re.compile(r"project_[0-9a-f]{32}\Z")
 _STAGE_NAME = re.compile(r"\.import\.[0-9a-f]{32}\.FCStd\Z")
 _CLEANUP_NAME = re.compile(r"cleanup_[0-9a-f]{32}\.json\Z")
+_GUARD_NAME = re.compile(r"\.bootstrap-guard\.[0-9a-f]{32}\Z")
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -38,7 +55,7 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_uid,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        value.st_birthtime_ns if sys.platform == "win32" else value.st_ctime_ns,
     )
 
 
@@ -60,6 +77,14 @@ def _close(fd: int) -> bool:
 
 
 def _require_pinned_root(root: SafeRoot, root_fd: int) -> None:
+    if sys.platform == "win32":
+        try:
+            capability = capture_windows_fd(root_fd, directory=True)
+        except (OSError, TypeError, ValueError):
+            raise StorageFailure("bootstrap root is unsafe") from None
+        if (capability.volume, capability.file_id) != root.identity:
+            raise StorageFailure("bootstrap root is unsafe")
+        return
     try:
         value = os.fstat(root_fd)
     except OSError:
@@ -112,6 +137,19 @@ def _descriptor_root_path(root: SafeRoot, root_fd: int) -> Path:
     """Resolve the current path of a pinned directory descriptor and verify identity."""
 
     _require_pinned_root(root, root_fd)
+    if sys.platform == "win32":
+        try:
+            capability = capture_windows_fd(root_fd, directory=True)
+            validate_windows_path(capability, directory=True)
+        except (OSError, TypeError, ValueError):
+            raise StorageFailure("bootstrap root identity changed") from None
+        current = Path(capability.path)
+        if current != root.path or (
+            capability.volume,
+            capability.file_id,
+        ) != root.identity:
+            raise StorageFailure("bootstrap root identity changed")
+        return current
     if os.name != "posix":
         raise StorageFailure("stable descriptor paths are unavailable")
     try:
@@ -190,6 +228,104 @@ def _darwin_thread_fchdir(fd: int) -> None:
 def _validate_import_from_pinned_root(port, root: SafeRoot, root_fd: int, name: str):
     """Run a path-writing CAD import relative to a descriptor-pinned working directory."""
 
+    if sys.platform == "win32":
+        if type(name) is not str or _STAGE_NAME.fullmatch(name) is None:
+            raise StorageFailure("capability-bound CAD import is unavailable")
+        guard_fd = -1
+        guard_path: Path | None = None
+        guard_capability = None
+        primary: BaseException | None = None
+        result = None
+        try:
+            root_capability = capture_windows_fd(root_fd, directory=True)
+            if (
+                (root_capability.volume, root_capability.file_id) != root.identity
+                or Path(root_capability.path) != root.path
+            ):
+                raise OSError
+            stage = root.path / name
+            before = capture_windows_path(stage, directory=False)
+            if before.volume != root_capability.volume:
+                raise OSError
+            guard_path = root.path / f".bootstrap-guard.{secrets.token_hex(16)}"
+            guard_fd, guard_capability = open_private_file(
+                guard_path,
+                create=True,
+                read_write=False,
+                exclusive=True,
+                expected_parent=root_capability,
+            )
+            if guard_capability.volume != root_capability.volume:
+                raise OSError
+        except (OSError, TypeError, ValueError):
+            if guard_fd >= 0:
+                _native_os.close(guard_fd)
+            raise StorageFailure("bootstrap import path is unsafe") from None
+        try:
+            result = port.validate_import(Path(windows_extended_path(stage)))
+        except BaseException as error:
+            primary = error
+        try:
+            current_root = capture_windows_fd(
+                root_fd,
+                directory=True,
+                generation_token=root_capability.generation_token,
+            )
+            current_guard = capture_windows_fd(
+                guard_fd,
+                directory=False,
+                generation_token=guard_capability.generation_token,
+            )
+            if current_root != root_capability or current_guard != guard_capability:
+                raise OSError
+            if primary is None:
+                output_fd = -1
+                try:
+                    output_fd, output = open_windows_external_file(stage)
+                    if output.volume != root_capability.volume:
+                        raise OSError
+                    set_private_dacl(stage)
+                    current_output = capture_windows_external_fd(
+                        output_fd,
+                        generation_token=output.generation_token,
+                    )
+                    validate_windows_external_file(output)
+                    after = capture_windows_path(stage, directory=False)
+                    if current_output != output or (
+                        after.volume,
+                        after.file_id,
+                    ) != (output.volume, output.file_id):
+                        raise OSError
+                finally:
+                    if output_fd >= 0:
+                        _native_os.close(output_fd)
+        except (OSError, TypeError, ValueError):
+            if primary is None:
+                primary = StorageFailure("CAD import changed its protected root")
+        guard_cleanup_failed = False
+        try:
+            _native_os.close(guard_fd)
+            guard_fd = -1
+            delete_windows_file(
+                guard_path,
+                parent=root_capability,
+                expected=guard_capability,
+            )
+        except (OSError, TypeError, ValueError):
+            guard_cleanup_failed = True
+        finally:
+            if guard_fd >= 0:
+                try:
+                    _native_os.close(guard_fd)
+                except OSError:
+                    guard_cleanup_failed = True
+        if guard_cleanup_failed and primary is None:
+            primary = StorageFailure("bootstrap guard cleanup failed")
+        if primary is not None:
+            if isinstance(primary, OSError) and type(primary) is not StorageFailure:
+                raise _corrupt_content() from primary
+            raise primary.with_traceback(primary.__traceback__)
+        return result
     if sys.platform != "darwin" or type(name) is not str or _STAGE_NAME.fullmatch(name) is None:
         raise StorageFailure("descriptor-relative CAD import is unavailable")
     flags = (
@@ -300,8 +436,12 @@ def _copy_to_private_staging(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
+    source_capability: WindowsExternalFileCapability | None = None
     try:
-        source_fd = os.open(source_path, flags)
+        if sys.platform == "win32":
+            source_fd, source_capability = open_windows_external_file(source_path)
+        else:
+            source_fd = os.open(source_path, flags)
     except OSError:
         if owns_fd:
             _close(selected_fd)
@@ -311,9 +451,18 @@ def _copy_to_private_staging(
     stage_fd = None
     failed = False
     try:
-        opened = os.fstat(source_fd)
+        opened = _native_os.fstat(source_fd)
         if not _ordinary_single_file(opened) or _stat_identity(opened) != _stat_identity(before):
             raise ValueError("invalid project bootstrap source")
+        if sys.platform == "win32":
+            if type(source_capability) is not WindowsExternalFileCapability:
+                raise ValueError("invalid project bootstrap source")
+            current_source = capture_windows_external_fd(
+                source_fd,
+                generation_token=source_capability.generation_token,
+            )
+            if current_source != source_capability:
+                raise ValueError("invalid project bootstrap source")
         stage_fd = os.open(
             stage_name,
             os.O_WRONLY
@@ -336,8 +485,16 @@ def _copy_to_private_staging(
                     raise OSError
                 view = view[written:]
             remaining -= len(chunk)
-        if _stat_identity(os.fstat(source_fd)) != _stat_identity(opened):
+        if _stat_identity(_native_os.fstat(source_fd)) != _stat_identity(opened):
             raise ValueError("invalid project bootstrap source")
+        if source_capability is not None:
+            current_source = capture_windows_external_fd(
+                source_fd,
+                generation_token=source_capability.generation_token,
+            )
+            validate_windows_external_file(source_capability)
+            if current_source != source_capability:
+                raise ValueError("invalid project bootstrap source")
         os.fsync(stage_fd)
         staged = os.fstat(stage_fd)
         if (
@@ -501,6 +658,13 @@ def recover_bootstrap_cleanup(root: Path) -> None:
         except OSError:
             return
         for record_name in names:
+            if sys.platform == "win32" and _GUARD_NAME.fullmatch(record_name) is not None:
+                try:
+                    os.unlink(record_name, dir_fd=root_fd)
+                    os.fsync(root_fd)
+                except OSError:
+                    pass
+                continue
             if _CLEANUP_NAME.fullmatch(record_name) is None:
                 continue
             try:
@@ -668,14 +832,22 @@ def bootstrap_import_project(
                 raise _corrupt_content() from None
             if type(evidence) is not ValidatedImportEvidence:
                 raise TypeError("CAD import validation returned invalid evidence")
-            if not (
-                evidence.sha256 == after_sha256
-                and evidence.size_bytes == after_size
-                and stat.S_ISREG(after_info.st_mode)
+            safe_windows_result = sys.platform == "win32" and (
+                stat.S_ISREG(after_info.st_mode)
+                and after_info.st_nlink == 1
+                and after_info.st_dev == safe_root.identity[0]
+            )
+            safe_posix_result = sys.platform != "win32" and (
+                stat.S_ISREG(after_info.st_mode)
                 and stat.S_IMODE(after_info.st_mode) == 0o600
                 and after_info.st_uid == safe_root.uid
                 and after_info.st_nlink == 1
                 and after_info.st_dev == safe_root.identity[0]
+            )
+            if not (
+                evidence.sha256 == after_sha256
+                and evidence.size_bytes == after_size
+                and (safe_windows_result or safe_posix_result)
             ):
                 raise _corrupt_content()
             lease = lease_manager.acquire_project_write(project_id)
@@ -693,7 +865,11 @@ def bootstrap_import_project(
                             nlink=after_info.st_nlink,
                             size=after_info.st_size,
                             mtime_ns=after_info.st_mtime_ns,
-                            ctime_ns=after_info.st_ctime_ns,
+                            ctime_ns=(
+                                after_info.st_birthtime_ns
+                                if sys.platform == "win32"
+                                else after_info.st_ctime_ns
+                            ),
                         ),
                         expected_sha256=evidence.sha256,
                         expected_size=evidence.size_bytes,

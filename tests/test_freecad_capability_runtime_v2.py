@@ -824,7 +824,7 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     assert "FreeCADGui" not in sys.modules
     assert runtime.binding.native_type_count == 449
     assert len(runtime.projection.manifest.entries) == 449
-    assert len(runtime.projection.manifest.formal_bindings) == 135
+    assert len(runtime.projection.manifest.formal_bindings) == 137
     assert len(runtime.binding.promotion_pack_sha256) == 18
     assert len(part_ids) == len(set(part_ids)) == 141
     assert part_ids == sorted(part_ids)

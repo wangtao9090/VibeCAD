@@ -180,13 +180,9 @@ def _proof_term(term_ref_id: str, term_id: str) -> BridgeTermRef:
 
 
 RULE = _proof_term("rule_part_datum_target", "rule.part-datum-target-reviewed")
-PREDICATE = _proof_term(
-    "predicate_part_datum_target", "predicate.part-datum-target-reviewed"
-)
+PREDICATE = _proof_term("predicate_part_datum_target", "predicate.part-datum-target-reviewed")
 ROLE_PREMISE = _proof_term("role_part_datum_candidate", "proof-role.datum-candidate")
-ROLE_CONCLUSION = _proof_term(
-    "role_part_datum_validated", "proof-role.datum-validated"
-)
+ROLE_CONCLUSION = _proof_term("role_part_datum_validated", "proof-role.datum-validated")
 PART_DATUM_STRUCTURE_BRIDGE = _bridge_from_pfg(PART_DATUM_STRUCTURE_TERM)
 
 
@@ -337,9 +333,7 @@ def _request(
     policy = TrustedRulePolicy(evaluators=(_DatumEvaluator(),))
     request = BackendLoweringRequest(
         adapter=FREECAD_PART_DATUM_ADAPTER_DESCRIPTOR,
-        terms=tuple(
-            (*PART_DATUM_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)
-        ),
+        terms=tuple((*PART_DATUM_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)),
         documents=(intent_document, capability_document),
         intent_artifact_ids=(intent_document.artifact_id,),
         capability_artifact_ids=(capability_document.artifact_id,),
@@ -423,17 +417,13 @@ def test_unknown_semantic_identity_and_sink_failure_are_inert() -> None:
 
 
 def test_placement_n_n_plus_one_plan_tamper_and_output_budget() -> None:
-    request, reader, policy = _request(
-        _graph(PartDatumOperation.DATUM_PLANE, x_mm=1_000_000.0)
-    )
+    request, reader, policy = _request(_graph(PartDatumOperation.DATUM_PLANE, x_mm=1_000_000.0))
     adapter = FreeCADPartDatumAdapter(_MemoryPlanSink())
     result, receipt = _lower(adapter, request, reader, policy)
     plan, payload = adapter.read_plan(receipt)
     assert plan.placement.position_mm[0] == 1_000_000.0
 
-    request, reader, policy = _request(
-        _graph(PartDatumOperation.DATUM_PLANE, x_mm=1_000_000.1)
-    )
+    request, reader, policy = _request(_graph(PartDatumOperation.DATUM_PLANE, x_mm=1_000_000.1))
     with pytest.raises(IntentBridgeError) as caught:
         _lower(FreeCADPartDatumAdapter(_MemoryPlanSink()), request, reader, policy)
     assert caught.value.code is IntentBridgeErrorCode.AUTHORITY_VIOLATION
@@ -448,9 +438,7 @@ def test_placement_n_n_plus_one_plan_tamper_and_output_budget() -> None:
     with pytest.raises(PartDatumRuleError):
         decode_part_datum_backend_plan(duplicate)
 
-    request, reader, policy = _request(
-        _graph(PartDatumOperation.DATUM_PLANE), max_output_bytes=1
-    )
+    request, reader, policy = _request(_graph(PartDatumOperation.DATUM_PLANE), max_output_bytes=1)
     with pytest.raises(IntentBridgeError) as caught:
         _lower(FreeCADPartDatumAdapter(_MemoryPlanSink()), request, reader, policy)
     assert caught.value.code is IntentBridgeErrorCode.BUDGET_EXCEEDED
@@ -509,8 +497,9 @@ def test_real_freecad_part_datum_batch_create_propagate_reopen_and_rollback(
     output_root.mkdir()
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD
 from vibecad.parametric.freecad_part_datum_rules import (

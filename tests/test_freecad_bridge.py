@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from vibecad import freecad_bridge
+from vibecad import _file_compat, freecad_bridge
 
 _ADDON_ROOT = Path(__file__).resolve().parent.parent / "freecad" / "VibeCAD"
 
@@ -393,6 +393,8 @@ def test_addon_bridge_client_verifies_exact_child_and_proxies_methods(
         ),
         encoding="utf-8",
     )
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(config)
     nonce = "d" * 32
     daemon_id = "daemon_" + "e" * 32
     output = b"".join(

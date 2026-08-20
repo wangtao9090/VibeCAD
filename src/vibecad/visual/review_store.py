@@ -6,7 +6,6 @@ import contextlib
 import ctypes
 import errno
 import json
-import os
 import re
 import secrets
 import sys
@@ -16,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
 from vibecad.visual.review_artifacts import (
     MAX_VISUAL_REVIEW_RECORD_BYTES,
     VisualReviewArtifact,
@@ -26,6 +26,8 @@ from vibecad.visual.review_artifacts import (
     parse_visual_review_resource_uri,
 )
 from vibecad.workflow.lease import LeaseError, LeaseErrorCode, ResourceLeaseManager
+
+os = _storage_os
 
 MAX_VISUAL_REVIEW_OBSERVATIONS = 1024
 MAX_VISUAL_REVIEW_RECORDS = MAX_VISUAL_REVIEW_OBSERVATIONS * 16
@@ -139,6 +141,14 @@ def _write_all(fd: int, raw: bytes) -> None:
 
 
 def _rename_noreplace(root_fd: int, source: str, destination: str) -> None:
+    if sys.platform == "win32":
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=root_fd,
+            dst_dir_fd=root_fd,
+        )
+        return
     try:
         library = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":
@@ -272,11 +282,10 @@ class VisualReviewArtifactStore:
         )
         names: list[str] = []
         try:
-            with os.scandir(root_fd) as entries:
-                for entry in entries:
-                    names.append(entry.name)
-                    if len(names) > maximum_entries:
-                        _fail(VisualReviewStoreErrorCode.BUDGET_EXCEEDED)
+            for name in os.listdir(root_fd):
+                names.append(name)
+                if len(names) > maximum_entries:
+                    _fail(VisualReviewStoreErrorCode.BUDGET_EXCEEDED)
         except VisualReviewStoreError:
             raise
         except OSError:

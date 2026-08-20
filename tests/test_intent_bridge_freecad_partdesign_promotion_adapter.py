@@ -814,8 +814,9 @@ def test_real_freecad_batch_create_edit_save_reopen_and_rollback(
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part, Sketcher
 from vibecad.parametric.freecad_partdesign_promotion_rules import (
@@ -910,6 +911,8 @@ def make_case(document, entry, index, *, far=False, open_profile=False):
         spine = add_path(body, f'Spine{{index}}', center, 15, start_z)
         spine_auth = AuthenticatedPromotionObject(
             object=spine, node_id=entry['spine'][0], result_id=entry['spine'][1])
+    if os.name == 'nt' and base is None:
+        body.Tip = profiles[-1]
     document.recompute()
     bindings = PartDesignPromotionExecutionBindings(
         document=document,

@@ -702,8 +702,9 @@ def test_real_freecad_all_primitives_create_edit_save_reopen_and_rollback(
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part
 from vibecad.parametric.freecad_partdesign_primitive_rules import (

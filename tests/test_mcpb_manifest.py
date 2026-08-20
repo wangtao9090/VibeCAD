@@ -131,10 +131,10 @@ def test_manifest_long_description_describes_two_step_uninstall():
     assert "移除扩展即可连引擎一起删除" not in description
 
 
-def test_manifest_claims_only_verified_agent_surface_on_darwin():
+def test_manifest_claims_only_verified_agent_surface_on_supported_platforms():
     manifest = _manifest()
     claims = f"{manifest['description']}\n{manifest['long_description']}"
-    assert manifest["compatibility"]["platforms"] == ["darwin"]
+    assert manifest["compatibility"]["platforms"] == ["darwin", "win32"]
     for required in (
         "持久化项目",
         "ModelProgram",
@@ -145,6 +145,7 @@ def test_manifest_claims_only_verified_agent_surface_on_darwin():
         "2–16",
         "create_box",
         "rotate_part",
+        "Windows x86-64",
     ):
         assert required in claims
     for unsupported in (
@@ -153,7 +154,6 @@ def test_manifest_claims_only_verified_agent_surface_on_darwin():
         "干涉",
         "STL",
         "Workbench",
-        "Windows",
     ):
         assert unsupported not in claims
 

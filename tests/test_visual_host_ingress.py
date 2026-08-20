@@ -15,6 +15,16 @@ import pytest
 from PIL import Image
 
 import vibecad.daemon.client as daemon_client_module
+from vibecad._file_compat import (
+    capture_windows_fd,
+    ensure_private_directory,
+    open_windows_directory_fd,
+    set_private_dacl,
+    windows_extended_path,
+)
+from vibecad._file_compat import (
+    pread as portable_pread,
+)
 from vibecad.application.agent import AgentApplication
 from vibecad.application.visual_ingress import (
     VisualIngressError,
@@ -71,16 +81,30 @@ def _png(path: Path, color: tuple[int, int, int]) -> None:
 
 def _stage(tmp_path: Path, *, count: int = 1):
     root = tmp_path / "stage"
-    root.mkdir(mode=0o700)
-    root.chmod(0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(root)
+    else:
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
     for index in range(count):
         _png(root / f"source_{index}", (20 + index, 80, 140))
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        if sys.platform == "win32":
+            set_private_dacl(root / f"source_{index}")
+    if sys.platform == "win32":
+        descriptor = open_windows_directory_fd(root)
+    else:
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
     request = parse_seal_image_set_request(_request(count=count))
-    stats = tuple(
-        os.stat(f"source_{index}", dir_fd=descriptor, follow_symlinks=False)
-        for index in range(count)
-    )
+    if sys.platform == "win32":
+        stats = tuple(os.stat(root / f"source_{index}") for index in range(count))
+    else:
+        stats = tuple(
+            os.stat(f"source_{index}", dir_fd=descriptor, follow_symlinks=False)
+            for index in range(count)
+        )
     source_sha256 = tuple(
         hashlib.sha256((root / f"source_{index}").read_bytes()).hexdigest()
         for index in range(count)
@@ -143,7 +167,7 @@ def test_daemon_staging_opens_only_fixed_unique_regular_sources(tmp_path: Path) 
         try:
             opened.verify()
             assert len(opened.sources) == 2
-            assert [os.pread(item.fd, 8, 0) for item in opened.sources] == [
+            assert [portable_pread(item.fd, 8, 0) for item in opened.sources] == [
                 b"\x89PNG\r\n\x1a\n",
                 b"\x89PNG\r\n\x1a\n",
             ]
@@ -160,17 +184,29 @@ def test_daemon_staging_opens_only_fixed_unique_regular_sources(tmp_path: Path) 
 
 def test_daemon_staging_rejects_bytes_not_matching_client_copy_digest(tmp_path: Path) -> None:
     root = tmp_path / "digest-stage"
-    root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(root)
+    else:
+        root.mkdir(mode=0o700)
     source = root / "source_0"
     _png(source, (10, 20, 30))
     expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
     _png(source, (200, 40, 50))
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    if sys.platform == "win32":
+        set_private_dacl(source)
+        descriptor = open_windows_directory_fd(root)
+        source_stat = os.stat(source)
+    else:
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        source_stat = os.stat("source_0", dir_fd=descriptor, follow_symlinks=False)
     request = parse_seal_image_set_request(_request())
     locator = bind_visual_staging_locator(
         request,
         os.fstat(descriptor),
-        (os.stat("source_0", dir_fd=descriptor, follow_symlinks=False),),
+        (source_stat,),
         (expected_sha256,),
     )
     try:
@@ -182,17 +218,29 @@ def test_daemon_staging_rejects_bytes_not_matching_client_copy_digest(tmp_path: 
 
 def test_bad_declared_png_is_invalid_input_not_daemon_unavailable(tmp_path: Path) -> None:
     stage = tmp_path / "bad-stage"
-    stage.mkdir(mode=0o700)
-    stage.chmod(0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(stage)
+    else:
+        stage.mkdir(mode=0o700)
+        stage.chmod(0o700)
     source = stage / "source_0"
     source.write_bytes(b"not-a-png")
     source.chmod(0o600)
-    descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    if sys.platform == "win32":
+        set_private_dacl(source)
+        descriptor = open_windows_directory_fd(stage)
+        source_stat = os.stat(source)
+    else:
+        descriptor = os.open(
+            stage,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        source_stat = os.stat("source_0", dir_fd=descriptor, follow_symlinks=False)
     request = parse_seal_image_set_request(_request())
     locator = bind_visual_staging_locator(
         request,
         os.fstat(descriptor),
-        (os.stat("source_0", dir_fd=descriptor, follow_symlinks=False),),
+        (source_stat,),
         (hashlib.sha256(source.read_bytes()).hexdigest(),),
     )
     application = AgentApplication.open(data_root=tmp_path / "bad-data")
@@ -233,7 +281,21 @@ def test_bad_declared_png_is_invalid_input_not_daemon_unavailable(tmp_path: Path
     assert rejected.value.code is LocalAgentClientErrorCode.INVALID_INPUT
 
 
-@pytest.mark.parametrize("mutation", ["missing", "swap", "symlink", "fifo"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "swap",
+        "symlink",
+        pytest.param(
+            "fifo",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="named FIFO filesystem entries are POSIX-specific",
+            ),
+        ),
+    ],
+)
 def test_daemon_staging_rejects_entry_changes_without_blocking(
     tmp_path: Path,
     mutation: str,
@@ -281,18 +343,30 @@ def test_low_level_host_ingress_is_path_free_replay_safe_and_cleans_staging(
     source = tmp_path / "front.png"
     _png(source, (20, 80, 140))
     managed = tmp_path / "managed"
-    managed.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(managed)
+    else:
+        managed.mkdir(mode=0o700)
     run_root = managed / "daemon"
-    run_root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(run_root)
+    else:
+        run_root.mkdir(mode=0o700)
     application = AgentApplication.open(data_root=tmp_path / "data")
     facade = LocalKernelFacade(application, daemon_id="daemon_" + "2" * 32)
     observed_params: list[dict[str, object]] = []
     staging_paths: list[Path] = []
     original_mkdtemp = daemon_client_module.tempfile.mkdtemp
+    original_windows_stage = daemon_client_module._create_windows_visual_stage
 
     def captured_mkdtemp(*args, **kwargs) -> str:
         value = original_mkdtemp(*args, **kwargs)
         staging_paths.append(Path(value))
+        return value
+
+    def captured_windows_stage(*args, **kwargs):
+        value = original_windows_stage(*args, **kwargs)
+        staging_paths.append(value[0])
         return value
 
     def local_dispatch(
@@ -307,7 +381,12 @@ def test_low_level_host_ingress_is_path_free_replay_safe_and_cleans_staging(
         assert method == "visual_inputs.seal"
         assert timeout_seconds is None
         assert descriptor is not None
-        assert os.listdir(descriptor) == ["source_0"]
+        if sys.platform == "win32":
+            capability = capture_windows_fd(descriptor, directory=True)
+            names = [entry.name for entry in os.scandir(windows_extended_path(capability.path))]
+        else:
+            names = os.listdir(descriptor)
+        assert names == ["source_0"]
         raw = json.dumps(params, sort_keys=True)
         assert str(source) not in raw
         assert "source_0" not in raw
@@ -330,6 +409,11 @@ def test_low_level_host_ingress_is_path_free_replay_safe_and_cleans_staging(
         )
 
     monkeypatch.setattr(daemon_client_module.tempfile, "mkdtemp", captured_mkdtemp)
+    monkeypatch.setattr(
+        daemon_client_module,
+        "_create_windows_visual_stage",
+        captured_windows_stage,
+    )
     monkeypatch.setattr(LocalKernelClient, "_call", local_dispatch)
     client = object.__new__(LocalKernelClient)
     client._boot_state = SimpleNamespace(root=SimpleNamespace(path=run_root))  # noqa: SLF001
@@ -378,9 +462,15 @@ def test_duplicate_source_identity_is_rejected_and_stage_is_cleaned(
     source = tmp_path / "same.png"
     _png(source, (10, 20, 30))
     managed = tmp_path / "managed"
-    managed.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(managed)
+    else:
+        managed.mkdir(mode=0o700)
     run_root = managed / "daemon"
-    run_root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(run_root)
+    else:
+        run_root.mkdir(mode=0o700)
     client = object.__new__(LocalKernelClient)
     client._boot_state = SimpleNamespace(root=SimpleNamespace(path=run_root))  # noqa: SLF001
     client._connection = None  # noqa: SLF001
@@ -412,15 +502,27 @@ def test_renamed_staged_bytes_turn_known_result_into_bounded_cleanup_failure(
     source = tmp_path / "cleanup.png"
     _png(source, (10, 40, 70))
     managed = tmp_path / "managed-cleanup"
-    managed.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(managed)
+    else:
+        managed.mkdir(mode=0o700)
     run_root = managed / "daemon"
-    run_root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(run_root)
+    else:
+        run_root.mkdir(mode=0o700)
     staging_paths: list[Path] = []
     original_mkdtemp = daemon_client_module.tempfile.mkdtemp
+    original_windows_stage = daemon_client_module._create_windows_visual_stage
 
     def captured_mkdtemp(*args, **kwargs) -> str:
         value = original_mkdtemp(*args, **kwargs)
         staging_paths.append(Path(value))
+        return value
+
+    def captured_windows_stage(*args, **kwargs):
+        value = original_windows_stage(*args, **kwargs)
+        staging_paths.append(value[0])
         return value
 
     def rename_before_cleanup(
@@ -433,12 +535,19 @@ def test_renamed_staged_bytes_turn_known_result_into_bounded_cleanup_failure(
         timeout_seconds=None,
     ) -> V2Response:
         assert timeout_seconds is None
-        os.rename(
-            "source_0",
-            "kept",
-            src_dir_fd=descriptor,
-            dst_dir_fd=descriptor,
-        )
+        if sys.platform == "win32":
+            capability = capture_windows_fd(descriptor, directory=True)
+            os.rename(
+                Path(capability.path) / "source_0",
+                Path(capability.path) / "kept",
+            )
+        else:
+            os.rename(
+                "source_0",
+                "kept",
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+            )
         return V2Response(
             request_id=request_id or "request_" + "6" * 32,
             sequence=1,
@@ -451,6 +560,11 @@ def test_renamed_staged_bytes_turn_known_result_into_bounded_cleanup_failure(
         )
 
     monkeypatch.setattr(daemon_client_module.tempfile, "mkdtemp", captured_mkdtemp)
+    monkeypatch.setattr(
+        daemon_client_module,
+        "_create_windows_visual_stage",
+        captured_windows_stage,
+    )
     monkeypatch.setattr(LocalKernelClient, "_call", rename_before_cleanup)
     client = object.__new__(LocalKernelClient)
     client._boot_state = SimpleNamespace(root=SimpleNamespace(path=run_root))  # noqa: SLF001
@@ -470,7 +584,10 @@ def test_renamed_staged_bytes_turn_known_result_into_bounded_cleanup_failure(
             shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="authenticated local daemon is macOS-only")
+@pytest.mark.skipif(
+    sys.platform not in {"darwin", "win32"},
+    reason="authenticated local daemon is supported on macOS and Windows",
+)
 def test_authenticated_daemon_host_adapter_seals_and_replays_real_png(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,6 +603,7 @@ def test_authenticated_daemon_host_adapter_seals_and_replays_real_png(
         _png(source, (30 + index, 90, 150))
     staging_paths: list[Path] = []
     original_mkdtemp = daemon_client_module.tempfile.mkdtemp
+    original_windows_stage = daemon_client_module._create_windows_visual_stage
 
     def captured_mkdtemp(*args, **kwargs) -> str:
         value = original_mkdtemp(*args, **kwargs)
@@ -493,7 +611,17 @@ def test_authenticated_daemon_host_adapter_seals_and_replays_real_png(
             staging_paths.append(Path(value))
         return value
 
+    def captured_windows_stage(*args, **kwargs):
+        value = original_windows_stage(*args, **kwargs)
+        staging_paths.append(value[0])
+        return value
+
     monkeypatch.setattr(daemon_client_module.tempfile, "mkdtemp", captured_mkdtemp)
+    monkeypatch.setattr(
+        daemon_client_module,
+        "_create_windows_visual_stage",
+        captured_windows_stage,
+    )
     daemon = None
     client = None
     try:

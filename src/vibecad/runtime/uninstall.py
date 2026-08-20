@@ -14,7 +14,22 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from vibecad.runtime import paths, status
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_fd,
+    capture_windows_path,
+    close_windows_handle,
+    delete_windows_directory,
+    delete_windows_file,
+    open_private_file,
+    open_windows_directory_handle,
+    protect_windows_path,
+    rename_windows_directory,
+    rename_windows_file,
+    validate_windows_handle_path,
+    validate_windows_path,
+)
+from vibecad.runtime import paths, status, windows_package_cache
 
 _MARKER_NAME = ".uninstall_requested"
 _PARK_SUFFIX = ".vibecad-removing"
@@ -32,6 +47,7 @@ class _Target:
     device: int
     inode: int
     mode: int
+    windows_capability: WindowsPathCapability | None = None
 
 
 @dataclass(frozen=True)
@@ -45,12 +61,23 @@ class _PinnedParent:
     path: Path
     fds: tuple[int, ...]
     bindings: tuple[tuple[int, str, tuple[int, int]], ...]
+    windows_handle: int | None = None
+    windows_capability: WindowsPathCapability | None = None
 
     @property
     def fd(self) -> int | None:
         return self.fds[-1] if self.fds else None
 
     def validate(self) -> None:
+        if self.windows_handle is not None:
+            assert self.windows_capability is not None
+            validate_windows_handle_path(
+                self.windows_handle,
+                self.path,
+                directory=True,
+                expected=self.windows_capability,
+            )
+            return
         if self.fd is None:
             return
         for parent_fd, name, identity in self.bindings:
@@ -59,6 +86,11 @@ class _PinnedParent:
                 raise ValueError("运行时目标父目录 identity 已变化，拒绝继续")
 
     def sync(self) -> None:
+        if self.windows_handle is not None:
+            # Native rename helpers use MOVEFILE_WRITE_THROUGH.  Revalidating
+            # the pinned HANDLE is the Windows durability/identity barrier.
+            self.validate()
+            return
         if self.fd is not None:
             os.fsync(self.fd)
             self.validate()
@@ -71,12 +103,17 @@ class _PinnedParent:
                 os.close(fd)
 
     def close(self) -> None:
+        if self.windows_handle is not None:
+            with contextlib.suppress(OSError):
+                close_windows_handle(self.windows_handle)
+            self.windows_handle = None
         for fd in reversed(self.fds):
             with contextlib.suppress(OSError):
                 os.close(fd)
 
 
-_REMOVAL_RECORD_KEYS = {"schema", "path", "device", "inode", "mode"}
+_REMOVAL_RECORD_KEYS_V1 = {"schema", "path", "device", "inode", "mode"}
+_REMOVAL_RECORD_KEYS_V2 = _REMOVAL_RECORD_KEYS_V1 | {"windows_capability"}
 
 
 def uninstall_marker() -> Path:
@@ -93,6 +130,17 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _paths_overlap(left: Path, right: Path) -> bool:
     return _is_relative_to(left, right) or _is_relative_to(right, left)
+
+
+def _extended_path(path: Path) -> str:
+    """Use the Win32 verbatim namespace for already-authorized private targets."""
+
+    raw = os.path.abspath(path)
+    if sys.platform != "win32" or raw.startswith("\\\\?\\"):
+        return raw
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw[2:]
+    return "\\\\?\\" + raw
 
 
 def _protected_external_prefixes() -> tuple[Path, ...]:
@@ -137,7 +185,22 @@ def _target(path: Path, *, home_resolved: Path) -> _Target:
         raise ValueError(f"运行时目标越过 VIBECAD_HOME：{path}")
     if hasattr(info, "st_uid") and hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise ValueError(f"运行时目标不属于当前用户：{path}")
-    return _Target(path=path, device=info.st_dev, inode=info.st_ino, mode=info.st_mode)
+    windows_capability = None
+    if sys.platform == "win32":
+        try:
+            windows_capability = protect_windows_path(
+                path,
+                directory=stat.S_ISDIR(info.st_mode),
+            )
+        except OSError as exc:
+            raise ValueError(f"运行时目标 Windows identity/DACL 不安全：{path}") from exc
+    return _Target(
+        path=path,
+        device=info.st_dev,
+        inode=info.st_ino,
+        mode=info.st_mode,
+        windows_capability=windows_capability,
+    )
 
 
 def _durable_data_root(data: Path, *, home_resolved: Path) -> Path | None:
@@ -243,6 +306,7 @@ def _build_plan() -> _Plan:
         uninstall_marker(),
         paths.maintenance_lock(),
         paths.removal_record(),
+        paths.package_cache_record(),
         home / "mamba",
         home / "bin",
         home / "status.json",
@@ -262,6 +326,15 @@ def _build_plan() -> _Plan:
     return _Plan(tuple(targets), tuple(dict.fromkeys(preserved)))
 
 
+def _recover_package_cache() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        windows_package_cache.recover_stale_package_cache()
+    except windows_package_cache.PackageCacheError as exc:
+        raise ValueError(f"Windows 临时包缓存恢复失败：{exc}") from exc
+
+
 def _target_unchanged(target: _Target) -> bool:
     return _path_matches_target(target.path, target)
 
@@ -271,12 +344,65 @@ def _path_matches_target(path: Path, target: _Target) -> bool:
         info = path.lstat()
     except FileNotFoundError:
         return False
-    return (
+    matches = (
         info.st_dev == target.device
         and info.st_ino == target.inode
         and stat.S_IFMT(info.st_mode) == stat.S_IFMT(target.mode)
         and not stat.S_ISLNK(info.st_mode)
     )
+    if not matches or sys.platform != "win32" or target.windows_capability is None:
+        return matches
+    try:
+        current = capture_windows_path(
+            Path(os.path.abspath(path)),
+            directory=stat.S_ISDIR(target.mode),
+            generation_token=target.windows_capability.generation_token,
+        )
+    except OSError:
+        return False
+    return _same_windows_object(current, target.windows_capability)
+
+
+def _same_windows_object(
+    current: WindowsPathCapability,
+    expected: WindowsPathCapability,
+) -> bool:
+    """Compare native identity/security while permitting an authorized rename."""
+
+    return (
+        current.volume,
+        current.file_id,
+        current.owner_sid,
+        current.security_sha256,
+        current.generation_token,
+    ) == (
+        expected.volume,
+        expected.file_id,
+        expected.owner_sid,
+        expected.security_sha256,
+        expected.generation_token,
+    )
+
+
+def _windows_target_capability(path: Path, target: _Target) -> WindowsPathCapability:
+    """Bind a current name to the exact target File ID and protected DACL."""
+
+    absolute = Path(os.path.abspath(path))
+    directory = stat.S_ISDIR(target.mode)
+    if target.windows_capability is None:
+        capability = protect_windows_path(absolute, directory=directory)
+        info = absolute.lstat()
+        if not _info_matches_target(info, target):
+            raise ValueError(f"运行时目标 Windows identity 已变化：{absolute}")
+        return capability
+    capability = capture_windows_path(
+        absolute,
+        directory=directory,
+        generation_token=target.windows_capability.generation_token,
+    )
+    if not _same_windows_object(capability, target.windows_capability):
+        raise ValueError(f"运行时目标 Windows File ID/DACL 已变化：{absolute}")
+    return capability
 
 
 def _same_entry(left: os.stat_result, right: os.stat_result) -> bool:
@@ -299,6 +425,42 @@ def _info_matches_target(info: os.stat_result, target: _Target) -> bool:
 @contextlib.contextmanager
 def _open_pinned_parent(path: Path):
     """Pin every existing parent component, or use a Windows-safe fallback."""
+    if sys.platform == "win32":
+        absolute = Path(os.path.abspath(path))
+        if absolute != path:
+            raise ValueError(f"运行时目标父目录未规范化：{path}")
+        handle: int | None = None
+        try:
+            capability = protect_windows_path(absolute, directory=True)
+            handle = open_windows_directory_handle(
+                absolute,
+                inheritable=False,
+                deny_delete=True,
+            )
+            validate_windows_handle_path(
+                handle,
+                absolute,
+                directory=True,
+                expected=capability,
+            )
+        except OSError as exc:
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(handle)
+            raise ValueError(f"无法 pin Windows 运行时目标父目录：{path}") from exc
+        assert handle is not None
+        pinned = _PinnedParent(
+            absolute,
+            (),
+            (),
+            windows_handle=handle,
+            windows_capability=capability,
+        )
+        try:
+            yield pinned
+        finally:
+            pinned.close()
+        return
     if not _DIR_FD_SUPPORTED:
         yield _PinnedParent(path, (), ())
         return
@@ -356,6 +518,30 @@ def _entry_stat(parent: _PinnedParent, name: str) -> os.stat_result | None:
 
 
 def _rename_entry(parent: _PinnedParent, source: str, destination: str) -> None:
+    if parent.windows_capability is not None:
+        parent.validate()
+        source_path = parent.path / source
+        destination_path = parent.path / destination
+        try:
+            info = source_path.lstat()
+            directory = stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            source_capability = protect_windows_path(
+                source_path,
+                directory=directory,
+            )
+            operation = rename_windows_directory if directory else rename_windows_file
+            operation(
+                source_path,
+                destination_path,
+                source_parent=parent.windows_capability,
+                expected_source=source_capability,
+            )
+            parent.validate()
+            return
+        except (FileExistsError, FileNotFoundError):
+            raise
+        except OSError as exc:
+            raise ValueError("Windows 卸载目标 identity/原子改名失败") from exc
     if parent.fd is None:
         os.rename(parent.path / source, parent.path / destination)
         return
@@ -456,13 +642,17 @@ def _known_parked_paths() -> tuple[Path, ...]:
 
 
 def _record_payload(target: _Target) -> dict:
-    return {
+    payload = {
         "schema": 1,
         "path": str(target.path),
         "device": target.device,
         "inode": target.inode,
         "mode": target.mode,
     }
+    if target.windows_capability is not None:
+        payload["schema"] = 2
+        payload["windows_capability"] = target.windows_capability.to_mapping()
+    return payload
 
 
 def _write_removal_record(target: _Target) -> None:
@@ -471,6 +661,61 @@ def _write_removal_record(target: _Target) -> None:
         raise ValueError(f"发现未完成的运行时卸载记录：{record}")
     raw = json.dumps(_record_payload(target), sort_keys=True).encode("utf-8")
     tmp = record.with_name(f"{record.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    if sys.platform == "win32":
+        temporary_capability: WindowsPathCapability | None = None
+        with _open_pinned_parent(record.parent) as parent:
+            assert parent.windows_capability is not None
+            descriptor = -1
+            try:
+                descriptor, temporary_capability = open_private_file(
+                    tmp,
+                    create=True,
+                    read_write=True,
+                    exclusive=True,
+                    expected_parent=parent.windows_capability,
+                )
+                offset = 0
+                while offset < len(raw):
+                    written = os.write(descriptor, raw[offset:])
+                    if written <= 0:
+                        raise OSError("卸载记录发生 short write")
+                    offset += written
+                os.fsync(descriptor)
+                current = capture_windows_fd(
+                    descriptor,
+                    directory=False,
+                    generation_token=temporary_capability.generation_token,
+                )
+                if current != temporary_capability:
+                    raise ValueError("Windows 卸载记录临时文件 identity 已变化")
+                os.close(descriptor)
+                descriptor = -1
+                published = rename_windows_file(
+                    tmp,
+                    record,
+                    source_parent=parent.windows_capability,
+                    expected_source=temporary_capability,
+                )
+                if not _same_windows_object(published, temporary_capability):
+                    raise ValueError("Windows 卸载记录发布 File ID 已变化")
+                parent.validate()
+                return
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                if temporary_capability is not None and os.path.lexists(tmp):
+                    with contextlib.suppress(OSError):
+                        live = capture_windows_path(
+                            tmp,
+                            directory=False,
+                            generation_token=temporary_capability.generation_token,
+                        )
+                        if _same_windows_object(live, temporary_capability):
+                            delete_windows_file(
+                                tmp,
+                                parent=parent.windows_capability,
+                                expected=live,
+                            )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -509,16 +754,49 @@ def _read_removal_record() -> _Target | None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
         raise ValueError(f"运行时卸载记录不安全：{record}")
     try:
-        raw = record.read_text(encoding="utf-8")
+        if sys.platform == "win32":
+            with _open_pinned_parent(record.parent) as parent:
+                assert parent.windows_capability is not None
+                capability = protect_windows_path(record, directory=False)
+                descriptor, _opened = open_private_file(
+                    record,
+                    create=False,
+                    read_write=False,
+                    expected_parent=parent.windows_capability,
+                )
+                try:
+                    opened = capture_windows_fd(
+                        descriptor,
+                        directory=False,
+                        generation_token=capability.generation_token,
+                    )
+                    if opened != capability:
+                        raise ValueError("Windows 卸载记录 identity 已变化")
+                    chunks: list[bytes] = []
+                    total = 0
+                    while chunk := os.read(descriptor, 4097 - total):
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > 4096:
+                            raise ValueError("Windows 卸载记录过大")
+                    validate_windows_path(capability, directory=False)
+                    parent.validate()
+                finally:
+                    os.close(descriptor)
+            raw = b"".join(chunks).decode("utf-8")
+        else:
+            raw = record.read_text(encoding="utf-8")
         payload = json.loads(raw)
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError(f"运行时卸载记录损坏：{record}") from exc
+    schema = payload.get("schema") if isinstance(payload, dict) else None
+    expected_keys = _REMOVAL_RECORD_KEYS_V2 if schema == 2 else _REMOVAL_RECORD_KEYS_V1
     if (
         not isinstance(payload, dict)
-        or set(payload) != _REMOVAL_RECORD_KEYS
+        or set(payload) != expected_keys
         or raw != json.dumps(payload, sort_keys=True)
         or type(payload.get("schema")) is not int
-        or payload.get("schema") != 1
+        or schema not in {1, 2}
     ):
         raise ValueError(f"运行时卸载记录损坏：{record}")
     path_raw = payload.get("path")
@@ -532,7 +810,17 @@ def _read_removal_record() -> _Target | None:
         or type(mode) is not int
     ):
         raise ValueError(f"运行时卸载记录字段无效：{record}")
-    target = _Target(Path(path_raw), device, inode, mode)
+    windows_capability = None
+    if schema == 2:
+        try:
+            windows_capability = WindowsPathCapability.from_mapping(
+                payload.get("windows_capability")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"运行时卸载记录 Windows identity 无效：{record}") from exc
+        if os.path.normcase(windows_capability.path) != os.path.normcase(path_raw):
+            raise ValueError(f"运行时卸载记录 Windows path 不匹配：{record}")
+    target = _Target(Path(path_raw), device, inode, mode, windows_capability)
     if target.path not in _known_target_paths():
         raise ValueError(f"运行时卸载记录目标越界：{target.path}")
     return target
@@ -540,6 +828,20 @@ def _read_removal_record() -> _Target | None:
 
 def _clear_removal_record() -> None:
     record = paths.removal_record()
+    if sys.platform == "win32":
+        try:
+            with _open_pinned_parent(record.parent) as parent:
+                assert parent.windows_capability is not None
+                capability = protect_windows_path(record, directory=False)
+                delete_windows_file(
+                    record,
+                    parent=parent.windows_capability,
+                    expected=capability,
+                )
+                parent.sync()
+        except FileNotFoundError:
+            pass
+        return
     record.unlink(missing_ok=True)
     with contextlib.suppress(OSError):
         parent_fd = os.open(record.parent, os.O_RDONLY)
@@ -575,17 +877,107 @@ def _clear_directory_fd(directory_fd: int) -> None:
         os.unlink(name, dir_fd=directory_fd)
 
 
+def _clear_windows_directory(
+    directory: Path,
+    capability: WindowsPathCapability,
+) -> None:
+    """Clear one exact private directory generation without following aliases."""
+
+    handle = open_windows_directory_handle(
+        directory,
+        inheritable=False,
+        deny_delete=True,
+    )
+    try:
+        validate_windows_handle_path(
+            handle,
+            directory,
+            directory=True,
+            expected=capability,
+        )
+        names = os.listdir(_extended_path(directory))
+        for name in names:
+            child = directory / name
+            info = os.lstat(_extended_path(child))
+            attributes = int(getattr(info, "st_file_attributes", 0))
+            reparse = bool(
+                attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+            is_directory = stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            validate_windows_handle_path(
+                handle,
+                directory,
+                directory=True,
+                expected=capability,
+            )
+            if is_directory and not reparse:
+                child_capability = protect_windows_path(child, directory=True)
+                _clear_windows_directory(child, child_capability)
+                delete_windows_directory(
+                    child,
+                    parent=capability,
+                    expected=child_capability,
+                )
+            elif not reparse and stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                child_capability = protect_windows_path(child, directory=False)
+                delete_windows_file(
+                    child,
+                    parent=capability,
+                    expected=child_capability,
+                )
+            else:
+                # A reparse point is removed as a leaf. A hard-link unlink only
+                # removes this name and cannot mutate the other linked name.
+                operation = os.rmdir if is_directory else os.unlink
+                operation(_extended_path(child))
+                if os.path.lexists(_extended_path(child)):
+                    raise ValueError(f"Windows 卸载 alias/hard-link 未删除：{child}")
+            validate_windows_handle_path(
+                handle,
+                directory,
+                directory=True,
+                expected=capability,
+            )
+        if os.listdir(_extended_path(directory)):
+            raise ValueError(f"Windows 卸载目录出现新的 child：{directory}")
+    finally:
+        close_windows_handle(handle)
+
+
 def _delete_private_target(parent: _PinnedParent, name: str, target: _Target) -> None:
     """Delete only the recorded entry below an already-pinned parent."""
     before = _entry_stat(parent, name)
     if before is None or not _info_matches_target(before, target):
         raise ValueError(f"卸载暂存 identity 与记录不匹配：{parent.path / name}")
+    if parent.windows_capability is not None:
+        candidate = parent.path / name
+        capability = _windows_target_capability(candidate, target)
+        parent.validate()
+        if stat.S_ISDIR(target.mode):
+            _clear_windows_directory(candidate, capability)
+            delete_windows_directory(
+                candidate,
+                parent=parent.windows_capability,
+                expected=capability,
+            )
+        else:
+            delete_windows_file(
+                candidate,
+                parent=parent.windows_capability,
+                expected=capability,
+            )
+        if os.path.lexists(_extended_path(candidate)):
+            raise ValueError(f"Windows 卸载目标在删除后仍然存在：{candidate}")
+        parent.sync()
+        return
     if parent.fd is None:
         candidate = parent.path / name
         if stat.S_ISDIR(target.mode):
-            shutil.rmtree(candidate)
+            shutil.rmtree(_extended_path(candidate))
         else:
-            candidate.unlink()
+            os.unlink(_extended_path(candidate))
+        if os.path.lexists(candidate):
+            raise ValueError(f"卸载目标在删除后仍然存在：{candidate}")
         parent.sync()
         return
     if stat.S_ISDIR(target.mode):
@@ -769,9 +1161,22 @@ def dir_size_mb(path: Path) -> float:
         return root_info.st_size / 1e6
     if not stat.S_ISDIR(root_info.st_mode):
         return 0.0
-    for current, dirs, files in os.walk(path, followlinks=False):
+    walk_root = _extended_path(path) if sys.platform == "win32" else path
+    for current, dirs, files in os.walk(walk_root, followlinks=False):
         current_path = Path(current)
-        dirs[:] = [name for name in dirs if not (current_path / name).is_symlink()]
+        retained = []
+        for name in dirs:
+            candidate = current_path / name
+            is_junction = getattr(candidate, "is_junction", None)
+            try:
+                if candidate.is_symlink() or (
+                    is_junction is not None and is_junction()
+                ):
+                    continue
+            except OSError:
+                continue
+            retained.append(name)
+        dirs[:] = retained
         for name in files:
             candidate = current_path / name
             try:
@@ -804,6 +1209,36 @@ def preview_uninstall() -> dict:
 
 def _write_marker() -> None:
     marker = uninstall_marker()
+    if sys.platform == "win32":
+        with _open_pinned_parent(marker.parent) as parent:
+            assert parent.windows_capability is not None
+            try:
+                descriptor, capability = open_private_file(
+                    marker,
+                    create=True,
+                    read_write=True,
+                    exclusive=True,
+                    expected_parent=parent.windows_capability,
+                )
+            except FileExistsError:
+                capability = protect_windows_path(marker, directory=False)
+                validate_windows_path(capability, directory=False)
+                parent.validate()
+                return
+            try:
+                opened = capture_windows_fd(
+                    descriptor,
+                    directory=False,
+                    generation_token=capability.generation_token,
+                )
+                if opened != capability:
+                    raise ValueError("Windows 卸载 marker identity 已变化")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            validate_windows_path(capability, directory=False)
+            parent.validate()
+            return
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -822,9 +1257,27 @@ def _write_marker() -> None:
     os.close(fd)
 
 
-def _read_marker_identity(marker: Path) -> tuple[int, int] | None:
+def _read_marker_identity(
+    marker: Path,
+    *,
+    expected: WindowsPathCapability | None = None,
+) -> tuple[int, int] | WindowsPathCapability | None:
     """Return one valid uninstall authorization identity without opening its bytes."""
 
+    if sys.platform == "win32":
+        try:
+            if expected is None:
+                return protect_windows_path(marker, directory=False)
+            current = capture_windows_path(
+                Path(os.path.abspath(marker)),
+                directory=False,
+                generation_token=expected.generation_token,
+            )
+            if not _same_windows_object(current, expected):
+                raise ValueError("Windows 卸载 marker File ID/DACL 已变化")
+            return current
+        except FileNotFoundError:
+            return None
     try:
         info = marker.lstat()
     except FileNotFoundError:
@@ -839,9 +1292,26 @@ def _read_marker_identity(marker: Path) -> tuple[int, int] | None:
     return info.st_dev, info.st_ino
 
 
-def _clear_matching_marker(marker: Path, identity: tuple[int, int]) -> bool:
-    if _read_marker_identity(marker) != identity:
+def _clear_matching_marker(
+    marker: Path,
+    identity: tuple[int, int] | WindowsPathCapability,
+) -> bool:
+    expected = identity if isinstance(identity, WindowsPathCapability) else None
+    if _read_marker_identity(marker, expected=expected) != identity:
         return False
+    if isinstance(identity, WindowsPathCapability):
+        try:
+            with _open_pinned_parent(marker.parent) as parent:
+                assert parent.windows_capability is not None
+                delete_windows_file(
+                    marker,
+                    parent=parent.windows_capability,
+                    expected=identity,
+                )
+                parent.sync()
+        except FileNotFoundError:
+            return False
+        return True
     try:
         marker.unlink()
     except FileNotFoundError:
@@ -878,6 +1348,7 @@ def request_uninstall() -> dict:
         with status.runtime_maintenance_lock():
             # A hard-crashed direct uninstall has no pending marker. A fresh
             # public request is therefore also a supported recovery entrypoint.
+            _recover_package_cache()
             _recover_interrupted_removal()
             plan = _build_plan()
             if not plan.targets:
@@ -918,8 +1389,14 @@ def perform_pending_uninstall() -> bool:
         _safe_home()
         cleanup_home = True
         with status.runtime_maintenance_lock():
-            if _read_marker_identity(marker) != marker_identity:
+            expected_marker = (
+                marker_identity
+                if isinstance(marker_identity, WindowsPathCapability)
+                else None
+            )
+            if _read_marker_identity(marker, expected=expected_marker) != marker_identity:
                 return False
+            _recover_package_cache()
             if not _retire_kernel_before_runtime_removal():
                 return False
             if _recover_interrupted_removal():
@@ -947,6 +1424,7 @@ def uninstall_now() -> dict:
         _safe_home()
         cleanup_home = True
         with status.runtime_maintenance_lock():
+            _recover_package_cache()
             if _recover_interrupted_removal():
                 raise ValueError("旧卸载已恢复，但检测到新的运行时 generation；请重新确认")
             plan = _build_plan()

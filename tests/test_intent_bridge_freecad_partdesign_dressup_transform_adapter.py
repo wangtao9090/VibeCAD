@@ -666,9 +666,7 @@ def test_real_freecad_dressups_transforms_batch_create_edit_reopen_and_rollback(
             (success_cases, _parameters(operation), "success"),
             (failure_cases, _failure_parameters(operation), "rollback"),
         ):
-            request, reader, policy = _request(
-                _graph(operation, parameter_value=parameter_value)
-            )
+            request, reader, policy = _request(_graph(operation, parameter_value=parameter_value))
             adapter = FreeCADPartDesignDressupTransformAdapter(_MemoryPlanSink())
             result, receipt = _lower(adapter, request, reader, policy)
             plan, payload = adapter.read_plan(receipt)
@@ -689,8 +687,9 @@ def test_real_freecad_dressups_transforms_batch_create_edit_reopen_and_rollback(
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part
 from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (

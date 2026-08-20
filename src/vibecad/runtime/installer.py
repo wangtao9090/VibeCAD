@@ -15,10 +15,17 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 
-from vibecad.runtime import micromamba, paths, spec, status
+from vibecad.runtime import (
+    micromamba,
+    paths,
+    spec,
+    status,
+    windows_job_runner,
+    windows_package_cache,
+)
 from vibecad.runtime.status import Phase, RuntimeStatus
 
 ProgressCb = Callable[[RuntimeStatus], None]
@@ -49,9 +56,27 @@ def _spawn_process(*args, **kwargs):
     return subprocess.run(*args, **kwargs)
 
 
-def _expected_micromamba_sha256(subdir: str) -> str:
-    raw = micromamba._fetch_text(micromamba._sha256_url(subdir))
-    value = raw.split()[0].strip().lower()
+def _path_is_alias(path: Path) -> bool:
+    """Treat symlinks, junctions, and inspection failures as unsafe aliases."""
+
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction is not None and is_junction())
+    except OSError:
+        return True
+
+
+def _expected_micromamba_sha256(
+    subdir: str,
+    *,
+    version: str = micromamba.MICROMAMBA_VERSION,
+) -> str:
+    value = micromamba.expected_sha256(subdir, version=version)
+    if value is None:
+        raw = micromamba._fetch_text(micromamba._sha256_url(subdir, version=version))
+        value = raw.split()[0].strip().lower()
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise InstallError("micromamba checksum response is invalid")
     return value
@@ -139,6 +164,8 @@ def _run(
     cwd: str | None = None,
     cwd_fd: int | None = None,
     generation_guard: Callable[[], None] | None = None,
+    process_env: Mapping[str, str] | None = None,
+    windows_kill_tree: bool = False,
 ) -> None:
     """跑安装子进程；stdout/stderr 重定向到日志，绝不污染 MCP stdio（B2）。"""
     if cwd is not None and cwd_fd is not None:
@@ -148,7 +175,16 @@ def _run(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
+        # micromamba emits UTF-8 on every supported platform.  Relying on the
+        # Windows ANSI code page makes an otherwise successful install fail
+        # while ``subprocess`` decodes captured progress output (for example,
+        # on a Simplified Chinese system using GBK).
+        "encoding": "utf-8",
+        "errors": "replace",
     }
+    environment_snapshot = dict(process_env) if process_env is not None else None
+    if environment_snapshot is not None:
+        process_options["env"] = environment_snapshot
     spawn_command = cmd
     if cwd_fd is not None:
         if sys.platform == "win32":
@@ -172,7 +208,26 @@ def _run(
             *cmd,
         ]
         process_options["pass_fds"] = (cwd_fd,)
-    proc = _spawn_process(spawn_command, **process_options)
+    if generation_guard is not None:
+        generation_guard()
+    if windows_kill_tree:
+        if sys.platform != "win32":
+            raise InstallError("Windows process-tree isolation is unavailable")
+        if cwd_fd is not None:
+            raise InstallError("Windows process-tree isolation cannot use a directory descriptor")
+        if environment_snapshot is None:
+            raise InstallError("Windows process-tree isolation requires an explicit environment")
+        try:
+            proc = windows_job_runner.run_in_job(
+                spawn_command,
+                cwd=cwd,
+                environment=environment_snapshot,
+                before_dispatch=generation_guard,
+            )
+        except windows_job_runner.WindowsJobError as exc:
+            raise InstallError(f"Windows 安装子进程隔离失败：{exc}") from exc
+    else:
+        proc = _spawn_process(spawn_command, **process_options)
     if generation_guard is not None:
         generation_guard()
     output = proc.stdout or ""
@@ -279,7 +334,7 @@ def _open_regular_entry(parent: Path, name: str, pinned) -> tuple[int, os.stat_r
 
     expected = _validate_regular_entry(parent, name, pinned, required=True)
     assert expected is not None
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     file_descriptor = -1
     try:
@@ -461,7 +516,7 @@ def _validated_server_wheel(
 
     descriptor = -1
     try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         descriptor = os.open(canonical, flags)
         opened = os.fstat(descriptor)
@@ -658,6 +713,30 @@ class RuntimeInstaller:
         if (info.st_dev, info.st_ino) != self._runtime_identity:
             raise InstallError("runtime generation identity changed")
 
+    @contextlib.contextmanager
+    def _micromamba_cache_transaction(
+        self,
+    ) -> Iterator[windows_package_cache.PackageCacheSession | None]:
+        """Keep one private short cache alive for a complete Windows transaction."""
+
+        if sys.platform != "win32":
+            yield None
+            return
+        try:
+            with windows_package_cache.package_cache_session() as session:
+                session.validate()
+                yield session
+        except windows_package_cache.PackageCacheError as exc:
+            raise InstallError(f"Windows 短路径包缓存不可用：{exc}") from exc
+
+    def _recover_windows_package_cache(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            windows_package_cache.recover_stale_package_cache()
+        except windows_package_cache.PackageCacheError as exc:
+            raise InstallError(f"Windows 临时包缓存恢复失败：{exc}") from exc
+
     def is_ready(self) -> bool:
         if not status.runtime_ready():
             return False
@@ -719,6 +798,7 @@ class RuntimeInstaller:
         *,
         expected_sha256: str,
     ) -> None:
+        self._recover_windows_package_cache()
         canonical, wheel_identity, wheel_sources = _validated_server_wheel(
             wheel,
             expected_sha256,
@@ -806,24 +886,26 @@ class RuntimeInstaller:
                         )
                         self._ensure_current_layout()
                         micromamba_path = self._ensure_micromamba(paths.micromamba_path())
-                        self._run_micromamba_command(
-                            micromamba_path,
-                            paths.mamba_root_prefix(),
-                            prefix,
-                            [
-                                "run",
-                                "python",
-                                "-B",
-                                "-m",
-                                "pip",
-                                "install",
-                                "--no-index",
-                                "--force-reinstall",
-                                "--no-deps",
-                                str(canonical),
-                            ],
-                            expected_env_identity=evidence.prefix_identity,
-                        )
+                        with self._micromamba_cache_transaction() as cache_session:
+                            self._run_micromamba_command(
+                                micromamba_path,
+                                paths.mamba_root_prefix(),
+                                prefix,
+                                [
+                                    "run",
+                                    "python",
+                                    "-B",
+                                    "-m",
+                                    "pip",
+                                    "install",
+                                    "--no-index",
+                                    "--force-reinstall",
+                                    "--no-deps",
+                                    str(canonical),
+                                ],
+                                expected_env_identity=evidence.prefix_identity,
+                                cache_session=cache_session,
+                            )
                         self._emit(
                             Phase.VERIFYING,
                             95.0,
@@ -900,6 +982,7 @@ class RuntimeInstaller:
             raise InstallError(str(error)) from error
 
     def _install_locked(self) -> None:
+        self._recover_windows_package_cache()
         if self.is_ready():
             self._emit(Phase.READY, 100.0, "运行时已就绪")
             return
@@ -934,6 +1017,8 @@ class RuntimeInstaller:
                         except Exception:  # noqa: BLE001 - never publish to a changed root
                             pass
                         self._cb(s)
+                        if isinstance(exc, InstallError):
+                            raise
                         raise InstallError(str(exc)) from exc
             finally:
                 try:
@@ -1034,7 +1119,12 @@ class RuntimeInstaller:
             with _owned_directory(directory, create_missing=True):
                 self._validate_runtime_generation()
 
-    def _ensure_micromamba(self, destination: Path) -> Path:
+    def _ensure_micromamba(
+        self,
+        destination: Path,
+        *,
+        version: str = micromamba.MICROMAMBA_VERSION,
+    ) -> Path:
         """Download and publish through one pinned parent-directory capability."""
 
         self._validate_runtime_generation()
@@ -1042,7 +1132,11 @@ class RuntimeInstaller:
         if not status._secure_dir_fd_available():
             if sys.platform != "win32":
                 raise InstallError("pinned micromamba download is unavailable")
-            result = micromamba.ensure_micromamba(destination, subdir=subdir)
+            result = micromamba.ensure_micromamba(
+                destination,
+                subdir=subdir,
+                version=version,
+            )
             with _owned_directory(destination.parent, create_missing=False) as parent_pin:
                 source_fd, _ = _open_regular_entry(
                     destination.parent,
@@ -1055,7 +1149,7 @@ class RuntimeInstaller:
                     os.close(source_fd)
             return result
 
-        expected_digest = _expected_micromamba_sha256(subdir)
+        expected_digest = _expected_micromamba_sha256(subdir, version=version)
         part_name = f"{destination.name}.part"
         with _owned_directory(destination.parent, create_missing=True) as parent_pin:
             assert parent_pin is not None
@@ -1085,11 +1179,17 @@ class RuntimeInstaller:
 
             staging_fd = -1
             try:
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_BINARY", 0)
+                )
                 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 staging_fd = os.open(part_name, flags, 0o600, dir_fd=parent_pin.fd)
                 actual_digest = _download_micromamba_to_fd(
-                    micromamba.download_url(subdir),
+                    micromamba.download_url(subdir, version=version),
                     staging_fd,
                 )
                 if actual_digest != expected_digest:
@@ -1142,6 +1242,18 @@ class RuntimeInstaller:
 
         if env != paths.env_prefix():
             raise InstallError(f"拒绝创建非当前托管运行时前缀：{env}")
+        if sys.platform == "win32":
+            visible_length = len(os.path.abspath(env))
+            longest_qualified_path = (
+                visible_length + 1 + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER
+            )
+            if (
+                visible_length > spec.WINDOWS_MAX_ENV_PREFIX_LENGTH
+                or longest_qualified_path > 259
+            ):
+                raise InstallError(
+                    "Windows 托管运行时路径过长，无法在未启用系统长路径时安全安装"
+                )
         with _owned_directory(env.parent, create_missing=False) as parent_pin:
             if parent_pin is None:
                 env.mkdir(mode=0o700)
@@ -1215,7 +1327,11 @@ class RuntimeInstaller:
 
             entries = os.listdir(directory_fd)
             if entries == [runner_name]:
-                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_BINARY", 0)
+                )
                 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 expected_runner = os.stat(
                     runner_name,
@@ -1252,7 +1368,13 @@ class RuntimeInstaller:
             elif entries:
                 raise InstallError("private micromamba runner directory contains extra entries")
             else:
-                flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+                flags = (
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_BINARY", 0)
+                )
                 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 runner_fd = os.open(
                     runner_name,
@@ -1367,7 +1489,11 @@ class RuntimeInstaller:
         )
         runner_fd = -1
         try:
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_BINARY", 0)
+            )
             flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             runner_fd = os.open(
                 _RUNNER_EXECUTABLE_NAME,
@@ -1440,6 +1566,7 @@ class RuntimeInstaller:
         arguments: list[str],
         *,
         expected_env_identity: tuple[int, int],
+        cache_session: windows_package_cache.PackageCacheSession | None = None,
     ) -> None:
         if root != env.parent.parent or (root, env) not in {
             (paths.mamba_root_prefix(), paths.env_prefix()),
@@ -1451,17 +1578,38 @@ class RuntimeInstaller:
             # happen before and after, but CPython cannot bind child cwd by dir-fd.
             if sys.platform != "win32":
                 raise InstallError("directory capability execution is unavailable")
+            if cache_session is None:
+                raise InstallError("Windows micromamba command requires a private short cache")
+
+            def validate_windows_command() -> None:
+                self._validate_runtime_generation()
+                cache_session.validate()
+                try:
+                    env_info = env.lstat()
+                except OSError as exc:
+                    raise InstallError("managed env generation is unavailable") from exc
+                if (
+                    not stat.S_ISDIR(env_info.st_mode)
+                    or _path_is_alias(env)
+                    or (env_info.st_dev, env_info.st_ino) != expected_env_identity
+                ):
+                    raise InstallError("managed env generation identity changed")
+
+            validate_windows_command()
             _run(
                 [
                     str(micromamba_path),
-                    arguments[0],
+                    "--no-rc",
                     "-r",
                     str(root),
+                    arguments[0],
                     "-p",
                     str(env),
                     *arguments[1:],
                 ],
-                generation_guard=self._validate_runtime_generation,
+                generation_guard=validate_windows_command,
+                process_env=cache_session.child_environment(),
+                windows_kill_tree=True,
             )
             return
 
@@ -1522,6 +1670,52 @@ class RuntimeInstaller:
                 finally:
                     os.close(runner_directory_fd)
 
+    def _download_windows_flat_cache(
+        self,
+        micromamba_path: Path,
+        arguments: list[str],
+        *,
+        cache_session: windows_package_cache.PackageCacheSession,
+    ) -> None:
+        """Use 2.5 only to solve/download/extract into the reviewed flat cache."""
+
+        if sys.platform != "win32" or micromamba_path != paths.flat_cache_micromamba_path():
+            raise InstallError("flat-cache downloader is restricted to the Windows transaction")
+        if not arguments or arguments[0] != "create" or "--download-only" not in arguments:
+            raise InstallError("flat-cache downloader may only execute create --download-only")
+        root = cache_session.temporary / "m25"
+        prefix = cache_session.temporary / "d25"
+        if os.path.lexists(root) or os.path.lexists(prefix):
+            raise InstallError("flat-cache downloader staging paths are not empty")
+
+        def validate_download() -> None:
+            self._validate_runtime_generation()
+            cache_session.validate()
+
+        validate_download()
+        _run(
+            [
+                str(micromamba_path),
+                "--no-rc",
+                "-r",
+                str(root),
+                "create",
+                "-p",
+                str(prefix),
+                *arguments[1:],
+            ],
+            generation_guard=validate_download,
+            process_env=cache_session.child_environment(),
+            windows_kill_tree=True,
+        )
+        validate_download()
+        try:
+            prefix_info = prefix.lstat()
+        except OSError as exc:
+            raise InstallError("flat-cache download did not publish its private prefix") from exc
+        if not stat.S_ISDIR(prefix_info.st_mode) or _path_is_alias(prefix):
+            raise InstallError("flat-cache download prefix is unsafe")
+
     def _install_server_package(
         self,
         micromamba_path: Path,
@@ -1529,6 +1723,7 @@ class RuntimeInstaller:
         env: Path,
         *,
         expected_env_identity: tuple[int, int],
+        cache_session: windows_package_cache.PackageCacheSession | None = None,
     ) -> None:
         # Windows 直接启动 conda Python 可能缺 Library/bin 的 DLL/PATH 注入；统一经
         # micromamba run 进入环境，和首次安装的跨平台语义一致。
@@ -1560,6 +1755,7 @@ class RuntimeInstaller:
                 _pip_spec(),
             ],
             expected_env_identity=expected_env_identity,
+            cache_session=cache_session,
         )
 
     def _remove_managed_env(self, env: Path) -> None:
@@ -1700,12 +1896,14 @@ class RuntimeInstaller:
             root = paths.legacy_mamba_root_prefix()
             self._ensure_legacy_layout()
             self._ensure_micromamba(mm)
-            self._install_server_package(
-                mm,
-                root,
-                prefix,
-                expected_env_identity=evidence.prefix_identity,
-            )
+            with self._micromamba_cache_transaction() as cache_session:
+                self._install_server_package(
+                    mm,
+                    root,
+                    prefix,
+                    expected_env_identity=evidence.prefix_identity,
+                    cache_session=cache_session,
+                )
             self._emit(Phase.VERIFYING, 95.0, "验证 legacy FreeCAD 与 server 版本")
             verified = self._verify_generation_or_raise(
                 prefix,
@@ -1768,12 +1966,14 @@ class RuntimeInstaller:
                 )
                 self._ensure_current_layout()
                 self._ensure_micromamba(mm)
-                self._install_server_package(
-                    mm,
-                    root,
-                    env,
-                    expected_env_identity=evidence.prefix_identity,
-                )
+                with self._micromamba_cache_transaction() as cache_session:
+                    self._install_server_package(
+                        mm,
+                        root,
+                        env,
+                        expected_env_identity=evidence.prefix_identity,
+                        cache_session=cache_session,
+                    )
                 self._emit(Phase.VERIFYING, 95.0, "验证 FreeCAD 与 server 版本")
                 verified = self._verify_generation_or_raise(
                     env,
@@ -1794,33 +1994,57 @@ class RuntimeInstaller:
         self._ensure_current_layout()
         self._emit(Phase.DOWNLOADING_MICROMAMBA, 5.0, "获取 micromamba")
         self._ensure_micromamba(mm)
+        flat_cache_mm: Path | None = None
+        if sys.platform == "win32":
+            flat_cache_mm = self._ensure_micromamba(
+                paths.flat_cache_micromamba_path(),
+                version=micromamba.WINDOWS_FLAT_CACHE_VERSION,
+            )
         self._emit(Phase.CREATING_ENV, 20.0, "创建环境并解析 FreeCAD（约 2-3GB，请耐心）")
         env_identity = self._prepare_empty_managed_env(env)
-        self._run_micromamba_command(
-            mm,
-            root,
-            env,
-            [
-                "create",
-                "-y",
-                "-c",
-                "conda-forge",
-                "--override-channels",
-                spec.PYTHON_PIN,
-                spec.FREECAD_PIN,
-            ],
-            expected_env_identity=env_identity,
-        )
-        # A successful exit code is not enough: the exact fixed prefix must now
-        # be a real owned directory in the still-pinned runtime generation.
-        self._validate_managed_env(env)
-        self._emit(Phase.INSTALLING_PIP, 80.0, "安装 server 依赖")
-        self._install_server_package(
-            mm,
-            root,
-            env,
-            expected_env_identity=env_identity,
-        )
+        requested_packages = [spec.PYTHON_PIN, spec.FREECAD_PIN]
+        if sys.platform == "win32":
+            requested_packages.append(spec.WINDOWS_VISKORES_PIN)
+        create_arguments = [
+            "create",
+            "-y",
+            "-c",
+            "conda-forge",
+            "--override-channels",
+            *requested_packages,
+        ]
+        with self._micromamba_cache_transaction() as cache_session:
+            if flat_cache_mm is not None:
+                if cache_session is None:
+                    raise InstallError("Windows flat-cache transaction is unavailable")
+                self._download_windows_flat_cache(
+                    flat_cache_mm,
+                    ["create", "--download-only", *create_arguments[1:]],
+                    cache_session=cache_session,
+                )
+            self._run_micromamba_command(
+                mm,
+                root,
+                env,
+                (
+                    ["create", "--offline", *create_arguments[1:]]
+                    if flat_cache_mm is not None
+                    else create_arguments
+                ),
+                expected_env_identity=env_identity,
+                cache_session=cache_session,
+            )
+            # A successful exit code is not enough: the exact fixed prefix must now
+            # be a real owned directory in the still-pinned runtime generation.
+            self._validate_managed_env(env)
+            self._emit(Phase.INSTALLING_PIP, 80.0, "安装 server 依赖")
+            self._install_server_package(
+                mm,
+                root,
+                env,
+                expected_env_identity=env_identity,
+                cache_session=cache_session,
+            )
         self._emit(Phase.VERIFYING, 95.0, "冒烟验证 import FreeCAD + vibecad.server")
         # M-B/m-4：统一 active + 验 server 可起
         verified = self._verify_generation_or_raise(

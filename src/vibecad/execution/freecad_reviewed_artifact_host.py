@@ -9,16 +9,19 @@ Worker without ever accepting or exposing a filesystem path.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import hmac
 import json
 import os
 import re
 import stat
+import sys
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from vibecad import _file_compat
+from vibecad._file_compat import WindowsPathCapability
 from vibecad.execution.freecad_reviewed_artifact_inputs import (
     ReviewedArtifactCatalogSnapshot,
 )
@@ -151,10 +154,8 @@ def _validate_directory_stat(value: os.stat_result) -> tuple[int, int, int, int]
 
 def _require_read_only(fd: int) -> None:
     try:
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        _file_compat.require_read_only(fd)
     except OSError:
-        _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
-    if flags & os.O_ACCMODE != os.O_RDONLY:
         _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
 
 
@@ -282,6 +283,166 @@ def _validate_snapshot_directory(
         _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
 
 
+def _read_regular_file_windows(
+    directory: Path,
+    *,
+    name: str,
+    exact_size: int,
+    maximum_size: int,
+) -> bytes:
+    if (
+        type(name) is not str
+        or not name
+        or "/" in name
+        or "\\" in name
+        or name in {".", ".."}
+        or type(exact_size) is not int
+        or type(maximum_size) is not int
+        or exact_size < 0
+        or exact_size > maximum_size
+    ):
+        _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+    path = directory / name
+    descriptor = -1
+    try:
+        before = _file_compat.capture_windows_path(path, directory=False)
+        descriptor = os.open(
+            _file_compat.windows_extended_path(path),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+        os.set_inheritable(descriptor, False)
+        _file_compat.require_read_only(descriptor)
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (before.volume, before.file_id)
+            or opened.st_size != exact_size
+            or opened.st_size > maximum_size
+        ):
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        chunks: list[bytes] = []
+        remaining = maximum_size + 1
+        while remaining:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = _file_compat.capture_windows_path(
+            path,
+            directory=False,
+            generation_token=before.generation_token,
+        )
+        final = os.fstat(descriptor)
+        if (
+            len(payload) != exact_size
+            or after != before
+            or (final.st_dev, final.st_ino, final.st_size)
+            != (opened.st_dev, opened.st_ino, opened.st_size)
+        ):
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        return payload
+    except TaskInputSnapshotError:
+        raise
+    except (OSError, UnicodeError):
+        _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
+
+
+def _validate_snapshot_path(
+    capability: WindowsPathCapability,
+    snapshot: ReviewedArtifactCatalogSnapshot,
+) -> WindowsPathCapability:
+    try:
+        directory = _file_compat.validate_windows_path(capability, directory=True)
+        artifact_names = tuple(record.artifact_id for record in snapshot.records)
+        if REVIEWED_ARTIFACT_MANIFEST_NAME in artifact_names:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        expected_entries = {REVIEWED_ARTIFACT_MANIFEST_NAME, *artifact_names}
+        if {entry.name for entry in directory.iterdir()} != expected_entries:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        expected_manifest = _canonical_manifest(snapshot)
+        if len(expected_manifest) > _MANIFEST_MAX_BYTES:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        manifest = _read_regular_file_windows(
+            directory,
+            name=REVIEWED_ARTIFACT_MANIFEST_NAME,
+            exact_size=len(expected_manifest),
+            maximum_size=_MANIFEST_MAX_BYTES,
+        )
+        if not hmac.compare_digest(manifest, expected_manifest):
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        for record in snapshot.records:
+            payload = _read_regular_file_windows(
+                directory,
+                name=record.artifact_id,
+                exact_size=record.size_bytes,
+                maximum_size=record.maximum_bytes,
+            )
+            if not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), record.content_sha256):
+                _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        _file_compat.validate_windows_path(capability, directory=True)
+        if {entry.name for entry in directory.iterdir()} != expected_entries:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        return capability
+    except TaskInputSnapshotError:
+        raise
+    except (OSError, UnicodeError):
+        _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+
+
+class _WindowsOwnedSnapshotCleanup(_OpaqueCapability):
+    __slots__ = ("_capability", "_closed", "_expected_names", "_parent")
+
+    def __init__(
+        self,
+        *,
+        capability: WindowsPathCapability,
+        parent: WindowsPathCapability,
+        expected_names: tuple[str, ...],
+    ) -> None:
+        try:
+            path = _file_compat.validate_windows_path(capability, directory=True)
+            parent_path = _file_compat.validate_windows_path(parent, directory=True)
+            if path.parent != parent_path or {item.name for item in path.iterdir()} != set(
+                expected_names
+            ):
+                _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        except TaskInputSnapshotError:
+            raise
+        except OSError:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        self._capability = capability
+        self._parent = parent
+        self._expected_names = expected_names
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            path = _file_compat.validate_windows_path(self._capability, directory=True)
+            parent = _file_compat.validate_windows_path(self._parent, directory=True)
+            if path.parent != parent or {item.name for item in path.iterdir()} != set(
+                self._expected_names
+            ):
+                raise OSError
+            for name in self._expected_names:
+                item = path / name
+                _file_compat.capture_windows_path(item, directory=False)
+                os.unlink(_file_compat.windows_extended_path(item))
+            os.rmdir(_file_compat.windows_extended_path(path))
+            _file_compat.validate_windows_path(self._parent, directory=True)
+        except OSError:
+            _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
+
+
 class _OwnedSnapshotCleanup(_OpaqueCapability):
     """Descriptor-relative owner for one private run snapshot directory."""
 
@@ -400,27 +561,62 @@ class _OwnedSnapshotCleanup(_OpaqueCapability):
 class TaskInputSnapshotLease(_OpaqueCapability):
     """Opaque owner of one validated, run-bound immutable directory FD."""
 
-    __slots__ = ("_cleanup", "_closed", "_directory_fd", "_identity", "_snapshot")
+    __slots__ = (
+        "_cleanup",
+        "_closed",
+        "_directory_fd",
+        "_identity",
+        "_snapshot",
+        "_windows_capability",
+    )
 
     def __init__(
         self,
         *,
         snapshot: ReviewedArtifactCatalogSnapshot,
-        directory_fd: int,
+        directory_fd: int | None = None,
         cleanup_parent_fd: int | None = None,
         cleanup_name: str | None = None,
+        directory_capability: WindowsPathCapability | None = None,
+        cleanup_parent_capability: WindowsPathCapability | None = None,
     ) -> None:
-        if type(directory_fd) is not int or directory_fd < 0:
+        windows_mode = directory_capability is not None
+        if windows_mode and sys.platform != "win32":
             _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
-        if (cleanup_parent_fd is None) != (cleanup_name is None):
+        if windows_mode == (directory_fd is not None):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if not windows_mode and (type(directory_fd) is not int or directory_fd < 0):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if not windows_mode and (cleanup_parent_fd is None) != (cleanup_name is None):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if cleanup_parent_capability is not None and not windows_mode:
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if windows_mode and (cleanup_parent_capability is None) != (cleanup_name is None):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if windows_mode and cleanup_parent_fd is not None:
             _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
         self._closed = True
         self._directory_fd = -1
         self._cleanup = None
+        self._windows_capability = None
         duplicate = -1
         try:
             self._snapshot = _copy_snapshot(snapshot)
-            if cleanup_parent_fd is not None:
+            if windows_mode:
+                assert directory_capability is not None
+                if cleanup_parent_capability is not None:
+                    assert cleanup_name is not None
+                    self._cleanup = _WindowsOwnedSnapshotCleanup(
+                        capability=directory_capability,
+                        parent=cleanup_parent_capability,
+                        expected_names=(
+                            REVIEWED_ARTIFACT_MANIFEST_NAME,
+                            *(record.artifact_id for record in self._snapshot.records),
+                        ),
+                    )
+                identity = _validate_snapshot_path(directory_capability, self._snapshot)
+                self._windows_capability = directory_capability
+            elif cleanup_parent_fd is not None:
                 assert cleanup_name is not None
                 self._cleanup = _OwnedSnapshotCleanup(
                     parent_fd=cleanup_parent_fd,
@@ -430,9 +626,11 @@ class TaskInputSnapshotLease(_OpaqueCapability):
                         *(record.artifact_id for record in self._snapshot.records),
                     ),
                 )
-            duplicate = os.dup(directory_fd)
-            os.set_inheritable(duplicate, False)
-            identity = _validate_snapshot_directory(duplicate, self._snapshot)
+            if not windows_mode:
+                assert directory_fd is not None
+                duplicate = os.dup(directory_fd)
+                os.set_inheritable(duplicate, False)
+                identity = _validate_snapshot_directory(duplicate, self._snapshot)
         except TaskInputSnapshotError:
             if duplicate >= 0:
                 try:
@@ -484,6 +682,8 @@ class TaskInputSnapshotLease(_OpaqueCapability):
 
     def duplicate_directory_fd(self) -> int:
         self._require_live()
+        if self._windows_capability is not None:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
         duplicate = -1
         try:
             duplicate = os.dup(self._directory_fd)
@@ -506,6 +706,16 @@ class TaskInputSnapshotLease(_OpaqueCapability):
                     pass
             _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
 
+    def windows_capability_mapping(self) -> dict[str, object]:
+        """Return a revalidated wire capability on Windows; unavailable on POSIX."""
+
+        self._require_live()
+        capability = self._windows_capability
+        if capability is None:
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        _validate_snapshot_path(capability, self._snapshot)
+        return capability.to_mapping()
+
     def _require_live(self) -> None:
         if self._closed:
             _fail(TaskInputSnapshotErrorCode.CLOSED)
@@ -519,10 +729,11 @@ class TaskInputSnapshotLease(_OpaqueCapability):
         cleanup = self._cleanup
         self._cleanup = None
         failed = False
-        try:
-            os.close(descriptor)
-        except OSError:
-            failed = True
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                failed = True
         if cleanup is not None:
             try:
                 cleanup.close()

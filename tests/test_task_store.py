@@ -19,6 +19,12 @@ import pytest
 
 import vibecad.workflow.state as state_module
 import vibecad.workflow.store as store_module
+from vibecad._file_compat import (
+    capture_windows_fd,
+    capture_windows_path,
+    close_windows_handle,
+    set_private_dacl,
+)
 from vibecad.workflow.contracts import (
     AcceptanceSpec,
     ErrorCategory,
@@ -216,6 +222,8 @@ def test_read_only_snapshot_rejects_unsafe_canonical_record_nodes(
     elif kind == "hardlink":
         os.link(original, unsafe)
     else:
+        if os.name == "nt":
+            pytest.skip("POSIX mode bits are not a Windows isolation boundary")
         original.chmod(0o640)
 
     with pytest.raises(TaskStoreError) as caught:
@@ -272,6 +280,8 @@ def test_read_only_snapshot_preserves_per_record_oversize_taxonomy(
     path = store_root / _record_name()
     path.write_bytes(b"x" * (MAX_RECORD_BYTES + 1))
     path.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(path)
 
     with pytest.raises(TaskStoreError) as caught:
         store.snapshot()
@@ -299,17 +309,29 @@ def test_read_only_snapshot_scan_failure_releases_for_clean_retry(
     monkeypatch: pytest.MonkeyPatch,
 ):
     store.create(_task())
-    real_read = store_module._read_named_bytes
+    if os.name == "nt":
+        backend_type = type(store._windows_backend)  # noqa: SLF001
+        real_read = backend_type._read_file  # noqa: SLF001
 
-    def fail_read(*_args, **_kwargs):
-        raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+        def fail_read(*_args, **_kwargs):
+            raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
 
-    monkeypatch.setattr(store_module, "_read_named_bytes", fail_read)
+        monkeypatch.setattr(backend_type, "_read_file", fail_read)
+    else:
+        real_read = store_module._read_named_bytes
+
+        def fail_read(*_args, **_kwargs):
+            raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+
+        monkeypatch.setattr(store_module, "_read_named_bytes", fail_read)
     with pytest.raises(TaskStoreError) as caught:
         store.snapshot()
     assert caught.value.code is TaskStoreErrorCode.IO_ERROR
 
-    monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
+    if os.name == "nt":
+        monkeypatch.setattr(backend_type, "_read_file", real_read)
+    else:
+        monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
     assert tuple(item.task_id for item in store.snapshot()) == (TASK_ID,)
 
 
@@ -342,14 +364,21 @@ def test_snapshot_and_create_interleaving_observes_only_complete_catalogs(
     store.create(_task())
     entered = threading.Event()
     release = threading.Event()
-    real_read = store_module._read_named_bytes
+    if os.name == "nt":
+        backend_type = type(store._windows_backend)  # noqa: SLF001
+        real_read = backend_type._read_file  # noqa: SLF001
+    else:
+        real_read = store_module._read_named_bytes
 
     def blocked_read(*args, **kwargs):
         entered.set()
         assert release.wait(timeout=5)
         return real_read(*args, **kwargs)
 
-    monkeypatch.setattr(store_module, "_read_named_bytes", blocked_read)
+    if os.name == "nt":
+        monkeypatch.setattr(backend_type, "_read_file", blocked_read)
+    else:
+        monkeypatch.setattr(store_module, "_read_named_bytes", blocked_read)
     snapshots: list[tuple[str, ...]] = []
     failures: list[TaskStoreErrorCode] = []
 
@@ -359,25 +388,48 @@ def test_snapshot_and_create_interleaving_observes_only_complete_catalogs(
     thread = threading.Thread(target=scan)
     thread.start()
     assert entered.wait(timeout=5)
-    try:
-        store.create(_task(OTHER_TASK_ID))
-    except TaskStoreError as error:
-        failures.append(error.code)
-    release.set()
+    if os.name == "nt":
+        # Windows deliberately gives a contending catalog writer a bounded,
+        # fair wait.  Let the frozen snapshot finish, then require the writer
+        # to publish only after that complete snapshot has released its lease.
+        create_started = threading.Event()
+
+        def create() -> None:
+            create_started.set()
+            try:
+                store.create(_task(OTHER_TASK_ID))
+            except TaskStoreError as error:
+                failures.append(error.code)
+
+        creator = threading.Thread(target=create)
+        creator.start()
+        assert create_started.wait(timeout=5)
+        release.set()
+        creator.join(timeout=5)
+        assert not creator.is_alive()
+    else:
+        try:
+            store.create(_task(OTHER_TASK_ID))
+        except TaskStoreError as error:
+            failures.append(error.code)
+        release.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
-    assert failures == [TaskStoreErrorCode.LOCK_UNAVAILABLE]
+    assert failures == ([] if os.name == "nt" else [TaskStoreErrorCode.LOCK_UNAVAILABLE])
     assert snapshots == [(TASK_ID,)]
 
-    monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
-    store.create(_task(OTHER_TASK_ID))
+    if os.name == "nt":
+        monkeypatch.setattr(backend_type, "_read_file", real_read)
+    else:
+        monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
+    if os.name != "nt":
+        store.create(_task(OTHER_TASK_ID))
     assert tuple(item.task_id for item in store.snapshot()) == (
         TASK_ID,
         OTHER_TASK_ID,
     )
 
 
-@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
 def test_read_only_snapshot_independent_process_respects_catalog_contention(
     store: TaskRunStore,
     store_root: Path,
@@ -409,7 +461,7 @@ except TaskStoreError as error:
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=20 if os.name == "nt" else 10,
             env=env,
         )
     finally:
@@ -558,7 +610,19 @@ def _write_record(root: Path, raw: bytes, task_id: str = TASK_ID) -> Path:
     path = root / _record_name(task_id)
     path.write_bytes(raw)
     path.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(path)
     return path
+
+
+def _enable_windows_dacl_inheritance(path: Path) -> None:
+    result = subprocess.run(
+        ["icacls.exe", os.fspath(path), "/inheritance:e"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 def _with_wrong_uid(result: os.stat_result) -> os.stat_result:
@@ -601,6 +665,8 @@ def _patch_dir_fd_callable(
 def store_root(tmp_path: Path) -> Path:
     root = tmp_path / "task-store"
     root.mkdir(mode=0o700)
+    if os.name == "nt":
+        set_private_dacl(root)
     return root
 
 
@@ -608,6 +674,8 @@ def store_root(tmp_path: Path) -> Path:
 def lease_root(tmp_path: Path) -> Path:
     root = tmp_path / "task-locks"
     root.mkdir(mode=0o700)
+    if os.name == "nt":
+        set_private_dacl(root)
     return root
 
 
@@ -780,6 +848,8 @@ def test_create_physical_peak_exact_equality_and_n_plus_one_include_journal_and_
     roots = [tmp_path / name for name in ("equal-locks", "equal-store", "over-locks", "over-store")]
     for root in roots:
         root.mkdir(mode=0o700)
+        if os.name == "nt":
+            set_private_dacl(root)
     equal = TaskRunStore(
         roots[1],
         ResourceLeaseManager(roots[0], trust=LeaseRootTrust.TRUSTED_LOCAL),
@@ -872,18 +942,37 @@ def test_staged_journal_recovers_one_crash_remnant_without_a_second_temp(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_replace = store_module.os.replace
     crashed = False
 
-    def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
-        nonlocal crashed
-        if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
-            crashed = True
-            raise SimulatedProcessCrash
-        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-
     with monkeypatch.context() as patch:
-        patch.setattr(store_module.os, "replace", crash_before_publish)
+        if sys.platform == "win32" and os.name == "nt":
+            # The Windows backend publishes with the capability-bound Win32
+            # replace helper rather than os.replace.  Intercept that exact
+            # authority operation so this remains a crash-recovery test, not
+            # a POSIX implementation-detail test.
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_replace = windows_store_module.replace_windows_file
+
+            def crash_before_publish(src, *args, **kwargs):
+                nonlocal crashed
+                if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_replace(src, *args, **kwargs)
+
+            patch.setattr(windows_store_module, "replace_windows_file", crash_before_publish)
+        else:
+            real_replace = store_module.os.replace
+
+            def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+                nonlocal crashed
+                if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+            patch.setattr(store_module.os, "replace", crash_before_publish)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
 
@@ -891,7 +980,12 @@ def test_staged_journal_recovers_one_crash_remnant_without_a_second_temp(
     assert MUTATION_JOURNAL_NAME in names
     assert len([name for name in names if name.endswith(".tmp")]) == 1
     journal_lines = (store_root / MUTATION_JOURNAL_NAME).read_text(encoding="utf-8").splitlines()
-    assert json.loads(journal_lines[-1])["body"]["state"] == "STAGED"
+    # The POSIX implementation appends a STAGED journal record before its
+    # rename.  The Windows capability backend keeps the durable RESERVED
+    # intent and verifies the File-ID-bound temporary object during recovery.
+    assert json.loads(journal_lines[-1])["body"]["state"] == (
+        "RESERVED" if sys.platform == "win32" and os.name == "nt" else "STAGED"
+    )
 
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
@@ -908,18 +1002,33 @@ def test_reserved_journal_recovers_a_crash_before_temp_creation(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_open = store_module.os.open
     crashed = False
 
-    def crash_on_first_temp(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal crashed
-        if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
-            crashed = True
-            raise SimulatedProcessCrash
-        return real_open(path, flags, mode, dir_fd=dir_fd)
-
     with monkeypatch.context() as patch:
-        _patch_dir_fd_callable(patch, "open", crash_on_first_temp)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_open = windows_store_module.open_private_file
+
+            def crash_on_first_temp(path, *args, **kwargs):
+                nonlocal crashed
+                if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_open(path, *args, **kwargs)
+
+            patch.setattr(windows_store_module, "open_private_file", crash_on_first_temp)
+        else:
+            real_open = store_module.os.open
+
+            def crash_on_first_temp(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal crashed
+                if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            _patch_dir_fd_callable(patch, "open", crash_on_first_temp)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
 
@@ -946,12 +1055,6 @@ def test_partial_reserved_journal_write_crash_is_preserved_fail_closed(
     journal_fds: set[int] = set()
     journal_write_calls = 0
 
-    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
-        fd = real_open(path, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
-            journal_fds.add(fd)
-        return fd
-
     def partial_then_crash(fd: int, data) -> int:
         nonlocal journal_write_calls
         if fd not in journal_fds:
@@ -962,7 +1065,28 @@ def test_partial_reserved_journal_write_crash_is_preserved_fail_closed(
         raise SimulatedProcessCrash
 
     with monkeypatch.context() as patch:
-        _patch_dir_fd_callable(patch, "open", recording_open)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_open = windows_store_module.open_private_file
+
+            def recording_open(path, *args, **kwargs):
+                fd, capability = real_open(path, *args, **kwargs)
+                if Path(path).name == MUTATION_JOURNAL_NAME and kwargs.get("create") is True:
+                    journal_fds.add(fd)
+                return fd, capability
+
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+        else:
+            real_open = store_module.os.open
+
+            def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
+                    journal_fds.add(fd)
+                return fd
+
+            _patch_dir_fd_callable(patch, "open", recording_open)
         patch.setattr(store_module.os, "write", partial_then_crash)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
@@ -991,17 +1115,10 @@ def test_reserved_journal_fsync_crash_restarts_from_the_durable_line(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_open = store_module.os.open
     real_close = store_module.os.close
     real_fsync = store_module.os.fsync
     journal_fds: set[int] = set()
     crashed = False
-
-    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
-        fd = real_open(path, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
-            journal_fds.add(fd)
-        return fd
 
     def crash_after_journal_fsync(fd: int) -> None:
         nonlocal crashed
@@ -1011,7 +1128,28 @@ def test_reserved_journal_fsync_crash_restarts_from_the_durable_line(
             raise SimulatedProcessCrash
 
     with monkeypatch.context() as patch:
-        _patch_dir_fd_callable(patch, "open", recording_open)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_open = windows_store_module.open_private_file
+
+            def recording_open(path, *args, **kwargs):
+                fd, capability = real_open(path, *args, **kwargs)
+                if Path(path).name == MUTATION_JOURNAL_NAME and kwargs.get("create") is True:
+                    journal_fds.add(fd)
+                return fd, capability
+
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+        else:
+            real_open = store_module.os.open
+
+            def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
+                    journal_fds.add(fd)
+                return fd
+
+            _patch_dir_fd_callable(patch, "open", recording_open)
         patch.setattr(store_module.os, "fsync", crash_after_journal_fsync)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
@@ -1038,16 +1176,9 @@ def test_partial_temp_write_crash_is_preserved_and_restart_fails_closed(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_open = store_module.os.open
     real_write = store_module.os.write
     temp_fds: set[int] = set()
     temp_write_calls = 0
-
-    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
-        fd = real_open(path, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
-            temp_fds.add(fd)
-        return fd
 
     def partial_then_crash(fd: int, data) -> int:
         nonlocal temp_write_calls
@@ -1059,7 +1190,28 @@ def test_partial_temp_write_crash_is_preserved_and_restart_fails_closed(
         raise SimulatedProcessCrash
 
     with monkeypatch.context() as patch:
-        _patch_dir_fd_callable(patch, "open", recording_open)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_open = windows_store_module.open_private_file
+
+            def recording_open(path, *args, **kwargs):
+                fd, capability = real_open(path, *args, **kwargs)
+                if Path(path).name.endswith(".tmp") and kwargs.get("create") is True:
+                    temp_fds.add(fd)
+                return fd, capability
+
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+        else:
+            real_open = store_module.os.open
+
+            def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
+                    temp_fds.add(fd)
+                return fd
+
+            _patch_dir_fd_callable(patch, "open", recording_open)
         patch.setattr(store_module.os, "write", partial_then_crash)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
@@ -1087,16 +1239,9 @@ def test_temp_file_fsync_crash_rolls_forward_on_restart(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_open = store_module.os.open
     real_fsync = store_module.os.fsync
     temp_fds: set[int] = set()
     crashed = False
-
-    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
-        fd = real_open(path, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
-            temp_fds.add(fd)
-        return fd
 
     def crash_after_temp_fsync(fd: int) -> None:
         nonlocal crashed
@@ -1106,7 +1251,28 @@ def test_temp_file_fsync_crash_rolls_forward_on_restart(
         real_fsync(fd)
 
     with monkeypatch.context() as patch:
-        _patch_dir_fd_callable(patch, "open", recording_open)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_open = windows_store_module.open_private_file
+
+            def recording_open(path, *args, **kwargs):
+                fd, capability = real_open(path, *args, **kwargs)
+                if Path(path).name.endswith(".tmp") and kwargs.get("create") is True:
+                    temp_fds.add(fd)
+                return fd, capability
+
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+        else:
+            real_open = store_module.os.open
+
+            def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
+                    temp_fds.add(fd)
+                return fd
+
+            _patch_dir_fd_callable(patch, "open", recording_open)
         patch.setattr(store_module.os, "fsync", crash_after_temp_fsync)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
@@ -1152,6 +1318,13 @@ def test_temp_file_fsync_crash_rolls_forward_on_restart(
     assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason=(
+        "Windows recovery retains the RESERVED authority record; "
+        "its temp-fsync path is covered separately"
+    ),
+)
 def test_staged_journal_fsync_crash_rolls_forward_on_restart(
     store: TaskRunStore,
     store_root: Path,
@@ -1202,6 +1375,13 @@ def test_staged_journal_fsync_crash_rolls_forward_on_restart(
     assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason=(
+        "Windows recovery retains the RESERVED authority record; "
+        "it never appends a POSIX STAGED record"
+    ),
+)
 def test_partial_staged_journal_write_crash_is_reconstructed_on_restart(
     store: TaskRunStore,
     store_root: Path,
@@ -1264,23 +1444,42 @@ def test_post_replace_readback_crash_reconciles_on_restart(
     class SimulatedProcessCrash(BaseException):
         pass
 
-    real_read_record = store_module._read_record
     crashed = False
 
-    def crash_on_readback(root_fd: int, root_stat, filename: str, task_id: str):
-        nonlocal crashed
-        if (
-            not crashed
-            and (store_root / _record_name()).exists()
-            and (store_root / MUTATION_JOURNAL_NAME).exists()
-            and not any(entry.name.endswith(".tmp") for entry in store_root.iterdir())
-        ):
-            crashed = True
-            raise SimulatedProcessCrash
-        return real_read_record(root_fd, root_stat, filename, task_id)
-
     with monkeypatch.context() as patch:
-        patch.setattr(store_module, "_read_record", crash_on_readback)
+        if sys.platform == "win32" and os.name == "nt":
+            backend_type = type(store._windows_backend)  # noqa: SLF001
+            real_read_record = backend_type._read_record_with_capability  # noqa: SLF001
+
+            def crash_on_readback(self, task_id: str):
+                nonlocal crashed
+                if (
+                    not crashed
+                    and (store_root / _record_name()).exists()
+                    and (store_root / MUTATION_JOURNAL_NAME).exists()
+                    and not any(entry.name.endswith(".tmp") for entry in store_root.iterdir())
+                ):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_read_record(self, task_id)
+
+            patch.setattr(backend_type, "_read_record_with_capability", crash_on_readback)
+        else:
+            real_read_record = store_module._read_record
+
+            def crash_on_readback(root_fd: int, root_stat, filename: str, task_id: str):
+                nonlocal crashed
+                if (
+                    not crashed
+                    and (store_root / _record_name()).exists()
+                    and (store_root / MUTATION_JOURNAL_NAME).exists()
+                    and not any(entry.name.endswith(".tmp") for entry in store_root.iterdir())
+                ):
+                    crashed = True
+                    raise SimulatedProcessCrash
+                return real_read_record(root_fd, root_stat, filename, task_id)
+
+            patch.setattr(store_module, "_read_record", crash_on_readback)
         with pytest.raises(SimulatedProcessCrash):
             store.create(_task())
 
@@ -1295,6 +1494,10 @@ def test_post_replace_readback_crash_reconciles_on_restart(
     assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason="Windows uses write-through rename and File-ID revalidation instead of directory fsync",
+)
 def test_post_replace_directory_fsync_crash_reconciles_on_restart(
     store: TaskRunStore,
     store_root: Path,
@@ -1351,33 +1554,63 @@ def test_arbitrary_partial_journal_tail_is_never_truncated_or_recovered(
         pass
 
     if with_valid_temp:
-        real_replace = store_module.os.replace
         crashed = False
 
-        def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
-            nonlocal crashed
-            if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
-                crashed = True
-                raise SimulatedProcessCrash
-            return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-
         with monkeypatch.context() as patch:
-            patch.setattr(store_module.os, "replace", crash_before_publish)
+            if sys.platform == "win32" and os.name == "nt":
+                import vibecad.workflow.windows_store as windows_store_module
+
+                real_replace = windows_store_module.replace_windows_file
+
+                def crash_before_publish(src, *args, **kwargs):
+                    nonlocal crashed
+                    if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+                        crashed = True
+                        raise SimulatedProcessCrash
+                    return real_replace(src, *args, **kwargs)
+
+                patch.setattr(windows_store_module, "replace_windows_file", crash_before_publish)
+            else:
+                real_replace = store_module.os.replace
+
+                def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+                    nonlocal crashed
+                    if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+                        crashed = True
+                        raise SimulatedProcessCrash
+                    return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+                patch.setattr(store_module.os, "replace", crash_before_publish)
             with pytest.raises(SimulatedProcessCrash):
                 store.create(_task())
     else:
-        real_open = store_module.os.open
         crashed = False
 
-        def crash_before_temp(path, flags, mode=0o777, *, dir_fd=None):
-            nonlocal crashed
-            if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
-                crashed = True
-                raise SimulatedProcessCrash
-            return real_open(path, flags, mode, dir_fd=dir_fd)
-
         with monkeypatch.context() as patch:
-            _patch_dir_fd_callable(patch, "open", crash_before_temp)
+            if sys.platform == "win32" and os.name == "nt":
+                import vibecad.workflow.windows_store as windows_store_module
+
+                real_open = windows_store_module.open_private_file
+
+                def crash_before_temp(path, *args, **kwargs):
+                    nonlocal crashed
+                    if not crashed and Path(path).name.endswith(".tmp"):
+                        crashed = True
+                        raise SimulatedProcessCrash
+                    return real_open(path, *args, **kwargs)
+
+                patch.setattr(windows_store_module, "open_private_file", crash_before_temp)
+            else:
+                real_open = store_module.os.open
+
+                def crash_before_temp(path, flags, mode=0o777, *, dir_fd=None):
+                    nonlocal crashed
+                    if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
+                        crashed = True
+                        raise SimulatedProcessCrash
+                    return real_open(path, flags, mode, dir_fd=dir_fd)
+
+                _patch_dir_fd_callable(patch, "open", crash_before_temp)
             with pytest.raises(SimulatedProcessCrash):
                 store.create(_task())
 
@@ -1426,7 +1659,10 @@ def test_corrupt_journal_and_extra_remnant_matrix_is_preserved_fail_closed(
     for name, raw in entries.items():
         path = store_root / name
         path.write_bytes(raw)
-        path.chmod(0o600)
+        if os.name == "nt":
+            set_private_dacl(path)
+        else:
+            path.chmod(0o600)
     before = {
         entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
     }
@@ -1445,19 +1681,32 @@ def test_failed_cleanup_with_roll_forward_authority_is_durability_uncertain(
     store_root: Path,
     monkeypatch,
 ) -> None:
-    real_unlink = store_module.os.unlink
-
     def fail_publish(*_args, **_kwargs):
         raise OSError("pre-publish replace sentinel")
 
-    def fail_temp_cleanup(path, *, dir_fd=None):
-        if os.fsdecode(os.fspath(path)).endswith(".tmp"):
-            raise OSError("temp cleanup sentinel")
-        return real_unlink(path, dir_fd=dir_fd)
-
     with monkeypatch.context() as patch:
-        patch.setattr(store_module.os, "replace", fail_publish)
-        _patch_dir_fd_callable(patch, "unlink", fail_temp_cleanup)
+        if sys.platform == "win32" and os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            real_delete = windows_store_module.delete_windows_file
+
+            def fail_temp_cleanup(path, *args, **kwargs):
+                if Path(path).name.endswith(".tmp"):
+                    raise OSError("temp cleanup sentinel")
+                return real_delete(path, *args, **kwargs)
+
+            patch.setattr(windows_store_module, "replace_windows_file", fail_publish)
+            patch.setattr(windows_store_module, "delete_windows_file", fail_temp_cleanup)
+        else:
+            real_unlink = store_module.os.unlink
+
+            def fail_temp_cleanup(path, *, dir_fd=None):
+                if os.fsdecode(os.fspath(path)).endswith(".tmp"):
+                    raise OSError("temp cleanup sentinel")
+                return real_unlink(path, dir_fd=dir_fd)
+
+            patch.setattr(store_module.os, "replace", fail_publish)
+            _patch_dir_fd_callable(patch, "unlink", fail_temp_cleanup)
         with pytest.raises(TaskStoreError) as caught:
             store.create(_task())
     error = _assert_error(caught, TaskStoreErrorCode.DURABILITY_UNCERTAIN)
@@ -1510,6 +1759,13 @@ def test_normal_publish_rechecks_temp_identity_after_latest_record_read(
 
 
 @pytest.mark.parametrize("replacement_generation", [0, 1], ids=("same-bytes", "different-bytes"))
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason=(
+        "Windows captures the exclusive-create File ID atomically; "
+        "post-creation replacement is covered by capability revalidation"
+    ),
+)
 def test_first_temp_evidence_must_match_the_exclusive_create_identity(
     store: TaskRunStore,
     store_root: Path,
@@ -1544,6 +1800,13 @@ def test_first_temp_evidence_must_match_the_exclusive_create_identity(
     assert (store_root / MUTATION_JOURNAL_NAME).exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason=(
+        "Windows recovery revalidates the temporary File ID immediately before "
+        "replace; POSIX evidence-record injection does not apply"
+    ),
+)
 def test_recovery_publish_rechecks_temp_identity_immediately_before_replace(
     store: TaskRunStore,
     store_root: Path,
@@ -1603,7 +1866,11 @@ def test_create_load_and_compare_and_set_round_trip(store: TaskRunStore, store_r
     assert store.load(TASK_ID) == updated
     path = store_root / _record_name()
     assert path.read_bytes() == _record_bytes(_task(), generation=1)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "nt":
+        capability = capture_windows_path(path, directory=False)
+        assert capability.path == str(path)
+    else:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_finite_float_task_content_round_trips_canonically(store: TaskRunStore) -> None:
@@ -1795,6 +2062,10 @@ def test_constructor_requires_exact_trust_and_manager(store_root: Path, lease_ro
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o750, 0o777])
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason="POSIX mode bits do not define Windows store-root authority",
+)
 def test_constructor_rejects_nonprivate_store_root(store_root: Path, lease_root: Path, mode: int):
     store_root.chmod(mode)
     manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
@@ -1821,6 +2092,10 @@ def test_constructor_rejects_symlink_and_non_directory_roots(tmp_path: Path, lea
     _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" and os.name == "nt",
+    reason="Windows root validation uses native handles rather than a dir-fd walk",
+)
 def test_constructor_maps_invalid_native_root_paths_and_closes_walk_fds(
     store_root: Path,
     lease_root: Path,
@@ -1864,6 +2139,19 @@ def test_constructor_maps_invalid_native_root_paths_and_closes_walk_fds(
         (b"[" * 65 + b"]" * 65, TaskStoreErrorCode.CORRUPT_RECORD),
         (b"x" * (MAX_RECORD_BYTES + 1), TaskStoreErrorCode.RECORD_TOO_LARGE),
     ],
+    ids=(
+        "empty",
+        "object",
+        "null",
+        "array",
+        "truncated",
+        "bom",
+        "invalid_utf8",
+        "trailing_newline",
+        "trailing_value",
+        "deeply_nested",
+        "record_too_large",
+    ),
 )
 def test_malformed_records_fail_closed(store: TaskRunStore, store_root: Path, raw: bytes, code):
     _write_record(store_root, raw)
@@ -2281,6 +2569,8 @@ def test_truncated_records_are_rejected(store: TaskRunStore, store_root: Path, r
 def test_unsafe_final_entries_are_rejected(
     store: TaskRunStore, store_root: Path, tmp_path: Path, kind: str
 ):
+    if os.name == "nt" and kind in {"fifo", "mode"}:
+        pytest.skip("Windows uses reparse/File-ID/DACL checks rather than FIFOs or mode bits")
     path = store_root / _record_name()
     if kind == "directory":
         path.mkdir()
@@ -2344,7 +2634,12 @@ def test_precommit_failures_preserve_old_or_absent_record_and_cleanup_temp(
         real_fsync(fd)
 
     injected = fail_regular_fsync if operation == "fsync" else fail
-    monkeypatch.setattr(store_module.os, operation, injected)
+    if os.name == "nt" and operation == "replace":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        monkeypatch.setattr(windows_store_module, "replace_windows_file", injected)
+    else:
+        monkeypatch.setattr(store_module.os, operation, injected)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
     _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
@@ -2363,7 +2658,12 @@ def test_cas_precommit_failures_preserve_old_record(
     def fail(*_args, **_kwargs):
         raise OSError("injected CAS failure")
 
-    monkeypatch.setattr(store_module.os, operation, fail)
+    if os.name == "nt" and operation == "replace":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        monkeypatch.setattr(windows_store_module, "replace_windows_file", fail)
+    else:
+        monkeypatch.setattr(store_module.os, operation, fail)
     with pytest.raises(TaskStoreError) as caught:
         store.compare_and_set(TASK_ID, 0, _task())
     _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
@@ -2379,14 +2679,26 @@ def test_temp_open_failure_preserves_absent_or_old_final(
         store.create(_task())
     path = store_root / _record_name()
     before = path.read_bytes() if has_old else None
-    real_open = store_module.os.open
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
 
-    def fail_temp_open(name, flags, mode=0o777, *, dir_fd=None):
-        if os.fsdecode(os.fspath(name)).endswith(".tmp"):
-            raise OSError("temp open sentinel")
-        return real_open(name, flags, mode, dir_fd=dir_fd)
+        real_open = windows_store_module.open_private_file
 
-    _patch_dir_fd_callable(monkeypatch, "open", fail_temp_open)
+        def fail_temp_open(path, *args, **kwargs):
+            if Path(path).name.endswith(".tmp"):
+                raise OSError("temp open sentinel")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(windows_store_module, "open_private_file", fail_temp_open)
+    else:
+        real_open = store_module.os.open
+
+        def fail_temp_open(name, flags, mode=0o777, *, dir_fd=None):
+            if os.fsdecode(os.fspath(name)).endswith(".tmp"):
+                raise OSError("temp open sentinel")
+            return real_open(name, flags, mode, dir_fd=dir_fd)
+
+        _patch_dir_fd_callable(monkeypatch, "open", fail_temp_open)
     with pytest.raises(TaskStoreError) as caught:
         if has_old:
             store.compare_and_set(TASK_ID, 0, _task())
@@ -2440,12 +2752,6 @@ def test_temp_close_failure_prevents_replace(
     temp_fds: set[int] = set()
     failed: set[int] = set()
 
-    def recording_open(name, flags, mode=0o777, *, dir_fd=None):
-        fd = real_open(name, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(os.fspath(name)).endswith(".tmp"):
-            temp_fds.add(fd)
-        return fd
-
     def fail_temp_close(fd: int) -> None:
         if fd in temp_fds and fd not in failed:
             failed.add(fd)
@@ -2453,7 +2759,28 @@ def test_temp_close_failure_prevents_replace(
             raise OSError("temp close sentinel")
         real_close(fd)
 
-    _patch_dir_fd_callable(monkeypatch, "open", recording_open)
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+
+        def recording_open(path, *args, **kwargs):
+            fd, capability = real_open(path, *args, **kwargs)
+            if Path(path).name.endswith(".tmp"):
+                temp_fds.add(fd)
+            return fd, capability
+
+        monkeypatch.setattr(windows_store_module, "open_private_file", recording_open)
+    else:
+        real_open = store_module.os.open
+
+        def recording_open(name, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(name, flags, mode, dir_fd=dir_fd)
+            if os.fsdecode(os.fspath(name)).endswith(".tmp"):
+                temp_fds.add(fd)
+            return fd
+
+        _patch_dir_fd_callable(monkeypatch, "open", recording_open)
     monkeypatch.setattr(store_module.os, "close", fail_temp_close)
     with pytest.raises(TaskStoreError) as caught:
         if has_old:
@@ -2518,7 +2845,12 @@ def test_cleanup_failure_does_not_replace_primary_error(
     def fail_cleanup(*_args, **_kwargs):
         raise OSError("cleanup unlink sentinel")
 
-    _patch_dir_fd_callable(monkeypatch, "unlink", fail_cleanup)
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        monkeypatch.setattr(windows_store_module, "delete_windows_file", fail_cleanup)
+    else:
+        _patch_dir_fd_callable(monkeypatch, "unlink", fail_cleanup)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
     error = _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
@@ -2580,8 +2912,47 @@ def test_lease_acquisition_failure_precedes_store_mutation(
 
 
 def test_temp_open_is_same_directory_exclusive_private_and_noninheritable(
-    store: TaskRunStore, monkeypatch
+    store: TaskRunStore, store_root: Path, monkeypatch
 ):
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+        observed: list[tuple[Path, dict[str, object], bool, object, object]] = []
+
+        def recording_open(path, *args, **kwargs):
+            fd, capability = real_open(path, *args, **kwargs)
+            candidate = Path(path)
+            if candidate.name.endswith(".tmp") and kwargs.get("create") is True:
+                observed.append(
+                    (
+                        candidate,
+                        dict(kwargs),
+                        os.get_inheritable(fd),
+                        capability,
+                        capture_windows_fd(
+                            fd,
+                            directory=False,
+                            generation_token=capability.generation_token,
+                        ),
+                    )
+                )
+            return fd, capability
+
+        monkeypatch.setattr(windows_store_module, "open_private_file", recording_open)
+        store.create(_task())
+        assert len(observed) == 1
+        path, kwargs, inheritable, capability, recaptured = observed[0]
+        assert path.is_absolute()
+        assert path.parent == store_root
+        assert kwargs["create"] is True
+        assert kwargs["read_write"] is True
+        assert kwargs["exclusive"] is True
+        assert kwargs["expected_parent"] == store._windows_backend._root_capability  # noqa: SLF001
+        assert inheritable is False
+        assert recaptured == capability
+        return
+
     real_open = store_module.os.open
     observed: list[tuple[str, int, int, int | None, bool]] = []
 
@@ -2623,10 +2994,24 @@ def test_temp_name_collision_is_not_overwritten_or_deleted(
     store: TaskRunStore, store_root: Path, monkeypatch
 ):
     token = "a" * 32
-    monkeypatch.setattr(store_module.secrets, "token_hex", lambda _size: token)
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        monkeypatch.setattr(
+            windows_store_module,
+            "secrets",
+            SimpleNamespace(
+                compare_digest=store_module.secrets.compare_digest,
+                token_hex=lambda _size: token,
+            ),
+        )
+    else:
+        monkeypatch.setattr(store_module.secrets, "token_hex", lambda _size: token)
     temp = store_root / f".{_record_name()}.{token}.tmp"
     temp.write_bytes(b"foreign-collision")
     temp.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(temp)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
     _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
@@ -2640,6 +3025,40 @@ def test_cleanup_does_not_unlink_replacement_at_owned_temp_name(
     token = "b" * 32
     temp = store_root / f".{_record_name()}.{token}.tmp"
     moved = store_root / "owned-temp-moved-aside"
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        backend_type = type(store._windows_backend)  # noqa: SLF001
+        real_write_new = backend_type._write_new  # noqa: SLF001
+        injected = False
+
+        def replace_temp_after_close(self, name: str, raw: bytes):
+            nonlocal injected
+            capability = real_write_new(self, name, raw)
+            if name.endswith(".tmp") and not injected:
+                injected = True
+                temp.rename(moved)
+                temp.write_bytes(b"foreign-replacement")
+                set_private_dacl(temp)
+            return capability
+
+        monkeypatch.setattr(
+            windows_store_module,
+            "secrets",
+            SimpleNamespace(
+                compare_digest=store_module.secrets.compare_digest,
+                token_hex=lambda _size: token,
+            ),
+        )
+        monkeypatch.setattr(backend_type, "_write_new", replace_temp_after_close)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+        _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+        assert temp.read_bytes() == b"foreign-replacement"
+        assert moved.exists()
+        assert not (store_root / _record_name()).exists()
+        return
+
     real_open = store_module.os.open
     real_write = store_module.os.write
     temp_fds: set[int] = set()
@@ -2703,9 +3122,18 @@ def test_root_replacement_during_transaction_is_rejected(
     monkeypatch.setattr(store_module.os, "fsync", replace_root_after_temp_fsync)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
-    _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+    _assert_error(
+        caught,
+        (TaskStoreErrorCode.IO_ERROR if os.name == "nt" else TaskStoreErrorCode.UNSAFE_STORE),
+    )
+    assert injected
     assert list(store_root.iterdir()) == []
-    assert not (moved / _record_name()).exists()
+    if os.name == "nt":
+        # The native root handle denies delete/rename for the full fsync and
+        # File-ID revalidation window, so the injected replacement never wins.
+        assert not moved.exists()
+    else:
+        assert not (moved / _record_name()).exists()
 
 
 def test_final_name_replacement_after_open_is_rejected(
@@ -2714,6 +3142,33 @@ def test_final_name_replacement_after_open_is_rejected(
     store.create(_task())
     path = store_root / _record_name()
     moved = store_root / "opened-record-moved"
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+        injected = False
+
+        def replace_after_open(candidate, *args, **kwargs):
+            nonlocal injected
+            fd, capability = real_open(candidate, *args, **kwargs)
+            if Path(candidate) == path and not injected:
+                injected = True
+                try:
+                    path.rename(moved)
+                except BaseException:
+                    os.close(fd)
+                    raise
+            return fd, capability
+
+        monkeypatch.setattr(windows_store_module, "open_private_file", replace_after_open)
+        with pytest.raises(TaskStoreError) as caught:
+            store.load(TASK_ID)
+        _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        assert injected
+        assert path.read_bytes() == _record_bytes(_task(), generation=0)
+        assert not moved.exists()
+        return
+
     real_open = store_module.os.open
     injected = False
 
@@ -2735,6 +3190,22 @@ def test_final_name_replacement_after_open_is_rejected(
 
 
 def test_runtime_root_and_final_mode_changes_are_rejected(store: TaskRunStore, store_root: Path):
+    if os.name == "nt":
+        _enable_windows_dacl_inheritance(store_root)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+        _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        set_private_dacl(store_root)
+        store.create(_task())
+        final = store_root / _record_name()
+        _enable_windows_dacl_inheritance(final)
+        with pytest.raises(TaskStoreError) as caught:
+            store.compare_and_set(TASK_ID, 0, _task())
+        _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        with pytest.raises(OSError, match="DACL is not protected"):
+            capture_windows_path(final, directory=False)
+        return
+
     store_root.chmod(0o755)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
@@ -2753,6 +3224,43 @@ def test_runtime_root_and_final_mode_changes_are_rejected(store: TaskRunStore, s
 def test_wrong_runtime_uid_is_rejected_before_publish(
     store: TaskRunStore, store_root: Path, monkeypatch, target: str
 ):
+    if os.name == "nt":
+        final = store_root / _record_name()
+        if target == "root":
+            _enable_windows_dacl_inheritance(store_root)
+        elif target == "final":
+            store.create(_task())
+            _enable_windows_dacl_inheritance(final)
+        else:
+            backend_type = type(store._windows_backend)  # noqa: SLF001
+            real_write_new = backend_type._write_new  # noqa: SLF001
+
+            def alter_temp_dacl(self, name: str, raw: bytes):
+                capability = real_write_new(self, name, raw)
+                if name.endswith(".tmp"):
+                    _enable_windows_dacl_inheritance(Path(capability.path))
+                return capability
+
+            monkeypatch.setattr(backend_type, "_write_new", alter_temp_dacl)
+        with pytest.raises(TaskStoreError) as caught:
+            if target == "final":
+                store.load(TASK_ID)
+            else:
+                store.create(_task())
+        _assert_error(
+            caught,
+            (
+                TaskStoreErrorCode.RESOURCE_EXHAUSTED
+                if target == "temp"
+                else TaskStoreErrorCode.UNSAFE_STORE
+            ),
+        )
+        if target == "final":
+            assert final.read_bytes() == _record_bytes(_task())
+        else:
+            assert not final.exists()
+        return
+
     if target == "final":
         store.create(_task())
     final = store_root / _record_name()
@@ -2815,6 +3323,89 @@ def test_root_and_final_probe_failures_close_fds_and_release_lease(
 ):
     store.create(_task())
     final = store_root / _record_name()
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open_root = windows_store_module.open_windows_directory_handle
+        real_open_file = windows_store_module.open_private_file
+        real_validate = windows_store_module.validate_windows_handle_path
+        real_capture = windows_store_module.capture_windows_fd
+        real_fstat = store_module.os.fstat
+        root_handles: set[int] = set()
+        final_fds: set[int] = set()
+        injected = False
+
+        def recording_root_open(*args, **kwargs):
+            handle = real_open_root(*args, **kwargs)
+            root_handles.add(handle)
+            return handle
+
+        def recording_file_open(path, *args, **kwargs):
+            fd, capability = real_open_file(path, *args, **kwargs)
+            if Path(path) == final:
+                final_fds.add(fd)
+            return fd, capability
+
+        def failing_root_validate(handle, path, *args, **kwargs):
+            nonlocal injected
+            if target == "root" and Path(path) == store_root and not injected:
+                injected = True
+                raise OSError("native root capability probe sentinel")
+            return real_validate(handle, path, *args, **kwargs)
+
+        def failing_final_fstat(fd: int):
+            nonlocal injected
+            if target == "final" and probe == "fstat-first" and fd in final_fds and not injected:
+                injected = True
+                raise OSError("native final metadata probe sentinel")
+            return real_fstat(fd)
+
+        def failing_final_capture(fd: int, *args, **kwargs):
+            nonlocal injected
+            if target == "final" and fd in final_fds and not injected:
+                injected = True
+                raise OSError("native final capability probe sentinel")
+            return real_capture(fd, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                windows_store_module,
+                "open_windows_directory_handle",
+                recording_root_open,
+            )
+            patch.setattr(windows_store_module, "open_private_file", recording_file_open)
+            patch.setattr(
+                windows_store_module,
+                "validate_windows_handle_path",
+                failing_root_validate,
+            )
+            patch.setattr(store_module.os, "fstat", failing_final_fstat)
+            if target == "final" and probe != "fstat-first":
+                patch.setattr(
+                    windows_store_module,
+                    "capture_windows_fd",
+                    failing_final_capture,
+                )
+            with pytest.raises(TaskStoreError) as caught:
+                if operation == "cas":
+                    store.compare_and_set(TASK_ID, 0, _task())
+                else:
+                    store.load(TASK_ID)
+            _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        assert injected
+        if target == "root":
+            assert root_handles
+            for handle in root_handles:
+                with pytest.raises(OSError):
+                    close_windows_handle(handle)
+        else:
+            assert final_fds
+            for fd in final_fds:
+                with pytest.raises(OSError):
+                    real_fstat(fd)
+        assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+        return
+
     root_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
     final_identity = (final.stat().st_dev, final.stat().st_ino)
     target_identity = root_identity if target == "root" else final_identity
@@ -2871,6 +3462,47 @@ def test_temp_probe_failures_close_fds_cleanup_when_identified_and_release_lease
     monkeypatch,
     probe: str,
 ):
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+        real_capture = windows_store_module.capture_windows_fd
+        real_fstat = store_module.os.fstat
+        temp_fds: set[int] = set()
+        injected = False
+
+        def recording_open(path, *args, **kwargs):
+            fd, capability = real_open(path, *args, **kwargs)
+            if Path(path).name.endswith(".tmp"):
+                temp_fds.add(fd)
+            return fd, capability
+
+        def failing_native_probe(fd: int, *args, **kwargs):
+            nonlocal injected
+            if fd in temp_fds and not injected:
+                injected = True
+                raise OSError(f"temp native {probe} probe sentinel")
+            return real_capture(fd, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+            patch.setattr(
+                windows_store_module,
+                "capture_windows_fd",
+                failing_native_probe,
+            )
+            with pytest.raises(TaskStoreError) as caught:
+                store.create(_task())
+            _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
+        assert injected
+        assert temp_fds
+        for fd in temp_fds:
+            with pytest.raises(OSError):
+                real_fstat(fd)
+        assert list(store_root.iterdir()) == []
+        assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
+        return
+
     real_open = store_module.os.open
     real_fstat = store_module.os.fstat
     real_inheritable = store_module.os.get_inheritable
@@ -2930,6 +3562,32 @@ def test_mutation_initial_record_failure_closes_owned_fds_and_releases_lease(
 ):
     store.create(_task())
     final = _write_record(store_root, b"{")
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+        real_fstat = store_module.os.fstat
+        owned_fds: set[int] = set()
+
+        def recording_open(path, *args, **kwargs):
+            fd, capability = real_open(path, *args, **kwargs)
+            if Path(path) == final:
+                owned_fds.add(fd)
+            return fd, capability
+
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+            with pytest.raises(TaskStoreError) as caught:
+                store.compare_and_set(TASK_ID, 0, _task())
+            _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+        assert owned_fds
+        for fd in owned_fds:
+            with pytest.raises(OSError):
+                real_fstat(fd)
+        _write_record(store_root, _record_bytes(_task()))
+        assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+        return
+
     root_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
     final_identity = (final.stat().st_dev, final.stat().st_ino)
     real_open = store_module.os.open
@@ -2964,6 +3622,45 @@ def test_mutation_initial_read_error_closes_owned_fds_preserves_record_and_relea
     store.create(_task())
     final = store_root / _record_name()
     before = final.read_bytes()
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_open = windows_store_module.open_private_file
+        real_pread = windows_store_module.pread
+        real_fstat = store_module.os.fstat
+        owned_fds: set[int] = set()
+        final_fds: set[int] = set()
+        injected = False
+
+        def recording_open(path, *args, **kwargs):
+            fd, capability = real_open(path, *args, **kwargs)
+            owned_fds.add(fd)
+            if Path(path) == final:
+                final_fds.add(fd)
+            return fd, capability
+
+        def failing_read(fd: int, size: int, offset: int) -> bytes:
+            nonlocal injected
+            if fd in final_fds and not injected:
+                injected = True
+                raise OSError("initial Windows pread sentinel")
+            return real_pread(fd, size, offset)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_store_module, "open_private_file", recording_open)
+            patch.setattr(windows_store_module, "pread", failing_read)
+            with pytest.raises(TaskStoreError) as caught:
+                store.compare_and_set(TASK_ID, 0, _task())
+            _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
+        assert injected
+        assert final.read_bytes() == before
+        assert owned_fds
+        for fd in owned_fds:
+            with pytest.raises(OSError):
+                real_fstat(fd)
+        assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+        return
+
     root_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
     final_identity = (final.stat().st_dev, final.stat().st_ino)
     real_open = store_module.os.open
@@ -3036,6 +3733,22 @@ def test_cleanup_stat_failure_preserves_primary_closes_root_and_releases_lease(
 def test_unverified_platform_and_missing_no_follow_capability_fail_closed(
     store: TaskRunStore, store_root: Path, monkeypatch
 ):
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store_module.sys, "platform", "unsupported-windows")
+            with pytest.raises(TaskStoreError) as caught:
+                store.create(_task())
+            _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        with monkeypatch.context() as patch:
+            patch.delattr(windows_store_module, "open_windows_directory_handle")
+            with pytest.raises(TaskStoreError) as caught:
+                store.create(_task())
+            _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        assert list(store_root.iterdir()) == []
+        return
+
     with monkeypatch.context() as patch:
         patch.setattr(store_module.sys, "platform", "win32")
         with pytest.raises(TaskStoreError) as caught:
@@ -3049,32 +3762,50 @@ def test_unverified_platform_and_missing_no_follow_capability_fail_closed(
     assert list(store_root.iterdir()) == []
 
 
+_WINDOWS_NATIVE_STORAGE_CAPABILITIES = (
+    "capture_windows_fd",
+    "capture_windows_path",
+    "close_windows_handle",
+    "delete_windows_file",
+    "open_private_file",
+    "open_windows_directory_handle",
+    "pread",
+    "replace_windows_file",
+    "validate_windows_handle_path",
+    "validate_windows_path",
+)
+
+
 @pytest.mark.parametrize(
     "missing",
-    [
-        "O_RDONLY",
-        "O_WRONLY",
-        "O_CREAT",
-        "O_EXCL",
-        "O_NOFOLLOW",
-        "O_CLOEXEC",
-        "O_DIRECTORY",
-        "open",
-        "stat",
-        "fstat",
-        "write",
-        "read",
-        "fsync",
-        "ftruncate",
-        "scandir",
-        "replace",
-        "unlink",
-        "close",
-        "geteuid",
-        "get_inheritable",
-        "supports_dir_fd",
-        "supports_follow_symlinks",
-    ],
+    (
+        _WINDOWS_NATIVE_STORAGE_CAPABILITIES
+        if os.name == "nt"
+        else [
+            "O_RDONLY",
+            "O_WRONLY",
+            "O_CREAT",
+            "O_EXCL",
+            "O_NOFOLLOW",
+            "O_CLOEXEC",
+            "O_DIRECTORY",
+            "open",
+            "stat",
+            "fstat",
+            "write",
+            "read",
+            "fsync",
+            "ftruncate",
+            "scandir",
+            "replace",
+            "unlink",
+            "close",
+            "geteuid",
+            "get_inheritable",
+            "supports_dir_fd",
+            "supports_follow_symlinks",
+        ]
+    ),
 )
 def test_each_missing_storage_capability_fails_before_lease_or_storage(
     store: TaskRunStore, store_root: Path, monkeypatch, missing: str
@@ -3087,7 +3818,12 @@ def test_each_missing_storage_capability_fails_before_lease_or_storage(
 
     with monkeypatch.context() as patch:
         patch.setattr(ResourceLeaseManager, "acquire", lease_probe)
-        patch.delattr(store_module.os, missing)
+        if os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            patch.delattr(windows_store_module, missing)
+        else:
+            patch.delattr(store_module.os, missing)
         with pytest.raises(TaskStoreError) as caught:
             store.create(_task())
         _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
@@ -3097,33 +3833,73 @@ def test_each_missing_storage_capability_fails_before_lease_or_storage(
 
 @pytest.mark.parametrize(
     "invalid",
-    [
-        ("O_EXCL", True),
-        ("O_CLOEXEC", object()),
-        ("write", None),
-        ("ftruncate", None),
-        ("scandir", None),
-        ("replace", "not-callable"),
-        ("supports_dir_fd", ()),
-        ("supports_follow_symlinks", frozenset()),
-    ],
+    (
+        [
+            ("capture_windows_fd", None),
+            ("delete_windows_file", object()),
+            ("open_private_file", "not-callable"),
+            ("replace_windows_file", False),
+            ("validate_windows_path", ()),
+        ]
+        if os.name == "nt"
+        else [
+            ("O_EXCL", True),
+            ("O_CLOEXEC", object()),
+            ("write", None),
+            ("ftruncate", None),
+            ("scandir", None),
+            ("replace", "not-callable"),
+            ("supports_dir_fd", ()),
+            ("supports_follow_symlinks", frozenset()),
+        ]
+    ),
 )
 def test_storage_capability_types_are_exact_and_fail_closed(
     store: TaskRunStore, store_root: Path, monkeypatch, invalid
 ):
     name, value = invalid
     with monkeypatch.context() as patch:
-        patch.setattr(store_module.os, name, value)
+        if os.name == "nt":
+            import vibecad.workflow.windows_store as windows_store_module
+
+            patch.setattr(windows_store_module, name, value)
+        else:
+            patch.setattr(store_module.os, name, value)
         with pytest.raises(TaskStoreError) as caught:
             store.create(_task())
         _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
     assert list(store_root.iterdir()) == []
 
 
-@pytest.mark.parametrize("missing_membership", ["open", "stat-dir", "stat-follow", "unlink"])
+@pytest.mark.parametrize(
+    "missing_membership",
+    (
+        ["parent-pin", "reparse-validation", "file-id-revalidation", "delete-binding"]
+        if os.name == "nt"
+        else ["open", "stat-dir", "stat-follow", "unlink"]
+    ),
+)
 def test_required_dir_fd_and_no_follow_memberships_fail_closed(
     store: TaskRunStore, store_root: Path, monkeypatch, missing_membership: str
 ):
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        binding = {
+            "parent-pin": "open_windows_directory_handle",
+            "reparse-validation": "validate_windows_handle_path",
+            "file-id-revalidation": "capture_windows_fd",
+            "delete-binding": "delete_windows_file",
+        }[missing_membership]
+        assert binding in windows_store_module._REQUIRED_NATIVE_CALLABLES  # noqa: SLF001
+        with monkeypatch.context() as patch:
+            patch.delattr(windows_store_module, binding)
+            with pytest.raises(TaskStoreError) as caught:
+                store.create(_task())
+            _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+        assert list(store_root.iterdir()) == []
+        return
+
     dir_fd = set(store_module.os.supports_dir_fd)
     follow = set(store_module.os.supports_follow_symlinks)
     if missing_membership == "open":
@@ -3147,6 +3923,45 @@ def test_directory_and_final_open_calls_are_relative_fail_closed_and_noninherita
     store: TaskRunStore, monkeypatch
 ):
     store.create(_task())
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_directory_open = windows_store_module.open_windows_directory_handle
+        real_file_open = windows_store_module.open_private_file
+        directory_calls: list[tuple[Path, dict[str, object]]] = []
+        file_calls: list[tuple[Path, dict[str, object], bool]] = []
+
+        def recording_directory_open(path, *args, **kwargs):
+            handle = real_directory_open(path, *args, **kwargs)
+            directory_calls.append((Path(path), dict(kwargs)))
+            return handle
+
+        def recording_file_open(path, *args, **kwargs):
+            fd, capability = real_file_open(path, *args, **kwargs)
+            file_calls.append((Path(path), dict(kwargs), os.get_inheritable(fd)))
+            return fd, capability
+
+        monkeypatch.setattr(
+            windows_store_module,
+            "open_windows_directory_handle",
+            recording_directory_open,
+        )
+        monkeypatch.setattr(windows_store_module, "open_private_file", recording_file_open)
+        store.load(TASK_ID)
+        assert directory_calls
+        assert all(path.is_absolute() for path, _kwargs in directory_calls)
+        assert all(kwargs["inheritable"] is False for _path, kwargs in directory_calls)
+        assert all(kwargs["deny_delete"] is True for _path, kwargs in directory_calls)
+        assert file_calls
+        expected_final = Path(store._windows_backend._root) / _record_name()  # noqa: SLF001
+        for final_path, kwargs, inheritable in file_calls:
+            assert final_path == expected_final
+            assert kwargs["create"] is False
+            assert kwargs["read_write"] is False
+            assert kwargs["expected_parent"] == store._windows_backend._root_capability  # noqa: SLF001
+            assert inheritable is False
+        return
+
     real_open = store_module.os.open
     calls: list[tuple[str, int, int | None, int, bool]] = []
 
@@ -3187,6 +4002,29 @@ def test_directory_and_final_open_calls_are_relative_fail_closed_and_noninherita
 def test_directory_fsync_failure_reports_committed_generation(
     store: TaskRunStore, store_root: Path, monkeypatch
 ):
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_replace = windows_store_module.replace_windows_file
+        injected = False
+
+        def publish_then_fail(*args, **kwargs):
+            nonlocal injected
+            capability = real_replace(*args, **kwargs)
+            if not injected:
+                injected = True
+                raise OSError("MoveFileExW write-through acknowledgement failure")
+            return capability
+
+        monkeypatch.setattr(windows_store_module, "replace_windows_file", publish_then_fail)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+        error = _assert_error(caught, TaskStoreErrorCode.DURABILITY_UNCERTAIN)
+        assert injected
+        assert error.committed_generation == 0
+        assert (store_root / _record_name()).read_bytes() == _record_bytes(_task())
+        return
+
     real_fsync = store_module.os.fsync
     store_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
     directory_calls = 0
@@ -3240,6 +4078,29 @@ def test_cas_directory_fsync_failure_reports_new_generation(
     monkeypatch,
 ):
     store.create(_task())
+    if os.name == "nt":
+        import vibecad.workflow.windows_store as windows_store_module
+
+        real_replace = windows_store_module.replace_windows_file
+        injected = False
+
+        def publish_then_fail(*args, **kwargs):
+            nonlocal injected
+            capability = real_replace(*args, **kwargs)
+            if not injected:
+                injected = True
+                raise OSError("CAS MoveFileExW write-through acknowledgement failure")
+            return capability
+
+        monkeypatch.setattr(windows_store_module, "replace_windows_file", publish_then_fail)
+        with pytest.raises(TaskStoreError) as caught:
+            store.compare_and_set(TASK_ID, 0, _task())
+        error = _assert_error(caught, TaskStoreErrorCode.DURABILITY_UNCERTAIN)
+        assert injected
+        assert error.committed_generation == 1
+        assert store.load(TASK_ID).generation == 1
+        return
+
     real_fsync = store_module.os.fsync
     store_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
     directory_calls = 0
@@ -3420,6 +4281,27 @@ def test_load_presence_probe_tolerates_inode_unlinked_by_atomic_replace(
     monkeypatch,
 ):
     created = store.create(_task())
+    if os.name == "nt":
+        backend_type = type(store._windows_backend)  # noqa: SLF001
+        real_exists = backend_type.exists
+        replaced = False
+
+        def replace_after_presence_probe(self, task_id: str) -> bool:
+            nonlocal replaced
+            result = real_exists(self, task_id)
+            if result and not replaced:
+                replaced = True
+                store.compare_and_set(TASK_ID, 0, _task())
+            return result
+
+        monkeypatch.setattr(backend_type, "exists", replace_after_presence_probe)
+        loaded = store.load(TASK_ID)
+        assert replaced
+        assert created.generation == 0
+        assert loaded.generation == 1
+        assert loaded.task_run == created.task_run
+        return
+
     real_path_stat = store_module._path_stat
     path_stat_calls = 0
 
@@ -3470,7 +4352,6 @@ def test_load_fails_closed_when_authoritative_locked_read_is_unsafe(
     assert load_calls == 1
 
 
-@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
 def test_two_processes_create_one_record(store_root: Path, lease_root: Path, tmp_path: Path):
     gate = tmp_path / "gate"
     script = """
@@ -3512,7 +4393,7 @@ except TaskStoreError as exc:
     gate.write_text("go", encoding="utf-8")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=20 if os.name == "nt" else 5)
         assert process.returncode == 0, stderr
         outputs.append(stdout.strip())
     assert outputs.count("ok") == 1
@@ -3526,7 +4407,6 @@ except TaskStoreError as exc:
     assert final_store.load(TASK_ID).generation == 0
 
 
-@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
 def test_cross_process_record_n_plus_one_never_creates_task_locks(
     store: TaskRunStore,
     store_root: Path,
@@ -3592,7 +4472,7 @@ else:
     gate.write_text("go", encoding="utf-8")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=20 if os.name == "nt" else 10)
         assert process.returncode == 0, stderr
         outputs.append(stdout.strip())
     assert outputs == ["resource_exhausted", "resource_exhausted"]
@@ -3606,7 +4486,6 @@ else:
     )
 
 
-@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
 def test_constructor_accepts_a_safely_contended_fixed_catalog_entry(
     store_root: Path,
     lease_root: Path,
@@ -3631,7 +4510,7 @@ print('ok')
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=15 if os.name == "nt" else 10,
             env=env,
         )
     finally:
@@ -3657,7 +4536,7 @@ def test_catalog_then_task_contention_is_bounded_and_releases_catalog(
 
     thread = threading.Thread(target=contend)
     thread.start()
-    thread.join(timeout=5)
+    thread.join(timeout=10 if os.name == "nt" else 5)
     assert not thread.is_alive()
     assert result == [TaskStoreErrorCode.LOCK_UNAVAILABLE]
     created = store.create(_task(OTHER_TASK_ID))
@@ -3665,7 +4544,6 @@ def test_catalog_then_task_contention_is_bounded_and_releases_catalog(
     held.release(owner_token=held.owner_token)
 
 
-@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
 def test_two_processes_compare_and_set_have_one_winner(
     store: TaskRunStore, store_root: Path, lease_root: Path, tmp_path: Path
 ):
@@ -3710,7 +4588,7 @@ except TaskStoreError as exc:
     gate.write_text("go", encoding="utf-8")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=20 if os.name == "nt" else 5)
         assert process.returncode == 0, stderr
         outputs.append(stdout.strip())
     assert outputs.count("ok") == 1
@@ -3994,10 +4872,12 @@ def test_source_uses_only_closed_storage_and_import_surfaces():
         "secrets",
         "stat",
         "sys",
+        "time",
         "vibecad.workflow.errors",
         "vibecad.workflow.contracts",
         "vibecad.workflow.lease",
         "vibecad.workflow.state",
+        "vibecad.workflow.windows_store",
     }
     assert imported <= allowed_imports
     assert aliases == []
@@ -4069,6 +4949,7 @@ def test_source_uses_only_closed_storage_and_import_surfaces():
         "ftruncate",
         "geteuid",
         "get_inheritable",
+        "name",
         "open",
         "read",
         "replace",

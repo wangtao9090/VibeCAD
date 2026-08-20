@@ -135,11 +135,19 @@ if cad_report.conforms or cad_codes != ("cad_invalid_case",):
 
 
 def test_conformance_does_not_require_package_initializer_edits():
+    runtime_initializer = (_ROOT / "src/vibecad/runtime/__init__.py").read_bytes()
+    interaction_initializer = (_ROOT / "src/vibecad/interaction/__init__.py").read_bytes()
+    # The invariant is source content, not Git's Windows checkout conversion.
+    # Keep the canonical LF pins used on macOS/Linux while comparing the same
+    # source bytes on a CRLF Windows worktree.
+    if sys.platform == "win32":
+        runtime_initializer = runtime_initializer.replace(b"\r\n", b"\n")
+        interaction_initializer = interaction_initializer.replace(b"\r\n", b"\n")
     assert (
-        hashlib.sha256((_ROOT / "src/vibecad/runtime/__init__.py").read_bytes()).hexdigest()
+        hashlib.sha256(runtime_initializer).hexdigest()
         == "217184fec30d06cbe7f79f0c54589462f2ef1f23afb4ec75c36d37e02b86dee1"
     )
     assert (
-        hashlib.sha256((_ROOT / "src/vibecad/interaction/__init__.py").read_bytes()).hexdigest()
+        hashlib.sha256(interaction_initializer).hexdigest()
         == "f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5"
     )

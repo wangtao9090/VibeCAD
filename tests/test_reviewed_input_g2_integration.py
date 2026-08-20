@@ -27,6 +27,7 @@ from tests.test_program_executor import _FakeSession
 from tests.test_reviewed_artifact_chain_integration import (
     _install_managed_import_apply,
 )
+from vibecad import _file_compat
 from vibecad.application.agent import AgentApplication
 from vibecad.application.public_surface import public_tool_specs
 from vibecad.application.reviewed_input_ingress import (
@@ -198,19 +199,41 @@ class _ProgramBeginWorker:
         session: object,
         artifact_snapshot: dict[str, object] | None = None,
         artifact_snapshot_fd: int | None = None,
+        artifact_snapshot_capability: dict[str, object] | None = None,
     ) -> tuple[NormalizedToolOutcome, ...]:
         assert session is self.session
-        assert (artifact_snapshot is None) == (artifact_snapshot_fd is None)
+        if sys.platform == "win32":
+            assert (artifact_snapshot is None) == (artifact_snapshot_capability is None)
+            assert artifact_snapshot_fd is None
+        else:
+            assert (artifact_snapshot is None) == (artifact_snapshot_fd is None)
+            assert artifact_snapshot_capability is None
         service = worker_service_module.WorkerService(
             "worker_generation_0123456789abcdef0123456789abcdef"
         )
         candidate_id = "worker_candidate_0123456789abcdef0123456789abcdef"
         session_id = "worker_session_0123456789abcdef0123456789abcdef"
+        directory_capability = None
+        if sys.platform == "win32":
+            candidate_root = candidate.model_path.parent / "worker-candidate"
+            candidate_root.mkdir(parents=True, exist_ok=True)
+            _file_compat.set_private_dacl(candidate_root)
+            model_path = candidate_root / "model.FCStd"
+            step_path = candidate_root / "model.step"
+            model_path.write_bytes(b"candidate-model")
+            step_path.write_bytes(b"candidate-step")
+            _file_compat.set_private_dacl(model_path)
+            _file_compat.set_private_dacl(step_path)
+            directory_capability = _file_compat.capture_windows_path(
+                candidate_root,
+                directory=True,
+            )
         service._candidates[candidate_id] = SimpleNamespace(  # noqa: SLF001
             candidate_id=candidate_id,
             project_id=candidate.project_id,
             revision_id=candidate.revision_id,
             base_revision_id=candidate.base_revision,
+            directory_capability=directory_capability,
         )
         service._sessions[session_id] = SimpleNamespace(  # noqa: SLF001
             session_id=session_id,
@@ -226,11 +249,17 @@ class _ProgramBeginWorker:
         }
         descriptors: tuple[int, ...] = ()
         if artifact_snapshot is not None:
-            assert artifact_snapshot_fd is not None
-            os.fstat(artifact_snapshot_fd)
             params["artifact_snapshot"] = artifact_snapshot
-            descriptors = (artifact_snapshot_fd,)
-            self.snapshot_entries.append(tuple(sorted(os.listdir(artifact_snapshot_fd))))
+            if sys.platform == "win32":
+                assert artifact_snapshot_capability is not None
+                params["artifact_path_capability"] = artifact_snapshot_capability
+                root = Path(artifact_snapshot_capability["path"])
+                self.snapshot_entries.append(tuple(sorted(path.name for path in root.iterdir())))
+            else:
+                assert artifact_snapshot_fd is not None
+                os.fstat(artifact_snapshot_fd)
+                descriptors = (artifact_snapshot_fd,)
+                self.snapshot_entries.append(tuple(sorted(os.listdir(artifact_snapshot_fd))))
         self.begin_envelopes.append(artifact_snapshot)
         begin = service.dispatch("program.begin", params, descriptors)
         outcomes: list[NormalizedToolOutcome] = []
@@ -281,6 +310,8 @@ def _install_candidate(
         project_id=project_id,
         revision_id=revision_id,
         base_revision=base_head.revision_id,
+        model_path=active.model_path,
+        step_path=active.step_path,
     )
     state = worker_port_module._Capability(  # noqa: SLF001
         kind="candidate",

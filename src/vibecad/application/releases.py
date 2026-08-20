@@ -6,11 +6,11 @@ import csv
 import hashlib
 import io
 import json
-import os
 import re
 import secrets
 import shutil
 import stat
+import sys
 import threading
 import time
 import zipfile
@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
+from vibecad import _file_compat
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     RevisionArtifactRef,
@@ -26,6 +27,7 @@ from vibecad.execution.revisions import (
     RevisionStoreErrorCode,
 )
 from vibecad.interaction.cad import CadExecutionPort, ReleaseCadEvidence
+from vibecad.interaction.storage import os
 from vibecad.validation import BomObservation
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 from vibecad.workflow.state import TaskArtifactRef, TaskRun, TaskStatus, VerificationReport
@@ -490,6 +492,43 @@ def _write_bytes(path: Path, raw: bytes) -> None:
         os.close(descriptor)
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _private_directory(path: Path) -> bool:
+    """Validate the platform's private-directory security boundary."""
+
+    if _is_windows():
+        try:
+            _file_compat.capture_windows_path(path, directory=True)
+        except OSError:
+            return False
+        return True
+    try:
+        value = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(value.st_mode)
+        and stat.S_IMODE(value.st_mode) == 0o700
+        and value.st_uid == os.geteuid()
+    )
+
+
+def _private_regular_stat(value: os.stat_result) -> bool:
+    """Check the POSIX portion of a regular-file boundary.
+
+    On Windows, ``_StorageOS.fstat`` has already authenticated the opened
+    descriptor against the file's protected DACL and File ID.  UID/mode bits
+    are not an access-control authority there and must not be used as one.
+    """
+
+    return _is_windows() or (
+        stat.S_IMODE(value.st_mode) == 0o600 and value.st_uid == os.geteuid()
+    )
+
+
 def _read_file_bytes(path: Path, *, maximum_bytes: int) -> bytes:
     descriptor = -1
     try:
@@ -503,8 +542,7 @@ def _read_file_bytes(path: Path, *, maximum_bytes: int) -> bytes:
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != 0o600
-            or before.st_uid != os.geteuid()
+            or not _private_regular_stat(before)
             or before.st_nlink != 1
             or not 1 <= before.st_size <= maximum_bytes
         ):
@@ -558,8 +596,7 @@ def _hash_file(path: Path, *, maximum_bytes: int) -> tuple[int, str]:
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != 0o600
-            or before.st_uid != os.geteuid()
+            or not _private_regular_stat(before)
             or before.st_nlink != 1
             or not 1 <= before.st_size <= maximum_bytes
         ):
@@ -622,7 +659,7 @@ def _copy_source_to_zip(
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.geteuid()
+            or (not _is_windows() and before.st_uid != os.geteuid())
             or before.st_nlink != 1
             or before.st_size != expected.size_bytes
         ):
@@ -685,12 +722,10 @@ class ReleaseStore:
             value = self._root.lstat()
         except OSError:
             _raise(ReleaseErrorCode.STORE_FAILURE)
-        if (
-            not stat.S_ISDIR(value.st_mode)
-            or stat.S_IMODE(value.st_mode) != 0o700
-            or value.st_uid != os.geteuid()
-            or (value.st_dev, value.st_ino) != self._identity
-        ):
+        if not _private_directory(self._root) or (
+            value.st_dev,
+            value.st_ino,
+        ) != self._identity:
             _raise(ReleaseErrorCode.INTEGRITY_FAILURE)
 
     @staticmethod
@@ -711,16 +746,12 @@ class ReleaseStore:
             _raise(ReleaseErrorCode.INVALID_INPUT)
         directory = self._directory(release_id)
         try:
-            value = directory.lstat()
+            directory.lstat()
         except FileNotFoundError:
             _raise(ReleaseErrorCode.NOT_FOUND)
         except OSError:
             _raise(ReleaseErrorCode.STORE_FAILURE)
-        if (
-            not stat.S_ISDIR(value.st_mode)
-            or stat.S_IMODE(value.st_mode) != 0o700
-            or value.st_uid != os.geteuid()
-        ):
+        if not _private_directory(directory):
             _raise(ReleaseErrorCode.INTEGRITY_FAILURE)
         try:
             names = tuple(sorted(path.name for path in directory.iterdir()))
@@ -811,7 +842,12 @@ class ReleaseStore:
                     while chunk := source.read(_COPY_CHUNK_BYTES):
                         package_raw_digest.update(chunk)
                         package_size += len(chunk)
-                    os.fsync(source.fileno())
+                    # Windows rejects FlushFileBuffers for this read-only CRT
+                    # descriptor.  The writer has already closed the ZIP handle;
+                    # the following protected re-open and identity checks provide
+                    # the corresponding fail-closed boundary.
+                    if not _is_windows():
+                        os.fsync(source.fileno())
                 if not 1 <= package_size <= MAX_RELEASE_RESOURCE_BYTES:
                     _raise(ReleaseErrorCode.RESOURCE_EXHAUSTED)
                 completed = replace(
@@ -824,7 +860,13 @@ class ReleaseStore:
                     ),
                 )
                 _write_bytes(temporary / "record.json", self._record_raw(completed))
-                os.replace(temporary, target)
+                # A release directory is published only into an absent name.
+                # The Windows adapter's directory rename validates both parent
+                # capabilities; ``replace`` is deliberately file-only there.
+                if _is_windows():
+                    os.rename(temporary, target)
+                else:
+                    os.replace(temporary, target)
                 root_fd = os.open(self._root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
                 try:
                     os.fsync(root_fd)

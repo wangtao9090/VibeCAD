@@ -16,10 +16,11 @@ import os
 import re
 import secrets
 import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 __all__ = (
     "MAX_V2_CONNECTIONS",
@@ -639,6 +640,30 @@ _IMPORT_LOCATOR_KEYS = {
 }
 
 
+def _import_identity_wire(value: int, *, nybbles: int) -> int | str:
+    if type(value) is not int or value < 0:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    if sys.platform == "win32" and value > _MAX_SAFE_INTEGER:
+        if value >= 1 << (nybbles * 4):
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return f"{value:0{nybbles}x}"
+    return value
+
+
+def _import_identity(value: object, *, nybbles: int) -> int:
+    if type(value) is int:
+        return _nonnegative_integer(value)
+    if (
+        sys.platform == "win32"
+        and type(value) is str
+        and re.fullmatch(rf"[0-9a-f]{{{nybbles}}}", value) is not None
+    ):
+        parsed = int(value, 16)
+        if parsed > _MAX_SAFE_INTEGER:
+            return parsed
+    raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+
+
 def _validate_import_request(value: object) -> dict[str, object]:
     request = _exact(value, _IMPORT_REQUEST_KEYS)
     if _positive_integer(request["schema_version"]) != 1 or request["kind"] != "import_fcstd":
@@ -651,7 +676,9 @@ def _import_locator_body(value: object) -> dict[str, object]:
     locator = _exact(value, _IMPORT_LOCATOR_KEYS)
     if _positive_integer(locator["schema_version"]) != 1:
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
-    for key in ("dev", "ino", "mode", "uid"):
+    _import_identity(locator["dev"], nybbles=16)
+    _import_identity(locator["ino"], nybbles=32)
+    for key in ("mode", "uid"):
         _nonnegative_integer(locator[key])
     if _positive_integer(locator["nlink"]) != 1:
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
@@ -662,7 +689,9 @@ def _import_locator_body(value: object) -> dict[str, object]:
         if type(locator[key]) is not str or _TIMESTAMP_RE.fullmatch(locator[key]) is None:
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
     _identifier(locator["digest"], _DIGEST_RE)
-    if not stat.S_ISREG(int(locator["mode"])) or int(locator["uid"]) != os.geteuid():
+    if not stat.S_ISREG(int(locator["mode"])) or (
+        sys.platform != "win32" and int(locator["uid"]) != os.geteuid()
+    ):
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
     return _without(locator, "digest")
 
@@ -693,14 +722,14 @@ def bind_v2_import_locator(
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
     body: dict[str, object] = {
         "schema_version": 1,
-        "dev": source.st_dev,
-        "ino": source.st_ino,
+        "dev": _import_identity_wire(source.st_dev, nybbles=16),
+        "ino": _import_identity_wire(source.st_ino, nybbles=32),
         "mode": source.st_mode,
         "uid": source.st_uid,
         "nlink": source.st_nlink,
         "size": source.st_size,
         "mtime_ns": str(source.st_mtime_ns),
-        "ctime_ns": str(source.st_ctime_ns),
+        "ctime_ns": str(source.st_birthtime_ns if sys.platform == "win32" else source.st_ctime_ns),
     }
     _import_locator_body(body | {"digest": "0" * 64})
     digest = hashlib.sha256(
@@ -790,15 +819,28 @@ def _claim_local_path(value: object, *, checkout_id: str) -> str:
         not character.isprintable() for character in value
     ):
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
-    path = PurePosixPath(value)
-    if (
-        not path.is_absolute()
-        or path.root != "/"
-        or str(path) != value
-        or ".." in path.parts
-        or path.name != "model.FCStd"
-        or path.parent.name != checkout_id
-    ):
+    if sys.platform == "win32":
+        path = PureWindowsPath(value)
+        valid = (
+            path.is_absolute()
+            and re.fullmatch(r"[A-Za-z]:", path.drive) is not None
+            and path.root == "\\"
+            and str(path) == value
+            and ".." not in path.parts
+            and path.name == "model.FCStd"
+            and path.parent.name == checkout_id
+        )
+    else:
+        path = PurePosixPath(value)
+        valid = (
+            path.is_absolute()
+            and path.root == "/"
+            and str(path) == value
+            and ".." not in path.parts
+            and path.name == "model.FCStd"
+            and path.parent.name == checkout_id
+        )
+    if not valid:
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
     return value
 

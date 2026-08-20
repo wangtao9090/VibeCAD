@@ -655,8 +655,9 @@ def test_real_freecad_batch_create_edit_save_reopen_and_invalid_rollback(
     output_root.mkdir()
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part, Sketcher
 from vibecad.parametric.freecad_partdesign_pattern_rules import (

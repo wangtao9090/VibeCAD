@@ -10,6 +10,7 @@ import re
 import secrets
 import socket
 import stat
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -21,6 +22,23 @@ from vibecad.interaction.protocol_v2 import (
     V2_VERSION,
 )
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+
+if sys.platform == "win32":
+    from vibecad._file_compat import (
+        WindowsPathCapability,
+        capture_windows_fd,
+        capture_windows_path,
+        delete_windows_file,
+        ensure_private_directory,
+        open_private_file,
+        rename_windows_file,
+        validate_windows_path,
+    )
+    from vibecad.daemon.windows_ipc import (
+        WindowsNamedPipeListener,
+        connect_named_pipe,
+        named_pipe_name,
+    )
 
 DAEMON_AUTHORITY = "vibecad.kernel-daemon.authority.v1"
 DAEMON_DIRECTORY_NAME = "daemon"
@@ -395,7 +413,45 @@ def _same_file(value: os.stat_result, binding: DaemonFileBinding) -> bool:
     return _file_binding(value) == binding
 
 
+def _windows_root_capability(root: SafeRoot) -> WindowsPathCapability:
+    """Recapture the exact private run root through its native File ID."""
+
+    try:
+        capability = capture_windows_path(root.path, directory=True)
+        if (capability.volume, capability.file_id) != root.identity:
+            raise OSError("daemon run root identity changed")
+        return capability
+    except (OSError, TypeError, ValueError):
+        raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED) from None
+
+
+def _windows_stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
+    """Return real stable NT file metadata, excluding path-varying ChangeTime."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        int(getattr(value, "st_birthtime_ns", value.st_ctime_ns)),
+        int(getattr(value, "st_file_attributes", 0)),
+        int(getattr(value, "st_reparse_tag", 0)),
+    )
+
+
 def _safe_endpoint(root: SafeRoot, value: os.stat_result) -> bool:
+    if sys.platform == "win32":
+        attributes = getattr(value, "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return (
+            stat.S_ISREG(value.st_mode)
+            and not attributes & reparse
+            and value.st_nlink == 1
+            and value.st_dev == root.identity[0]
+            and 0 < value.st_size <= 256
+        )
     return (
         stat.S_ISSOCK(value.st_mode)
         and value.st_uid == root.uid
@@ -405,8 +461,17 @@ def _safe_endpoint(root: SafeRoot, value: os.stat_result) -> bool:
     )
 
 
-def _stat_entry(root_fd: int, name: str) -> os.stat_result | None:
+def _stat_entry(
+    root_fd: int,
+    name: str,
+    *,
+    root: SafeRoot | None = None,
+) -> os.stat_result | None:
     try:
+        if sys.platform == "win32":
+            if type(root) is not SafeRoot:
+                raise DaemonError(DaemonErrorCode.INVALID_STATE)
+            return os.stat(root.path / name, follow_symlinks=False)
         return os.stat(name, dir_fd=root_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
@@ -419,10 +484,31 @@ def _require_endpoint(
     *,
     expected: DaemonEndpointBinding | None = None,
 ) -> DaemonEndpointBinding:
+    if sys.platform == "win32":
+        try:
+            root_capability = _windows_root_capability(root)
+            endpoint_path = root.path / DAEMON_ENDPOINT_NAME
+            capability = capture_windows_path(endpoint_path, directory=False)
+            current = endpoint_path.stat(follow_symlinks=False)
+            if (
+                capability.volume != root_capability.volume
+                or (capability.volume, capability.file_id)
+                != (current.st_dev, current.st_ino)
+                or not _safe_endpoint(root, current)
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            binding = _endpoint_binding(current)
+            if expected is not None and binding != expected:
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            return binding
+        except DaemonError:
+            raise
+        except OSError:
+            raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED) from None
     root_fd = -1
     try:
         root_fd = root.open()
-        current = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME)
+        current = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME, root=root)
         if current is None or not _safe_endpoint(root, current):
             raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
         binding = _endpoint_binding(current)
@@ -442,6 +528,28 @@ def _require_endpoint(
 def prepare_run_root(layout: ApplicationDataLayout) -> SafeRoot:
     if type(layout) is not ApplicationDataLayout:
         raise DaemonError(DaemonErrorCode.INVALID_ROOT)
+    if sys.platform == "win32":
+        try:
+            layout.require_current(layout.root)
+            layout.require_current(layout.locks)
+            path = daemon_run_root(layout.root)
+            data_root = capture_windows_path(layout.root, directory=True)
+            if (data_root.volume, data_root.file_id) != layout.identity_for(layout.root):
+                raise DaemonError(DaemonErrorCode.UNSAFE_ROOT)
+            capability = ensure_private_directory(
+                path,
+                expected_parent=data_root,
+            )
+            run_root = SafeRoot(path)
+            if run_root.identity != (capability.volume, capability.file_id):
+                raise DaemonError(DaemonErrorCode.UNSAFE_ROOT)
+            layout.require_current(layout.root)
+            layout.require_current(layout.locks)
+            return run_root
+        except DaemonError:
+            raise
+        except (ApplicationDataError, StorageFailure, OSError):
+            raise DaemonError(DaemonErrorCode.UNSAFE_ROOT) from None
     data_root = None
     root_fd = -1
     child_fd = -1
@@ -476,9 +584,74 @@ def prepare_run_root(layout: ApplicationDataLayout) -> SafeRoot:
                     os.close(fd)
 
 
-def bind_endpoint(root: SafeRoot) -> tuple[socket.socket, DaemonEndpointBinding]:
+def bind_endpoint(root: SafeRoot) -> tuple[object, DaemonEndpointBinding]:
     if type(root) is not SafeRoot:
         raise DaemonError(DaemonErrorCode.UNSAFE_ROOT)
+    if sys.platform == "win32":
+        listener = None
+        marker = root.path / DAEMON_ENDPOINT_NAME
+        marker_capability = None
+        published = False
+        try:
+            if os.path.lexists(marker):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            parent = _windows_root_capability(root)
+            name = named_pipe_name(root.path)
+            listener = WindowsNamedPipeListener(name)
+            raw = name.encode("ascii")
+            descriptor, marker_capability = open_private_file(
+                marker,
+                create=True,
+                read_write=True,
+                exclusive=True,
+                expected_parent=parent,
+            )
+            try:
+                os.set_inheritable(descriptor, False)
+                written = os.write(descriptor, raw)
+                if written != len(raw):
+                    raise OSError("short daemon endpoint marker write")
+                os.fsync(descriptor)
+                opened = os.fstat(descriptor)
+                recaptured = capture_windows_fd(
+                    descriptor,
+                    directory=False,
+                    generation_token=marker_capability.generation_token,
+                )
+                if recaptured != marker_capability:
+                    raise OSError("daemon endpoint marker identity changed")
+            finally:
+                os.close(descriptor)
+            validate_windows_path(marker_capability, directory=False)
+            current = marker.stat(follow_symlinks=False)
+            if (
+                not _safe_endpoint(root, current)
+                or (marker_capability.volume, marker_capability.file_id)
+                != (current.st_dev, current.st_ino)
+                or _windows_stable_file_stat(current)
+                != _windows_stable_file_stat(opened)
+                or listener.get_inheritable()
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            binding = _endpoint_binding(current)
+            published = True
+            return listener, binding
+        except DaemonError:
+            raise
+        except (OSError, StorageFailure):
+            raise DaemonError(DaemonErrorCode.IO_ERROR) from None
+        finally:
+            if not published:
+                if listener is not None:
+                    with contextlib.suppress(OSError):
+                        listener.close()
+                if marker_capability is not None:
+                    with contextlib.suppress(OSError):
+                        delete_windows_file(
+                            marker,
+                            parent=_windows_root_capability(root),
+                            expected=marker_capability,
+                        )
     endpoint_path = root.path / DAEMON_ENDPOINT_NAME
     try:
         encoded = os.fsencode(endpoint_path)
@@ -492,7 +665,7 @@ def bind_endpoint(root: SafeRoot) -> tuple[socket.socket, DaemonEndpointBinding]
     try:
         listener.set_inheritable(False)
         root_fd = root.open()
-        if _stat_entry(root_fd, DAEMON_ENDPOINT_NAME) is not None:
+        if _stat_entry(root_fd, DAEMON_ENDPOINT_NAME, root=root) is not None:
             raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
         previous_umask = os.umask(0o177)
         try:
@@ -507,7 +680,7 @@ def bind_endpoint(root: SafeRoot) -> tuple[socket.socket, DaemonEndpointBinding]
         )
         listener.listen(MAX_V2_CONNECTIONS)
         listener.settimeout(0.2)
-        current = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME)
+        current = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME, root=root)
         if current is None or not _safe_endpoint(root, current) or listener.get_inheritable():
             raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
         binding = _endpoint_binding(current)
@@ -533,6 +706,60 @@ def _read_private(
     *,
     maximum: int,
 ) -> tuple[bytes, DaemonFileBinding]:
+    if sys.platform == "win32":
+        path = root.path / name
+        descriptor = -1
+        try:
+            parent = _windows_root_capability(root)
+            descriptor, capability = open_private_file(
+                path,
+                create=False,
+                read_write=False,
+                expected_parent=parent,
+            )
+            os.set_inheritable(descriptor, False)
+            before = os.fstat(descriptor)
+            attributes = getattr(before, "st_file_attributes", 0)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or attributes & reparse
+                or before.st_nlink != 1
+                or not 0 < before.st_size <= maximum
+                or before.st_dev != root.identity[0]
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            chunks = bytearray()
+            while len(chunks) <= maximum:
+                chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(chunks)))
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+            after = os.fstat(descriptor)
+            recaptured = capture_windows_fd(
+                descriptor,
+                directory=False,
+                generation_token=capability.generation_token,
+            )
+            final = validate_windows_path(capability, directory=False)
+            if (
+                not chunks
+                or len(chunks) > maximum
+                or _windows_stable_file_stat(after)
+                != _windows_stable_file_stat(before)
+                or recaptured != capability
+                or final != path
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            return bytes(chunks), _file_binding(after)
+        except DaemonError:
+            raise
+        except OSError:
+            raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED) from None
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
     root_fd = -1
     try:
         root_fd = root.open()
@@ -546,6 +773,75 @@ def _read_private(
                 os.close(root_fd)
             except OSError:
                 raise DaemonError(DaemonErrorCode.IO_ERROR) from None
+
+
+def _write_private(root: SafeRoot, name: str, payload: bytes) -> None:
+    """Publish one immutable private state file without replacing a winner."""
+
+    if sys.platform != "win32":
+        root_fd = root.open()
+        try:
+            root.atomic_write(root_fd, name, payload, token=secrets.token_hex(16))
+            return
+        finally:
+            os.close(root_fd)
+    token = secrets.token_hex(16)
+    temporary = root.path / f".{name}.{token}.tmp"
+    target = root.path / name
+    descriptor = -1
+    temporary_capability = None
+    published = False
+    try:
+        if os.path.lexists(target):
+            raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+        parent = _windows_root_capability(root)
+        descriptor, temporary_capability = open_private_file(
+            temporary,
+            create=True,
+            read_write=True,
+            exclusive=True,
+            expected_parent=parent,
+        )
+        os.set_inheritable(descriptor, False)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short private state write")
+            view = view[written:]
+        os.fsync(descriptor)
+        recaptured = capture_windows_fd(
+            descriptor,
+            directory=False,
+            generation_token=temporary_capability.generation_token,
+        )
+        if recaptured != temporary_capability:
+            raise OSError("private state temporary identity changed")
+        os.close(descriptor)
+        descriptor = -1
+        published_capability = rename_windows_file(
+            temporary,
+            target,
+            source_parent=parent,
+            expected_source=temporary_capability,
+        )
+        validate_windows_path(published_capability, directory=False)
+        published = True
+    except DaemonError:
+        raise
+    except OSError:
+        raise DaemonError(DaemonErrorCode.IO_ERROR) from None
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if not published and temporary_capability is not None:
+            with contextlib.suppress(OSError):
+                delete_windows_file(
+                    temporary,
+                    parent=_windows_root_capability(root),
+                    expected=temporary_capability,
+                )
 
 
 def publish_boot_state(
@@ -571,18 +867,18 @@ def publish_boot_state(
         layout.require_current(layout.root)
         layout.require_current(layout.locks)
         _require_endpoint(root, expected=endpoint)
-        root_fd = root.open()
+        if sys.platform != "win32":
+            root_fd = root.open()
         if any(
-            _stat_entry(root_fd, name) is not None
+            (
+                os.path.lexists(root.path / name)
+                if sys.platform == "win32"
+                else _stat_entry(root_fd, name, root=root) is not None
+            )
             for name in (DAEMON_SECRET_NAME, DAEMON_RECEIPT_NAME)
         ):
             raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
-        root.atomic_write(
-            root_fd,
-            DAEMON_SECRET_NAME,
-            secret,
-            token=secrets.token_hex(16),
-        )
+        _write_private(root, DAEMON_SECRET_NAME, secret)
         secret_raw, secret_binding = _read_private(
             root,
             DAEMON_SECRET_NAME,
@@ -607,12 +903,7 @@ def publish_boot_state(
             secret_sha256=hashlib.sha256(secret).hexdigest(),
         )
         receipt_raw = _canonical_receipt(receipt)
-        root.atomic_write(
-            root_fd,
-            DAEMON_RECEIPT_NAME,
-            receipt_raw,
-            token=secrets.token_hex(16),
-        )
+        _write_private(root, DAEMON_RECEIPT_NAME, receipt_raw)
         persisted_raw, receipt_binding = _read_private(
             root,
             DAEMON_RECEIPT_NAME,
@@ -730,6 +1021,17 @@ def read_boot_state(run_root: object) -> PublishedDaemonState:
 
 
 def _endpoint_accepts(root: SafeRoot) -> bool:
+    if sys.platform == "win32":
+        connection = None
+        try:
+            connection = connect_named_pipe(named_pipe_name(root.path), timeout=0.1)
+            return True
+        except (TimeoutError, FileNotFoundError, OSError):
+            return False
+        finally:
+            if connection is not None:
+                with contextlib.suppress(OSError):
+                    connection.close()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         connection.settimeout(0.1)
@@ -750,7 +1052,40 @@ def _unlink_exact(
     file_binding: DaemonFileBinding | None = None,
     endpoint_binding: DaemonEndpointBinding | None = None,
 ) -> None:
-    current = _stat_entry(root_fd, name)
+    if sys.platform == "win32":
+        path = root.path / name
+        parent = _windows_root_capability(root)
+        try:
+            capability = capture_windows_path(path, directory=False)
+            current = path.stat(follow_symlinks=False)
+            if (capability.volume, capability.file_id) != (
+                current.st_dev,
+                current.st_ino,
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            if file_binding is not None:
+                _raw, observed = _read_private(
+                    root,
+                    name,
+                    maximum=max(file_binding.size, 1),
+                )
+                if observed != file_binding:
+                    raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            elif endpoint_binding is not None:
+                if (
+                    not _safe_endpoint(root, current)
+                    or _endpoint_binding(current) != endpoint_binding
+                ):
+                    raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            else:
+                raise DaemonError(DaemonErrorCode.INVALID_STATE)
+            delete_windows_file(path, parent=parent, expected=capability)
+            return
+        except DaemonError:
+            raise
+        except OSError:
+            raise DaemonError(DaemonErrorCode.IO_ERROR) from None
+    current = _stat_entry(root_fd, name, root=root)
     if current is None:
         raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
     if file_binding is not None:
@@ -774,14 +1109,16 @@ def cleanup_published_state(state: PublishedDaemonState) -> None:
         raise DaemonError(DaemonErrorCode.INVALID_STATE)
     root_fd = -1
     try:
-        root_fd = state.root.open()
+        if sys.platform != "win32":
+            root_fd = state.root.open()
         _unlink_exact(
             state.root,
             root_fd,
             DAEMON_RECEIPT_NAME,
             file_binding=state.receipt_binding,
         )
-        os.fsync(root_fd)
+        if sys.platform != "win32":
+            os.fsync(root_fd)
         _unlink_exact(
             state.root,
             root_fd,
@@ -794,7 +1131,8 @@ def cleanup_published_state(state: PublishedDaemonState) -> None:
             DAEMON_ENDPOINT_NAME,
             endpoint_binding=state.receipt.endpoint,
         )
-        os.fsync(root_fd)
+        if sys.platform != "win32":
+            os.fsync(root_fd)
     except StorageFailure:
         raise DaemonError(DaemonErrorCode.UNSAFE_ROOT) from None
     finally:
@@ -806,7 +1144,33 @@ def cleanup_published_state(state: PublishedDaemonState) -> None:
 
 
 def _remove_incomplete_entry(root: SafeRoot, root_fd: int, name: str) -> None:
-    current = _stat_entry(root_fd, name)
+    if sys.platform == "win32":
+        path = root.path / name
+        try:
+            parent = _windows_root_capability(root)
+            capability = capture_windows_path(path, directory=False)
+            current = path.stat(follow_symlinks=False)
+            if (capability.volume, capability.file_id) != (
+                current.st_dev,
+                current.st_ino,
+            ):
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            if name == DAEMON_ENDPOINT_NAME:
+                if not _safe_endpoint(root, current):
+                    raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            else:
+                maximum = (
+                    _SECRET_BYTES if name == DAEMON_SECRET_NAME else _MAX_RECEIPT_BYTES
+                )
+                if not root.regular_file(current, maximum=maximum):
+                    raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            delete_windows_file(path, parent=parent, expected=capability)
+            return
+        except DaemonError:
+            raise
+        except OSError:
+            raise DaemonError(DaemonErrorCode.IO_ERROR) from None
+    current = _stat_entry(root_fd, name, root=root)
     if current is None:
         return
     if name == DAEMON_ENDPOINT_NAME:
@@ -833,8 +1197,11 @@ def recover_stale_state(
     try:
         layout.require_current(layout.root)
         layout.require_current(layout.locks)
-        root_fd = root.open()
-        names = tuple(entry.name for entry in os.scandir(root_fd))
+        if sys.platform == "win32":
+            names = tuple(entry.name for entry in os.scandir(root.path))
+        else:
+            root_fd = root.open()
+            names = tuple(entry.name for entry in os.scandir(root_fd))
         unknown = tuple(
             name
             for name in names
@@ -845,32 +1212,37 @@ def recover_stale_state(
         for name in names:
             if _TEMP_ENTRY.fullmatch(name) is not None:
                 _remove_incomplete_entry(root, root_fd, name)
-        names = {name for name in _FIXED_ENTRIES if _stat_entry(root_fd, name) is not None}
+        names = {
+            name
+            for name in _FIXED_ENTRIES
+            if _stat_entry(root_fd, name, root=root) is not None
+        }
         if not names:
-            os.fsync(root_fd)
+            if sys.platform != "win32":
+                os.fsync(root_fd)
             return
         if DAEMON_ENDPOINT_NAME in names and _endpoint_accepts(root):
             raise DaemonError(DaemonErrorCode.CONTENDED)
         if DAEMON_RECEIPT_NAME in names:
             if names != _FIXED_ENTRIES:
                 raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
-            receipt_raw, receipt_stat = root.read_file_at(
-                root_fd,
+            receipt_raw, receipt_binding = _read_private(
+                root,
                 DAEMON_RECEIPT_NAME,
                 maximum=_MAX_RECEIPT_BYTES,
             )
-            secret, secret_stat = root.read_file_at(
-                root_fd,
+            secret, secret_binding = _read_private(
+                root,
                 DAEMON_SECRET_NAME,
                 maximum=_SECRET_BYTES,
             )
             receipt = _parse_receipt(receipt_raw)
-            endpoint = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME)
+            endpoint = _stat_entry(root_fd, DAEMON_ENDPOINT_NAME, root=root)
             if (
                 endpoint is None
                 or not _safe_endpoint(root, endpoint)
                 or _endpoint_binding(endpoint) != receipt.endpoint
-                or _file_binding(secret_stat) != receipt.secret
+                or secret_binding != receipt.secret
                 or hashlib.sha256(secret).hexdigest() != receipt.secret_sha256
                 or root.identity != (receipt.run_root_dev, receipt.run_root_ino)
                 or layout.identity_for(layout.root)
@@ -879,14 +1251,14 @@ def recover_stale_state(
                 != (receipt.lock_root_dev, receipt.lock_root_ino)
             ):
                 raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
-            receipt_binding = _file_binding(receipt_stat)
             _unlink_exact(
                 root,
                 root_fd,
                 DAEMON_RECEIPT_NAME,
                 file_binding=receipt_binding,
             )
-            os.fsync(root_fd)
+            if sys.platform != "win32":
+                os.fsync(root_fd)
             _unlink_exact(
                 root,
                 root_fd,
@@ -903,7 +1275,8 @@ def recover_stale_state(
             for name in (DAEMON_SECRET_NAME, DAEMON_ENDPOINT_NAME):
                 if name in names:
                     _remove_incomplete_entry(root, root_fd, name)
-        os.fsync(root_fd)
+        if sys.platform != "win32":
+            os.fsync(root_fd)
         layout.require_current(layout.root)
         layout.require_current(layout.locks)
     except DaemonError:

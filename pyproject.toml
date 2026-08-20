@@ -77,4 +77,7 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -m 'not slow'"
-markers = ["slow: 真实下载 2-3GB 装 FreeCAD 的集成测试（需 VIBECAD_RUN_INTEGRATION=1）"]
+markers = [
+    "slow: 真实下载 2-3GB 装 FreeCAD 的集成测试（需 VIBECAD_RUN_INTEGRATION=1）",
+    "windows_contract: hosted Windows W0 compatibility contract",
+]

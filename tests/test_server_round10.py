@@ -94,10 +94,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 31_459
+    assert len(raw) == 31_535
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "c4c4b904bf04c5b7c2a7d22bb14153597ce4e2e7d90afe481eac23e4964169ee"
+        "833394d110f7f286aaa66918d94ede1740ab49db899c9ae56a03c4f21fe70670"
     )
     for tool in tools:
         assert tool.title is None

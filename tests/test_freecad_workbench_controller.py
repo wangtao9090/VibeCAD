@@ -33,6 +33,7 @@ from tests.fixtures.freecad_workbench.fake_host import (
     pump_main_events,
     settle_workbench_events,
 )
+from vibecad._file_compat import capture_windows_path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ADDON_ROOT = _REPO_ROOT / "freecad" / "VibeCAD"
@@ -924,7 +925,7 @@ def test_c02_gateway_opens_then_claims_on_same_worker_client_and_emits_plain_map
     assert event["response"]["source"] == source
     assert event["response"]["open_key"] == open_key
     assert "local_path" not in event["response"]["descriptor"]
-    assert event["response"]["claim"]["local_path"].endswith("/model.FCStd")
+    assert Path(event["response"]["claim"]["local_path"]).name == "model.FCStd"
 
 
 def test_p1_gateway_keepalive_uses_owner_thread_without_consuming_request_ids(
@@ -1260,7 +1261,10 @@ def test_p1_editable_head_checkpoints_then_closes_and_refreshes(
         document.Modified = True
         if save_before_checkpoint:
             document.save()
-            assert stat.S_IMODE(Path(document.FileName).stat().st_mode) == 0o644
+            if sys.platform == "win32":
+                assert Path(document.FileName).is_file()
+            else:
+                assert stat.S_IMODE(Path(document.FileName).stat().st_mode) == 0o644
         elif recomputed_before_checkpoint:
             document.simulate_recomputed_edit()
             assert document.Modified is False
@@ -1293,7 +1297,10 @@ def test_p1_editable_head_checkpoints_then_closes_and_refreshes(
         assert events.count("document.save") == 1
         assert freecad.document_observers == []
         assert events.index("document.save") < events.index("document.close")
-        assert stat.S_IMODE(edited_path.stat().st_mode) == 0o600
+        if sys.platform == "win32":
+            assert capture_windows_path(edited_path, directory=False).path == str(edited_path)
+        else:
+            assert stat.S_IMODE(edited_path.stat().st_mode) == 0o600
         assert dock.edit_status_label.text == "Editable HEAD closed"
         assert dock.open_edit_button.enabled is True
     finally:
@@ -1315,7 +1322,10 @@ def test_p1_private_mode_restore_is_exact_and_rejects_file_aliases(
     managed.write_bytes(b"managed FreeCAD edit")
     managed.chmod(0o644)
     host._restore_private_document_mode(str(managed))
-    assert stat.S_IMODE(managed.stat().st_mode) == 0o600
+    if sys.platform == "win32":
+        assert capture_windows_path(managed, directory=False).path == str(managed)
+    else:
+        assert stat.S_IMODE(managed.stat().st_mode) == 0o600
 
     target = tmp_path / "aliased.FCStd"
     target.write_bytes(b"must remain untouched")
@@ -1329,7 +1339,10 @@ def test_p1_private_mode_restore_is_exact_and_rejects_file_aliases(
     os.link(target, hardlink)
     with pytest.raises(host.PreviewError):
         host._restore_private_document_mode(str(hardlink))
-    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    if sys.platform == "win32":
+        assert target.read_bytes() == b"must remain untouched"
+    else:
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 def test_p1_editable_head_clean_checkpoint_is_noop_and_discard_never_commits(
@@ -5448,13 +5461,15 @@ def _fix04_c1_exact_method(owner: object, *markers: str) -> Callable[..., object
 
 
 def _fix03_deterministic_open_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    import secrets as secrets_module
+
     digits = iter("89abcdef01234567")
+    original = secrets_module.token_hex
 
     def token_hex(byte_count: int) -> str:
-        assert byte_count == 16
-        return next(digits) * 32
+        return next(digits) * 32 if byte_count == 16 else original(byte_count)
 
-    monkeypatch.setattr("secrets.token_hex", token_hex)
+    monkeypatch.setattr(secrets_module, "token_hex", token_hex)
 
 
 def _fix03_gateway_open(
@@ -7207,7 +7222,14 @@ def test_fix04_active_preview_cleanup_keeps_normal_ids_and_followup_open_refresh
         opens_before = sum(call[0] == "open_checkout" for call in client.calls)
         heartbeat_before = host.workbench_snapshot()["heartbeat_count"]
         dock.open_head_button.click()
-        pump_main_events(lambda: host.workbench_snapshot()["heartbeat_count"] > heartbeat_before)
+        pump_main_events(
+            lambda: (
+                host.workbench_snapshot()["heartbeat_count"] > heartbeat_before
+                and sum(call[0] == "open_checkout" for call in client.calls)
+                == opens_before + 1
+                and len(freecad.documents) == 1
+            )
+        )
         followup_open = [
             payload for payload, _private in captured if payload.get("kind") == "preview_open"
         ][-1]
@@ -8200,15 +8222,24 @@ def test_fix04_review_pre_effect_enqueue_failure_retains_exact_ambiguous_pending
         force_cleanup_workbench(host, freecad)
 
 
-@pytest.mark.parametrize(
-    "attestation_failure",
+_REVIEW_ATTESTATION_FAILURES = (
     (
+        "windows-file-id-mismatch",
+        "windows-path-validation-failure",
+        "second-fstat-drift",
+        "windows-short-read",
+    )
+    if os.name == "nt"
+    else (
         "wrong-euid",
         "second-fstat-drift",
         "lstat-device-mismatch",
         "lstat-inode-mismatch",
-    ),
+    )
 )
+
+
+@pytest.mark.parametrize("attestation_failure", _REVIEW_ATTESTATION_FAILURES)
 def test_c02_review_attestor_identity_drift_is_sticky_before_review_effect(
     monkeypatch: pytest.MonkeyPatch,
     attestation_failure: str,
@@ -8224,8 +8255,8 @@ def test_c02_review_attestor_identity_drift_is_sticky_before_review_effect(
     preview_module = importlib.import_module("vibecad_workbench.preview")
     preview_error = preview_module.PreviewError
     original_fstat = preview_module.os.fstat
-    original_lstat = preview_module.os.lstat
-    original_geteuid = preview_module.os.geteuid
+    original_lstat = getattr(preview_module.os, "lstat", None)
+    original_geteuid = getattr(preview_module.os, "geteuid", None)
     stat_fields = (
         "st_mode",
         "st_dev",
@@ -8254,7 +8285,42 @@ def test_c02_review_attestor_identity_drift_is_sticky_before_review_effect(
         commands_before = len(_fix04_authenticated_review_commands(session))
         effects_before = sum(call[0] in {"accept_draft", "reject_draft"} for call in client.calls)
 
-        if attestation_failure == "wrong-euid":
+        if attestation_failure == "windows-file-id-mismatch":
+            windows_files = preview_module._windows_files
+            assert windows_files is not None
+            original_capture = windows_files.capture_windows_fd
+
+            def mismatched_capture(*args: object, **kwargs: object) -> object:
+                observed = original_capture(*args, **kwargs)
+                return replace(observed, file_id=observed.file_id ^ 1)
+
+            monkeypatch.setattr(
+                windows_files,
+                "capture_windows_fd",
+                mismatched_capture,
+            )
+        elif attestation_failure == "windows-path-validation-failure":
+            windows_files = preview_module._windows_files
+            assert windows_files is not None
+
+            def reject_path_validation(*_args: object, **_kwargs: object) -> None:
+                raise OSError("synthetic Windows path identity replacement")
+
+            monkeypatch.setattr(
+                windows_files,
+                "validate_windows_path",
+                reject_path_validation,
+            )
+        elif attestation_failure == "windows-short-read":
+            windows_files = preview_module._windows_files
+            assert windows_files is not None
+            monkeypatch.setattr(
+                windows_files,
+                "pread",
+                lambda *_args, **_kwargs: b"",
+            )
+        elif attestation_failure == "wrong-euid":
+            assert callable(original_geteuid)
             monkeypatch.setattr(
                 preview_module.os,
                 "geteuid",
@@ -8276,6 +8342,7 @@ def test_c02_review_attestor_identity_drift_is_sticky_before_review_effect(
 
             monkeypatch.setattr(preview_module.os, "fstat", second_fstat_drift)
         else:
+            assert callable(original_lstat)
             mismatch_field = (
                 "st_dev" if attestation_failure == "lstat-device-mismatch" else "st_ino"
             )
@@ -8305,6 +8372,7 @@ def test_c02_review_attestor_identity_drift_is_sticky_before_review_effect(
         force_cleanup_workbench(host, freecad)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO attestation contract")
 def test_c02_review_attestor_opens_fifo_nonblocking_and_rejects_before_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

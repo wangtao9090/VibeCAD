@@ -5,10 +5,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import re
 import secrets
 import stat
+import sys
 import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -24,8 +24,11 @@ from vibecad.execution.revisions import (
     RevisionStoreErrorCode,
 )
 from vibecad.interaction.storage import CheckoutMutationLock, SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
 from vibecad.workflow.state import ReviewDraft, ReviewPolicy, TaskStatus
 from vibecad.workflow.store import TaskRunStore, TaskStoreError, TaskStoreErrorCode
+
+os = _storage_os
 
 __all__ = (
     "ABANDONED_TEMP_TTL_SECONDS",
@@ -359,19 +362,23 @@ def _entry_binding(value: os.stat_result) -> _CheckoutEntryBinding:
             nlink=value.st_nlink,
             size=value.st_size,
             mtime_ns=value.st_mtime_ns,
-            ctime_ns=value.st_ctime_ns,
+            ctime_ns=(int(value.st_birthtime_ns) if sys.platform == "win32" else value.st_ctime_ns),
         )
     except (AttributeError, TypeError, ValueError):
         raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
 
 
 def _private_directory_binding(value: _CheckoutEntryBinding) -> bool:
+    if sys.platform == "win32":
+        return stat.S_ISDIR(value.mode)
     return (
         stat.S_ISDIR(value.mode) and value.uid == os.geteuid() and stat.S_IMODE(value.mode) == 0o700
     )
 
 
 def _private_file_binding(value: _CheckoutEntryBinding) -> bool:
+    if sys.platform == "win32":
+        return stat.S_ISREG(value.mode) and value.nlink == 1
     return (
         stat.S_ISREG(value.mode)
         and value.uid == os.geteuid()
@@ -1035,7 +1042,9 @@ class ManagedCheckoutStore:
                 continue
             elif _OPEN_TEMP_RE.fullmatch(name):
                 info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                if not stat.S_ISDIR(info.st_mode) or (
+                    sys.platform != "win32" and info.st_uid != os.geteuid()
+                ):
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
                 expired = now_ns - info.st_mtime_ns > ABANDONED_TEMP_TTL_SECONDS * 1_000_000_000
                 if expired and cleanup:
@@ -1145,7 +1154,9 @@ class ManagedCheckoutStore:
                 nlink=value.st_nlink,
                 size=value.st_size,
                 mtime_ns=value.st_mtime_ns,
-                ctime_ns=value.st_ctime_ns,
+                ctime_ns=(
+                    int(value.st_birthtime_ns) if sys.platform == "win32" else value.st_ctime_ns
+                ),
             )
         except (RevisionStoreError, TypeError, ValueError):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
@@ -1506,13 +1517,21 @@ class ManagedCheckoutStore:
             except OSError:
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
             source_before = os.fstat(source_fd)
-            if (
-                not stat.S_ISREG(source_before.st_mode)
-                or source_before.st_uid != os.geteuid()
-                or stat.S_IMODE(source_before.st_mode) != 0o600
-                or source_before.st_nlink != 1
-                or source_before.st_size != resolved.size_bytes
-            ):
+            if sys.platform == "win32":
+                safe_source = (
+                    stat.S_ISREG(source_before.st_mode)
+                    and source_before.st_nlink == 1
+                    and source_before.st_size == resolved.size_bytes
+                )
+            else:
+                safe_source = (
+                    stat.S_ISREG(source_before.st_mode)
+                    and source_before.st_uid == os.geteuid()
+                    and stat.S_IMODE(source_before.st_mode) == 0o600
+                    and source_before.st_nlink == 1
+                    and source_before.st_size == resolved.size_bytes
+                )
+            if not safe_source:
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
             destination_fd = os.open(
                 "model.FCStd",
@@ -1589,6 +1608,9 @@ class ManagedCheckoutStore:
             self._fault("after_metadata_publish")
             os.fsync(temp_fd)
             self._fault("after_directory_fsync")
+            if sys.platform == "win32":
+                os.close(temp_fd)
+                temp_fd = -1
             os.rename(temp_name, checkout_id, src_dir_fd=root_fd, dst_dir_fd=root_fd)
             published = True
             os.fsync(root_fd)
@@ -1990,15 +2012,11 @@ class ManagedCheckoutStore:
             value["closed_ns"],
         )
 
-    @staticmethod
-    def _entry_exists(root_fd: int, name: str) -> bool:
+    def _entry_exists(self, root_fd: int, name: str) -> bool:
         try:
-            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        except OSError:
+            return self._root.entry_exists(root_fd, name)
+        except StorageFailure:
             raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
-        return True
 
     def _temp_model_size(self, root_fd: int, name: str) -> int:
         directory_fd, _ = self._root.open_directory_at(root_fd, name)
@@ -2052,14 +2070,22 @@ class ManagedCheckoutStore:
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
             for entry in entries:
                 info = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_uid != os.geteuid()
-                    or info.st_nlink != 1
-                ):
+                if sys.platform == "win32":
+                    safe_entry = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                else:
+                    safe_entry = (
+                        stat.S_ISREG(info.st_mode)
+                        and info.st_uid == os.geteuid()
+                        and info.st_nlink == 1
+                    )
+                if not safe_entry:
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
                 allowed_mode = {0o600, 0o644} if _FREECAD_BACKUP_RE.fullmatch(entry) else {0o600}
-                if not partial and stat.S_IMODE(info.st_mode) not in allowed_mode:
+                if (
+                    sys.platform != "win32"
+                    and not partial
+                    and stat.S_IMODE(info.st_mode) not in allowed_mode
+                ):
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
                 os.unlink(entry, dir_fd=directory_fd)
                 self._fault("after_checkout_entry_unlink")

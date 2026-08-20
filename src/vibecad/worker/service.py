@@ -13,10 +13,12 @@ import secrets
 import socket
 import stat
 import struct
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from vibecad._file_compat import WindowsPathCapability
 from vibecad.execution.adapter import AdapterError, _ValidatedProgramExecution
 from vibecad.execution.candidate import ActiveCandidate, SessionBinding
 from vibecad.execution.executor import (
@@ -49,6 +51,7 @@ from vibecad.interaction.cad import (
 )
 from vibecad.parametric.freecad_imageplane_rules import HostOwnedImageStager
 from vibecad.parametric.freecad_part_file_import_rules import HostOwnedImportStager
+from vibecad.worker import windows_files as _windows_files
 from vibecad.worker.codec import (
     MAX_WORKER_REQUEST_BYTES,
     WorkerCodecError,
@@ -126,9 +129,10 @@ class _Candidate:
     revision_id: str
     base_revision_id: str
     directory_fd: int
-    directory_identity: _DirectoryIdentity
-    model_identity: _Identity
-    step_identity: _Identity
+    directory_identity: _DirectoryIdentity | None
+    model_identity: _Identity | _windows_files.WindowsEntryIdentity
+    step_identity: _Identity | _windows_files.WindowsEntryIdentity
+    directory_capability: WindowsPathCapability | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,9 +149,10 @@ class _Revision:
     store_revision_id: str
     model_name: str | None
     directory_fd: int
-    directory_identity: _DirectoryIdentity
-    entries: tuple[tuple[str, _Identity], ...]
+    directory_identity: _DirectoryIdentity | None
+    entries: tuple[tuple[str, _Identity | _windows_files.WindowsEntryIdentity], ...]
     files: tuple[_ExpectedFile, ...]
+    directory_capability: WindowsPathCapability | None = None
 
 
 @dataclass(slots=True)
@@ -160,6 +165,7 @@ class _Session:
     freeform_design_id: str | None = None
     freeform_design_json: str | None = None
     freeform_schema_version: int | None = None
+    cad_bridge: contextlib.AbstractContextManager[WindowsPathCapability] | None = None
 
 
 @dataclass(slots=True)
@@ -178,6 +184,17 @@ class _Program:
         self.execution.close()
         self.artifact_resolver = None
         self.artifact_run_token = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidationDirectory:
+    descriptor: int
+    identity: _DirectoryIdentity | None
+    capability: WindowsPathCapability | None
+    entries: tuple[
+        tuple[str, _Identity | _windows_files.WindowsEntryIdentity],
+        ...,
+    ]
 
 
 def _identity(value: os.stat_result) -> _Identity:
@@ -238,8 +255,42 @@ def _capture_candidate_entries(directory_fd: int) -> tuple[_Identity, _Identity]
     return _identity(model), _identity(step)
 
 
-def _stable_file_identity(value: _Identity) -> tuple[int, int, int, int, int]:
+def _stable_file_identity(
+    value: _Identity | _windows_files.WindowsEntryIdentity,
+) -> tuple[object, ...]:
+    if type(value) is _windows_files.WindowsEntryIdentity:
+        return _windows_files.stable_identity(value)  # type: ignore[return-value]
     return (value.dev, value.ino, value.mode, value.uid, value.nlink)
+
+
+def _candidate_entries(
+    candidate: _Candidate,
+) -> tuple[
+    _Identity | _windows_files.WindowsEntryIdentity,
+    _Identity | _windows_files.WindowsEntryIdentity,
+]:
+    capability = candidate.directory_capability
+    if capability is None:
+        return _capture_candidate_entries(candidate.directory_fd)
+    try:
+        entries = dict(
+            _windows_files.capture_entries(
+                capability,
+                maximum_entries=_MAX_DIRECTORY_ENTRIES,
+            )
+        )
+        if not {"model.FCStd", "model.step"}.issubset(entries) or not set(entries).issubset(
+            {
+                "model.FCStd",
+                "model.step",
+                "seed-intent.json",
+                "seed-binding.json",
+            }
+        ):
+            raise OSError
+        return entries["model.FCStd"], entries["model.step"]
+    except (OSError, TypeError, ValueError):
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
 
 
 @contextlib.contextmanager
@@ -267,11 +318,83 @@ def _directory_cwd(
 
 
 def _candidate_cwd(candidate: _Candidate):
+    if candidate.directory_capability is not None:
+        return _windows_files.directory_cwd(candidate.directory_capability)
     return _directory_cwd(candidate.directory_fd, candidate.directory_identity)
 
 
 def _revision_cwd(revision: _Revision):
+    if revision.directory_capability is not None:
+        return _windows_files.directory_cwd(revision.directory_capability)
     return _directory_cwd(revision.directory_fd, revision.directory_identity)
+
+
+def _engine_entry_path(
+    capability: WindowsPathCapability | None,
+    name: str,
+) -> Path:
+    if capability is None:
+        return Path(name)
+    return _windows_files.entry_path(capability, name)
+
+
+def _load_windows_fcstd(
+    engine: InProcessCadExecutor,
+    *,
+    source_directory: WindowsPathCapability,
+    source: _windows_files.WindowsEntryIdentity,
+    name: str,
+) -> tuple[
+    object,
+    contextlib.AbstractContextManager[WindowsPathCapability],
+]:
+    """Load an exact long-path FCStd through a private short-lived CAD bridge."""
+
+    bridge = _windows_files.cad_staging_directory()
+    entered = False
+    try:
+        staging = bridge.__enter__()
+        entered = True
+        staged = _windows_files.stage_cad_input(
+            source_directory,
+            source,
+            staging,
+            name,
+        )
+        value = engine.load_fcstd(_windows_files.validate_entry(staged))
+    except BaseException:
+        if entered:
+            try:
+                bridge.__exit__(None, None, None)
+            except BaseException:
+                raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+        raise
+    return value, bridge
+
+
+def _close_cad_bridge(
+    bridge: contextlib.AbstractContextManager[WindowsPathCapability] | None,
+) -> None:
+    if bridge is not None:
+        bridge.__exit__(None, None, None)
+
+
+def _discard_loaded_session(
+    engine: InProcessCadExecutor,
+    value: object,
+    bridge: contextlib.AbstractContextManager[WindowsPathCapability] | None,
+) -> None:
+    failed = False
+    try:
+        engine.close(value)
+    except BaseException:
+        failed = True
+    try:
+        _close_cad_bridge(bridge)
+    except BaseException:
+        failed = True
+    if failed:
+        raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
 
 
 def _capture_private_entries(directory_fd: int) -> tuple[tuple[str, _Identity], ...]:
@@ -297,16 +420,56 @@ def _capture_private_entries(directory_fd: int) -> tuple[tuple[str, _Identity], 
         raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
 
 
-def _capture_revision_entries(revision: _Revision) -> tuple[tuple[str, _Identity], ...]:
-    entries = _capture_private_entries(revision.directory_fd)
+def _capture_revision_entries(
+    revision: _Revision,
+) -> tuple[tuple[str, _Identity | _windows_files.WindowsEntryIdentity], ...]:
+    if revision.directory_capability is None:
+        entries = _capture_private_entries(revision.directory_fd)
+    else:
+        try:
+            entries = _windows_files.capture_entries(
+                revision.directory_capability,
+                maximum_entries=_MAX_DIRECTORY_ENTRIES,
+            )
+        except (OSError, TypeError, ValueError):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
     if tuple(name for name, _entry in entries) != tuple(item.name for item in revision.files):
         raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
     with _revision_cwd(revision):
         for expected, (name, identity) in zip(revision.files, entries, strict=True):
-            digest, size, hashed = _hash_relative(name)
+            digest, size, hashed = _hash_capability_entry(
+                revision.directory_capability,
+                name,
+                expected=identity,
+            )
             if hashed != identity or digest != expected.sha256 or size != expected.size_bytes:
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
     return entries
+
+
+def _hash_capability_entry(
+    capability: WindowsPathCapability | None,
+    name: str,
+    *,
+    expected: _Identity | _windows_files.WindowsEntryIdentity | None = None,
+) -> tuple[
+    str,
+    int,
+    _Identity | _windows_files.WindowsEntryIdentity,
+]:
+    if capability is None:
+        return _hash_relative(name)
+    if expected is not None and type(expected) is not _windows_files.WindowsEntryIdentity:
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+    try:
+        return _windows_files.hash_entry(
+            capability,
+            name,
+            maximum_bytes=_MAX_FILE_BYTES,
+            expected=expected,
+        )
+    except (OSError, TypeError, ValueError):
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
 
 
 def _hash_relative(name: str) -> tuple[str, int, _Identity]:
@@ -549,29 +712,54 @@ def _artifact_snapshot_envelope(value: object) -> dict[str, object]:
 
 
 class _WorkerArtifactPayloadSource:
-    __slots__ = ("_closed", "_directory_fd", "_directory_identity", "_entries", "_records")
+    __slots__ = (
+        "_closed",
+        "_directory_capability",
+        "_directory_fd",
+        "_directory_identity",
+        "_entries",
+        "_records",
+    )
 
     def __init__(
         self,
         *,
         directory_fd: int,
-        directory_identity: _DirectoryIdentity,
-        entries: tuple[tuple[str, _Identity], ...],
+        directory_identity: _DirectoryIdentity | None,
+        entries: tuple[
+            tuple[str, _Identity | _windows_files.WindowsEntryIdentity],
+            ...,
+        ],
         snapshot: ReviewedArtifactCatalogSnapshot,
+        directory_capability: WindowsPathCapability | None = None,
     ) -> None:
         self._directory_fd = directory_fd
         self._directory_identity = directory_identity
+        self._directory_capability = directory_capability
         self._entries = dict(entries)
         self._records = {item.artifact_id: item for item in snapshot.records}
         self._closed = False
 
     def _require_live(self) -> None:
+        if self._closed:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED)
+        if self._directory_capability is not None:
+            try:
+                entries = _windows_files.capture_entries(
+                    self._directory_capability,
+                    maximum_entries=_MAX_ARTIFACT_DIRECTORY_ENTRIES,
+                )
+            except (OSError, TypeError, ValueError):
+                raise _artifact_failure(
+                    ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE
+                ) from None
+            if dict(entries) != self._entries:
+                raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+            return
         try:
             current = os.fstat(self._directory_fd)
         except OSError:
             raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED) from None
-        if self._closed:
-            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED)
         if _directory_identity(current) != self._directory_identity or not _private_directory(
             current
         ):
@@ -598,12 +786,29 @@ class _WorkerArtifactPayloadSource:
         expected = self._entries.get(record.artifact_id)
         if expected is None:
             raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
-        payload = _read_artifact_entry(
-            self._directory_fd,
-            record.artifact_id,
-            maximum_bytes=maximum_bytes,
-            expected=expected,
-        )
+        if self._directory_capability is None:
+            if type(expected) is not _Identity:
+                raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+            payload = _read_artifact_entry(
+                self._directory_fd,
+                record.artifact_id,
+                maximum_bytes=maximum_bytes,
+                expected=expected,
+            )
+        else:
+            if type(expected) is not _windows_files.WindowsEntryIdentity:
+                raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+            try:
+                payload = _windows_files.read_entry(
+                    self._directory_capability,
+                    record.artifact_id,
+                    maximum_bytes=maximum_bytes,
+                    expected=expected,
+                )
+            except (OSError, TypeError, ValueError):
+                raise _artifact_failure(
+                    ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE
+                ) from None
         if (
             len(payload) != record.size_bytes
             or hashlib.sha256(payload).hexdigest() != record.content_sha256
@@ -615,6 +820,9 @@ class _WorkerArtifactPayloadSource:
         if self._closed:
             return
         self._closed = True
+        if self._directory_capability is not None:
+            self._directory_capability = None
+            return
         try:
             os.close(self._directory_fd)
         except OSError:
@@ -622,14 +830,27 @@ class _WorkerArtifactPayloadSource:
 
 
 class _WorkerArtifactStagerFactory:
-    __slots__ = ("_closed", "_device", "_inode", "_root")
+    __slots__ = ("_capability", "_closed", "_device", "_inode", "_root")
 
     def __init__(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="vibecad-reviewed-artifact-"))
-        root.chmod(0o700)
-        info = root.lstat()
-        if not _private_directory(info):
-            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        self._capability = None
+        if sys.platform == "win32":
+            root = Path(tempfile.gettempdir()).resolve() / (
+                f"vibecad-reviewed-artifact-{secrets.token_hex(16)}"
+            )
+            try:
+                from vibecad import _file_compat  # noqa: PLC0415
+
+                self._capability = _file_compat.ensure_private_directory(root)
+                info = root.lstat()
+            except (OSError, TypeError, ValueError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        else:
+            root = Path(tempfile.mkdtemp(prefix="vibecad-reviewed-artifact-"))
+            root.chmod(0o700)
+            info = root.lstat()
+            if not _private_directory(info):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         self._root = root
         self._device = info.st_dev
         self._inode = info.st_ino
@@ -638,6 +859,14 @@ class _WorkerArtifactStagerFactory:
     def _require_live(self) -> None:
         if self._closed:
             raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED)
+        if self._capability is not None:
+            try:
+                _windows_files.validate_directory(self._capability)
+            except (OSError, TypeError, ValueError):
+                raise _artifact_failure(
+                    ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE
+                ) from None
+            return
         try:
             info = self._root.lstat()
         except OSError:
@@ -673,6 +902,18 @@ class _WorkerArtifactStagerFactory:
         if self._closed:
             return
         self._closed = True
+        if self._capability is not None:
+            try:
+                root = _windows_files.validate_directory(self._capability)
+                if tuple(root.iterdir()):
+                    raise OSError
+                os.rmdir(root)
+                self._capability = None
+                return
+            except OSError:
+                raise _artifact_failure(
+                    ReviewedArtifactInputErrorCode.CLEANUP_FAILED
+                ) from None
         try:
             info = self._root.lstat()
             if (
@@ -687,7 +928,7 @@ class _WorkerArtifactStagerFactory:
             raise _artifact_failure(ReviewedArtifactInputErrorCode.CLEANUP_FAILED) from None
 
 
-def _open_artifact_run_resolver(
+def _open_artifact_run_resolver_posix(
     descriptor: int,
     envelope: dict[str, object],
 ) -> tuple[_ReviewedArtifactRunResolver, object]:
@@ -788,6 +1029,107 @@ def _open_artifact_run_resolver(
             with contextlib.suppress(OSError):
                 os.close(pinned)
         raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _open_artifact_run_resolver_windows(
+    capability: WindowsPathCapability,
+    envelope: dict[str, object],
+) -> tuple[_ReviewedArtifactRunResolver, object]:
+    source: _WorkerArtifactPayloadSource | None = None
+    stagers: _WorkerArtifactStagerFactory | None = None
+    try:
+        entries = _windows_files.capture_entries(
+            capability,
+            maximum_entries=_MAX_ARTIFACT_DIRECTORY_ENTRIES,
+        )
+        names = tuple(name for name, _identity_value in entries)
+        if not names:
+            raise OSError
+        entry_map = dict(entries)
+        manifest_identity = entry_map.get("manifest.json")
+        if type(manifest_identity) is not _windows_files.WindowsEntryIdentity:
+            raise OSError
+        manifest = _windows_files.read_entry(
+            capability,
+            "manifest.json",
+            maximum_bytes=_MAX_ARTIFACT_MANIFEST_BYTES,
+            expected=manifest_identity,
+        )
+        snapshot = _decode_artifact_manifest(manifest)
+        expected_names = tuple(
+            sorted(("manifest.json", *(item.artifact_id for item in snapshot.records)))
+        )
+        if names != expected_names:
+            raise OSError
+        if (
+            envelope["task_id"] != snapshot.task_id
+            or envelope["project_id"] != snapshot.project_id
+            or envelope["base_revision"] != snapshot.base_revision
+            or envelope["run_id"] != snapshot.run_id
+            or envelope["catalog_sha256"] != snapshot.catalog_sha256
+        ):
+            raise OSError
+        for record in snapshot.records:
+            expected = entry_map[record.artifact_id]
+            if type(expected) is not _windows_files.WindowsEntryIdentity:
+                raise OSError
+            payload = _windows_files.read_entry(
+                capability,
+                record.artifact_id,
+                maximum_bytes=min(record.maximum_bytes, MAX_REVIEWED_ARTIFACT_BYTES),
+                expected=expected,
+            )
+            if (
+                len(payload) != record.size_bytes
+                or hashlib.sha256(payload).hexdigest() != record.content_sha256
+            ):
+                raise OSError
+        if _windows_files.capture_entries(
+            capability,
+            maximum_entries=_MAX_ARTIFACT_DIRECTORY_ENTRIES,
+        ) != entries:
+            raise OSError
+        source = _WorkerArtifactPayloadSource(
+            directory_fd=-1,
+            directory_identity=None,
+            entries=entries,
+            snapshot=snapshot,
+            directory_capability=capability,
+        )
+        stagers = _WorkerArtifactStagerFactory()
+        run_token = object()
+        resolver = _ReviewedArtifactRunResolver(
+            snapshot=snapshot,
+            source=source,
+            stager_factory=stagers,
+            task_id=snapshot.task_id,
+            project_id=snapshot.project_id,
+            base_revision=snapshot.base_revision,
+            run_id=snapshot.run_id,
+            run_token=run_token,
+        )
+        return resolver, run_token
+    except (OSError, TypeError, ValueError, ReviewedArtifactInputError, _ServiceError):
+        if stagers is not None:
+            with contextlib.suppress(BaseException):
+                stagers.close()
+        if source is not None:
+            with contextlib.suppress(BaseException):
+                source.close()
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _open_artifact_run_resolver(
+    descriptor: int,
+    envelope: dict[str, object],
+    *,
+    directory_capability: WindowsPathCapability | None = None,
+) -> tuple[_ReviewedArtifactRunResolver, object]:
+    if directory_capability is not None:
+        if descriptor >= 0 or sys.platform != "win32":
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        return _open_artifact_run_resolver_windows(directory_capability, envelope)
+    return _open_artifact_run_resolver_posix(descriptor, envelope)
 
 
 def _exact_mapping(value: object, fields: set[str]) -> dict[str, object]:
@@ -976,19 +1318,23 @@ class WorkerService:
         return session, capability
 
     def _bind(self, params: object, descriptors: tuple[int, ...]) -> dict[str, object]:
+        field_names = {
+            "candidate_id",
+            "project_id",
+            "revision_id",
+            "base_revision_id",
+        }
+        if sys.platform == "win32":
+            field_names.add("path_capability")
         fields = _exact_mapping(
             params,
-            {
-                "candidate_id",
-                "project_id",
-                "revision_id",
-                "base_revision_id",
-            },
+            field_names,
         )
-        if len(descriptors) != 1 or len(self._candidates) >= _MAX_CANDIDATES:
+        expected_descriptors = 0 if sys.platform == "win32" else 1
+        if len(descriptors) != expected_descriptors or len(self._candidates) >= _MAX_CANDIDATES:
             raise _ServiceError(
                 WorkerWireErrorCode.INVALID_REQUEST
-                if len(descriptors) != 1
+                if len(descriptors) != expected_descriptors
                 else WorkerWireErrorCode.RESOURCE_EXHAUSTED
             )
         candidate_id = _identifier(fields["candidate_id"], _CANDIDATE)
@@ -999,34 +1345,59 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         if base_revision_id == revision_id:
             raise _ServiceError(WorkerWireErrorCode.INVALID_CANDIDATE)
-        descriptor = descriptors[0]
-        try:
-            os.set_inheritable(descriptor, False)
-            directory = os.fstat(descriptor)
-            if not _private_directory(directory):
-                raise OSError
-            entries = set(os.listdir(descriptor))
-            if not {"model.FCStd", "model.step"}.issubset(entries) or not entries.issubset(
-                {
-                    "model.FCStd",
-                    "model.step",
-                    "seed-intent.json",
-                    "seed-binding.json",
-                }
-            ):
-                raise OSError
-            model, step = _capture_candidate_entries(descriptor)
-        except (OSError, _ServiceError):
-            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        descriptor = -1
+        directory_identity: _DirectoryIdentity | None = None
+        directory_capability: WindowsPathCapability | None = None
+        if sys.platform == "win32":
+            try:
+                directory_capability = _windows_files.capability_from_mapping(
+                    fields["path_capability"]
+                )
+                candidate_probe = _Candidate(
+                    candidate_id=candidate_id,
+                    project_id=project_id,
+                    revision_id=revision_id,
+                    base_revision_id=base_revision_id,
+                    directory_fd=-1,
+                    directory_identity=None,
+                    model_identity=None,  # type: ignore[arg-type]
+                    step_identity=None,  # type: ignore[arg-type]
+                    directory_capability=directory_capability,
+                )
+                model, step = _candidate_entries(candidate_probe)
+            except (OSError, TypeError, ValueError, _ServiceError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        else:
+            descriptor = descriptors[0]
+            try:
+                os.set_inheritable(descriptor, False)
+                directory = os.fstat(descriptor)
+                if not _private_directory(directory):
+                    raise OSError
+                entries = set(os.listdir(descriptor))
+                if not {"model.FCStd", "model.step"}.issubset(entries) or not entries.issubset(
+                    {
+                        "model.FCStd",
+                        "model.step",
+                        "seed-intent.json",
+                        "seed-binding.json",
+                    }
+                ):
+                    raise OSError
+                model, step = _capture_candidate_entries(descriptor)
+                directory_identity = _directory_identity(directory)
+            except (OSError, _ServiceError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
         candidate = _Candidate(
             candidate_id=candidate_id,
             project_id=project_id,
             revision_id=revision_id,
             base_revision_id=base_revision_id,
             directory_fd=descriptor,
-            directory_identity=_directory_identity(directory),
+            directory_identity=directory_identity,
             model_identity=model,
             step_identity=step,
+            directory_capability=directory_capability,
         )
         self._candidates[candidate_id] = candidate
         return {"candidate_id": candidate_id}
@@ -1042,10 +1413,11 @@ class WorkerService:
             program.candidate_id == candidate.candidate_id for program in self._programs.values()
         ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
-        try:
-            os.close(candidate.directory_fd)
-        except OSError:
-            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+        if candidate.directory_fd >= 0:
+            try:
+                os.close(candidate.directory_fd)
+            except OSError:
+                raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
         self._candidates.pop(candidate.candidate_id, None)
         return {"candidate_id": candidate.candidate_id}
 
@@ -1054,20 +1426,24 @@ class WorkerService:
         params: object,
         descriptors: tuple[int, ...],
     ) -> dict[str, object]:
+        field_names = {
+            "revision_id",
+            "project_id",
+            "store_revision_id",
+            "model_name",
+            "files",
+        }
+        if sys.platform == "win32":
+            field_names.add("path_capability")
         fields = _exact_mapping(
             params,
-            {
-                "revision_id",
-                "project_id",
-                "store_revision_id",
-                "model_name",
-                "files",
-            },
+            field_names,
         )
-        if len(descriptors) != 1 or len(self._revisions) >= _MAX_REVISIONS:
+        expected_descriptors = 0 if sys.platform == "win32" else 1
+        if len(descriptors) != expected_descriptors or len(self._revisions) >= _MAX_REVISIONS:
             raise _ServiceError(
                 WorkerWireErrorCode.INVALID_REQUEST
-                if len(descriptors) != 1
+                if len(descriptors) != expected_descriptors
                 else WorkerWireErrorCode.RESOURCE_EXHAUSTED
             )
         revision_id = _identifier(fields["revision_id"], _WORKER_REVISION)
@@ -1084,21 +1460,32 @@ class WorkerService:
             or (model_name is not None and "model.FCStd" not in names)
         ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
-        descriptor = descriptors[0]
+        descriptor = -1
+        directory_identity: _DirectoryIdentity | None = None
+        directory_capability: WindowsPathCapability | None = None
         try:
-            os.set_inheritable(descriptor, False)
-            directory = os.fstat(descriptor)
-            if not _private_directory(directory):
-                raise OSError
+            if sys.platform == "win32":
+                directory_capability = _windows_files.capability_from_mapping(
+                    fields["path_capability"]
+                )
+                _windows_files.validate_directory(directory_capability)
+            else:
+                descriptor = descriptors[0]
+                os.set_inheritable(descriptor, False)
+                directory = os.fstat(descriptor)
+                if not _private_directory(directory):
+                    raise OSError
+                directory_identity = _directory_identity(directory)
             revision = _Revision(
                 revision_id=revision_id,
                 project_id=project_id,
                 store_revision_id=store_revision_id,
                 model_name=model_name,
                 directory_fd=descriptor,
-                directory_identity=_directory_identity(directory),
+                directory_identity=directory_identity,
                 entries=(),
                 files=files,
+                directory_capability=directory_capability,
             )
             entries = _capture_revision_entries(revision)
             revision.entries = entries
@@ -1115,10 +1502,11 @@ class WorkerService:
             for session in self._sessions.values()
         ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
-        try:
-            os.close(revision.directory_fd)
-        except OSError:
-            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+        if revision.directory_fd >= 0:
+            try:
+                os.close(revision.directory_fd)
+            except OSError:
+                raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
         self._revisions.pop(revision.revision_id, None)
         return {"revision_id": revision.revision_id}
 
@@ -1127,6 +1515,7 @@ class WorkerService:
         revision = self._revision(fields["revision_id"])
         if len(self._sessions) >= _MAX_SESSIONS:
             raise _ServiceError(WorkerWireErrorCode.RESOURCE_EXHAUSTED)
+        bridge: contextlib.AbstractContextManager[WindowsPathCapability] | None = None
         with _revision_cwd(revision):
             current = _capture_revision_entries(revision)
             if current != revision.entries:
@@ -1136,22 +1525,27 @@ class WorkerService:
                     revision_id=revision.store_revision_id,
                 )
             else:
-                value = self._engine.load_fcstd(Path(revision.model_name))
+                if revision.directory_capability is None:
+                    value = self._engine.load_fcstd(Path(revision.model_name))
+                else:
+                    source = dict(current)[revision.model_name]
+                    if type(source) is not _windows_files.WindowsEntryIdentity:
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                    value, bridge = _load_windows_fcstd(
+                        self._engine,
+                        source_directory=revision.directory_capability,
+                        source=source,
+                        name=revision.model_name,
+                    )
             try:
                 revalidated = _capture_revision_entries(revision)
             except BaseException as error:
-                try:
-                    self._engine.close(value)
-                except BaseException:
-                    raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+                _discard_loaded_session(self._engine, value, bridge)
                 if not isinstance(error, Exception):
                     raise
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
             if revalidated != current:
-                try:
-                    self._engine.close(value)
-                except BaseException:
-                    raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+                _discard_loaded_session(self._engine, value, bridge)
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         session_id = f"worker_session_{secrets.token_hex(16)}"
         self._sessions[session_id] = _Session(
@@ -1159,6 +1553,7 @@ class WorkerService:
             capability_kind="revision",
             capability_id=revision.revision_id,
             value=value,
+            cad_bridge=bridge,
         )
         return {"session_id": session_id}
 
@@ -1182,21 +1577,43 @@ class WorkerService:
         candidate = self._candidate(fields["candidate_id"])
         if len(self._sessions) >= _MAX_SESSIONS:
             raise _ServiceError(WorkerWireErrorCode.RESOURCE_EXHAUSTED)
+        bridge: contextlib.AbstractContextManager[WindowsPathCapability] | None = None
         with _candidate_cwd(candidate):
-            current_model, current_step = _capture_candidate_entries(candidate.directory_fd)
+            current_model, current_step = _candidate_entries(candidate)
             if (
                 current_model != candidate.model_identity
                 or current_step != candidate.step_identity
                 or current_model.size <= 0
             ):
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-            value = self._engine.load_fcstd(Path("model.FCStd"))
+            if candidate.directory_capability is None:
+                value = self._engine.load_fcstd(Path("model.FCStd"))
+            else:
+                if type(current_model) is not _windows_files.WindowsEntryIdentity:
+                    raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                value, bridge = _load_windows_fcstd(
+                    self._engine,
+                    source_directory=candidate.directory_capability,
+                    source=current_model,
+                    name="model.FCStd",
+                )
+                try:
+                    revalidated = _candidate_entries(candidate)
+                except BaseException as error:
+                    _discard_loaded_session(self._engine, value, bridge)
+                    if not isinstance(error, Exception):
+                        raise
+                    raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+                if revalidated != (current_model, current_step):
+                    _discard_loaded_session(self._engine, value, bridge)
+                    raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         session_id = f"worker_session_{secrets.token_hex(16)}"
         self._sessions[session_id] = _Session(
             session_id=session_id,
             capability_kind="candidate",
             capability_id=candidate.candidate_id,
             value=value,
+            cad_bridge=bridge,
         )
         return {"session_id": session_id}
 
@@ -1207,43 +1624,74 @@ class WorkerService:
             candidate_id=fields["candidate_id"],
         )
         with _candidate_cwd(candidate):
-            current_model, current_step = _capture_candidate_entries(candidate.directory_fd)
+            current_model, current_step = _candidate_entries(candidate)
             if current_model != candidate.model_identity or current_step != candidate.step_identity:
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
             try:
-                self._engine.checkpoint_fcstd(session.value, Path("model.FCStd"))
-                model, step = _capture_candidate_entries(candidate.directory_fd)
-                if step != current_step:
-                    raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-                digest, size, hashed = _hash_relative("model.FCStd")
+                if candidate.directory_capability is not None:
+                    with _windows_files.cad_staging_directory() as staging:
+                        model_path = _windows_files.cad_output_path(
+                            staging,
+                            "model.FCStd",
+                        )
+                        self._engine.checkpoint_fcstd(session.value, model_path)
+                        staged_model = _windows_files.capture_cad_output(
+                            staging,
+                            "model.FCStd",
+                        )
+                        if session.freeform_digest is not None:
+                            self._verify_freeform_checkpoint(session, model_path)
+                        model = _windows_files.publish_cad_output(
+                            staging,
+                            staged_model,
+                            candidate.directory_capability,
+                            "model.FCStd",
+                            expected_destination=current_model,
+                        )
+                    captured_model, step = _candidate_entries(candidate)
+                    if captured_model != model or step != current_step:
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                else:
+                    model_path = Path("model.FCStd")
+                    self._engine.checkpoint_fcstd(session.value, model_path)
+                    model, step = _candidate_entries(candidate)
+                    if step != current_step:
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                    if session.freeform_digest is not None:
+                        self._verify_freeform_checkpoint(session, model_path)
+                digest, size, hashed = _hash_capability_entry(
+                    candidate.directory_capability,
+                    "model.FCStd",
+                    expected=model,
+                )
                 if hashed != model:
                     raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-                if session.freeform_digest is not None:
-                    reloaded = self._engine.load_fcstd(Path("model.FCStd"))
-                    try:
-                        matches = tuple(
-                            item
-                            for item in reloaded.doc.Objects
-                            if getattr(item, "VibeCADFreeformDesignDigest", None)
-                            == session.freeform_digest
-                        )
-                        if (
-                            len(matches) != 1
-                            or getattr(matches[0], "VibeCADFreeformSchemaVersion", None)
-                            != session.freeform_schema_version
-                            or getattr(matches[0], "VibeCADFreeformDesignId", None)
-                            != session.freeform_design_id
-                            or getattr(matches[0], "VibeCADFreeformDesignJson", None)
-                            != session.freeform_design_json
-                        ):
-                            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-                    finally:
-                        self._engine.close(reloaded)
             except BaseException:
                 raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
         candidate.model_identity = model
         candidate.step_identity = step
         return {"sha256": digest, "size_bytes": size}
+
+    def _verify_freeform_checkpoint(self, session: _Session, model_path: Path) -> None:
+        reloaded = self._engine.load_fcstd(model_path)
+        try:
+            matches = tuple(
+                item
+                for item in reloaded.doc.Objects
+                if getattr(item, "VibeCADFreeformDesignDigest", None) == session.freeform_digest
+            )
+            if (
+                len(matches) != 1
+                or getattr(matches[0], "VibeCADFreeformSchemaVersion", None)
+                != session.freeform_schema_version
+                or getattr(matches[0], "VibeCADFreeformDesignId", None)
+                != session.freeform_design_id
+                or getattr(matches[0], "VibeCADFreeformDesignJson", None)
+                != session.freeform_design_json
+            ):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        finally:
+            self._engine.close(reloaded)
 
     def _compile_freeform(self, params: object) -> dict[str, object]:
         fields = _exact_mapping(
@@ -1310,6 +1758,10 @@ class WorkerService:
             self._engine.close(session.value)
         except BaseException:
             failed = True
+        try:
+            _close_cad_bridge(session.cad_bridge)
+        except BaseException:
+            failed = True
         self._sessions.pop(session.session_id, None)
         if failed:
             raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
@@ -1329,7 +1781,7 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         if type(capability) is _Candidate:
             context = _candidate_cwd(capability)
-            before = _capture_candidate_entries(capability.directory_fd)
+            before = _candidate_entries(capability)
             if before != (capability.model_identity, capability.step_identity):
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         else:
@@ -1350,7 +1802,7 @@ class WorkerService:
         except BaseException:
             raise _ServiceError(WorkerWireErrorCode.CAD_FAILURE) from None
         if type(capability) is _Candidate:
-            after = _capture_candidate_entries(capability.directory_fd)
+            after = _candidate_entries(capability)
         else:
             after = _capture_revision_entries(capability)
         if after != before:
@@ -1410,9 +1862,27 @@ class WorkerService:
 
     def _validation_directory(
         self,
+        capability_mapping: object | None,
         descriptors: tuple[int, ...],
-    ) -> tuple[int, _DirectoryIdentity, tuple[tuple[str, _Identity], ...]]:
-        if len(descriptors) != 1:
+    ) -> _ValidationDirectory:
+        if sys.platform == "win32":
+            if descriptors or capability_mapping is None:
+                raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+            try:
+                capability = _windows_files.capability_from_mapping(capability_mapping)
+                entries = _windows_files.capture_entries(
+                    capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+            except (OSError, TypeError, ValueError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+            return _ValidationDirectory(
+                descriptor=-1,
+                identity=None,
+                capability=capability,
+                entries=entries,
+            )
+        if len(descriptors) != 1 or capability_mapping is not None:
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         descriptor = descriptors[0]
         try:
@@ -1423,7 +1893,12 @@ class WorkerService:
             entries = _capture_private_entries(descriptor)
         except (OSError, _ServiceError):
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
-        return descriptor, _directory_identity(current), entries
+        return _ValidationDirectory(
+            descriptor=descriptor,
+            identity=_directory_identity(current),
+            capability=None,
+            entries=entries,
+        )
 
     def _validate_import(
         self,
@@ -1432,20 +1907,77 @@ class WorkerService:
         *,
         normalize: bool,
     ) -> dict[str, object]:
-        fields = _exact_mapping(params, {"name"})
+        field_names = {"name"}
+        if sys.platform == "win32":
+            field_names.add("path_capability")
+        fields = _exact_mapping(params, field_names)
         name = _identifier(fields["name"], _STAGE_NAME)
-        descriptor, identity, before = self._validation_directory(descriptors)
+        access = self._validation_directory(
+            fields.get("path_capability"),
+            descriptors,
+        )
+        before = access.entries
         before_mapping = dict(before)
         target_before = before_mapping.get(name)
         if target_before is None or target_before.size <= 0:
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-        with _directory_cwd(descriptor, identity):
-            if normalize:
-                evidence = self._engine.validate_import(Path(name))
-            else:
-                evidence = self._engine.revalidate_normalized_import(Path(name))
-            digest, size, target_after_hash = _hash_relative(name)
-        after = _capture_private_entries(descriptor)
+        if access.capability is None:
+            with _directory_cwd(access.descriptor, access.identity):  # type: ignore[arg-type]
+                if normalize:
+                    evidence = self._engine.validate_import(Path(name))
+                else:
+                    evidence = self._engine.revalidate_normalized_import(Path(name))
+                digest, size, target_after_hash = _hash_capability_entry(
+                    None,
+                    name,
+                )
+        else:
+            if type(target_before) is not _windows_files.WindowsEntryIdentity:
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+            with _windows_files.directory_cwd(access.capability):
+                with _windows_files.cad_staging_directory() as staging:
+                    staged = _windows_files.stage_cad_input(
+                        access.capability,
+                        target_before,
+                        staging,
+                        name,
+                    )
+                    staged_path = _windows_files.validate_entry(staged)
+                    if normalize:
+                        evidence = self._engine.validate_import(staged_path)
+                        normalized = _windows_files.capture_cad_output(
+                            staging,
+                            name,
+                        )
+                        published = _windows_files.publish_cad_output(
+                            staging,
+                            normalized,
+                            access.capability,
+                            name,
+                            expected_destination=target_before,
+                        )
+                        expected_after = published
+                    else:
+                        with _windows_files.cad_directory_cwd(staging):
+                            evidence = self._engine.revalidate_normalized_import(Path(name))
+                        if _windows_files.validate_entry(staged) != staged_path:
+                            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                        expected_after = target_before
+                digest, size, target_after_hash = _hash_capability_entry(
+                    access.capability,
+                    name,
+                    expected=expected_after,
+                )
+        if access.capability is None:
+            after = _capture_private_entries(access.descriptor)
+        else:
+            try:
+                after = _windows_files.capture_entries(
+                    access.capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+            except (OSError, TypeError, ValueError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
         after_mapping = dict(after)
         target_after = after_mapping.get(name)
         if (
@@ -1470,8 +2002,13 @@ class WorkerService:
         params: object,
         descriptors: tuple[int, ...],
     ) -> dict[str, object]:
-        _exact_mapping(params, set())
-        descriptor, identity, before = self._validation_directory(descriptors)
+        field_names = {"path_capability"} if sys.platform == "win32" else set()
+        fields = _exact_mapping(params, field_names)
+        access = self._validation_directory(
+            fields.get("path_capability"),
+            descriptors,
+        )
+        before = access.entries
         before_mapping = dict(before)
         if (
             before_mapping.get("model.FCStd") is None
@@ -1480,14 +2017,75 @@ class WorkerService:
             or before_mapping["model.step"].size <= 0
         ):
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-        with _directory_cwd(descriptor, identity):
-            evidence = self._engine.validate_materialization(
-                fcstd=Path("model.FCStd"),
-                step=Path("model.step"),
-            )
-            fcstd_sha256, fcstd_size, fcstd_identity = _hash_relative("model.FCStd")
-            step_sha256, step_size, step_identity = _hash_relative("model.step")
-        after = _capture_private_entries(descriptor)
+        if access.capability is None:
+            with _directory_cwd(access.descriptor, access.identity):  # type: ignore[arg-type]
+                evidence = self._engine.validate_materialization(
+                    fcstd=Path("model.FCStd"),
+                    step=Path("model.step"),
+                )
+                fcstd_sha256, fcstd_size, fcstd_identity = _hash_capability_entry(
+                    None,
+                    "model.FCStd",
+                    expected=before_mapping["model.FCStd"],
+                )
+                step_sha256, step_size, step_identity = _hash_capability_entry(
+                    None,
+                    "model.step",
+                    expected=before_mapping["model.step"],
+                )
+        else:
+            source_fcstd = before_mapping["model.FCStd"]
+            source_step = before_mapping["model.step"]
+            if (
+                type(source_fcstd) is not _windows_files.WindowsEntryIdentity
+                or type(source_step) is not _windows_files.WindowsEntryIdentity
+            ):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+            with _windows_files.directory_cwd(access.capability):
+                with _windows_files.cad_staging_directory() as staging:
+                    staged_fcstd = _windows_files.stage_cad_input(
+                        access.capability,
+                        source_fcstd,
+                        staging,
+                        "model.FCStd",
+                    )
+                    staged_step = _windows_files.stage_cad_input(
+                        access.capability,
+                        source_step,
+                        staging,
+                        "model.step",
+                    )
+                    fcstd_path = _windows_files.validate_entry(staged_fcstd)
+                    step_path = _windows_files.validate_entry(staged_step)
+                    evidence = self._engine.validate_materialization(
+                        fcstd=fcstd_path,
+                        step=step_path,
+                    )
+                    if (
+                        _windows_files.validate_entry(staged_fcstd) != fcstd_path
+                        or _windows_files.validate_entry(staged_step) != step_path
+                    ):
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                fcstd_sha256, fcstd_size, fcstd_identity = _hash_capability_entry(
+                    access.capability,
+                    "model.FCStd",
+                    expected=source_fcstd,
+                )
+                step_sha256, step_size, step_identity = _hash_capability_entry(
+                    access.capability,
+                    "model.step",
+                    expected=source_step,
+                )
+        if access.capability is None:
+            after = _capture_private_entries(access.descriptor)
+        else:
+            try:
+                after = _windows_files.capture_entries(
+                    access.capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+            except (OSError, TypeError, ValueError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
         if (
             after != before
             or fcstd_identity != before_mapping["model.FCStd"]
@@ -1516,11 +2114,36 @@ class WorkerService:
                 raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
             fields = params
             artifact_envelope = None
-        elif set(params) == {"session_id", "candidate_id", "program", "artifact_snapshot"}:
+            artifact_path_capability = None
+        elif sys.platform == "win32" and set(params) == {
+            "session_id",
+            "candidate_id",
+            "program",
+            "artifact_snapshot",
+            "artifact_path_capability",
+        }:
+            if descriptors:
+                raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+            fields = params
+            artifact_envelope = _artifact_snapshot_envelope(fields["artifact_snapshot"])
+            try:
+                artifact_path_capability = _windows_files.capability_from_mapping(
+                    fields["artifact_path_capability"]
+                )
+                _windows_files.validate_directory(artifact_path_capability)
+            except (OSError, TypeError, ValueError):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        elif sys.platform != "win32" and set(params) == {
+            "session_id",
+            "candidate_id",
+            "program",
+            "artifact_snapshot",
+        }:
             if len(descriptors) != 1:
                 raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
             fields = params
             artifact_envelope = _artifact_snapshot_envelope(fields["artifact_snapshot"])
+            artifact_path_capability = None
         else:
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         session, candidate = self._require_pair(
@@ -1568,13 +2191,20 @@ class WorkerService:
                     manifest_sha256="0" * 64,
                 ),
                 binding=binding,
-                model_path=Path("model.FCStd"),
-                step_path=Path("model.step"),
+                model_path=_engine_entry_path(
+                    candidate.directory_capability,
+                    "model.FCStd",
+                ),
+                step_path=_engine_entry_path(
+                    candidate.directory_capability,
+                    "model.step",
+                ),
             )
             if artifact_envelope is not None:
                 resolver, run_token = _open_artifact_run_resolver(
-                    descriptors[0],
+                    -1 if artifact_path_capability is not None else descriptors[0],
                     artifact_envelope,
+                    directory_capability=artifact_path_capability,
                 )
             prepare_kwargs: dict[str, object] = {}
             if resolver is not None:
@@ -1661,21 +2291,56 @@ class WorkerService:
         if any(item.session_id == session.session_id for item in self._programs.values()):
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         with _candidate_cwd(candidate):
-            current_model, current_step = _capture_candidate_entries(candidate.directory_fd)
+            current_model, current_step = _candidate_entries(candidate)
             if current_model != candidate.model_identity or current_step != candidate.step_identity:
                 raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
             try:
-                _export_session_step(
-                    session=session.value,
-                    model_path=Path("model.FCStd"),
-                    step_path=Path("model.step"),
+                if candidate.directory_capability is not None:
+                    with _windows_files.cad_staging_directory() as staging:
+                        model_path = _windows_files.cad_output_path(
+                            staging,
+                            "model.FCStd",
+                        )
+                        reserved_step = _windows_files.reserve_cad_output(
+                            staging,
+                            "model.step",
+                        )
+                        step_path = _windows_files.validate_entry(reserved_step)
+                        _export_session_step(
+                            session=session.value,
+                            model_path=model_path,
+                            step_path=step_path,
+                        )
+                        staged_step = _windows_files.capture_cad_output(
+                            staging,
+                            "model.step",
+                        )
+                        step = _windows_files.publish_cad_output(
+                            staging,
+                            staged_step,
+                            candidate.directory_capability,
+                            "model.step",
+                            expected_destination=current_step,
+                        )
+                    model, captured_step = _candidate_entries(candidate)
+                    if model != current_model or captured_step != step:
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                else:
+                    _export_session_step(
+                        session=session.value,
+                        model_path=Path("model.FCStd"),
+                        step_path=Path("model.step"),
+                    )
+                    model, step = _candidate_entries(candidate)
+                    if model != current_model or _stable_file_identity(
+                        step
+                    ) != _stable_file_identity(current_step):
+                        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                digest, size, hashed = _hash_capability_entry(
+                    candidate.directory_capability,
+                    "model.step",
+                    expected=step,
                 )
-                model, step = _capture_candidate_entries(candidate.directory_fd)
-                if model != current_model or _stable_file_identity(step) != _stable_file_identity(
-                    current_step
-                ):
-                    raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
-                digest, size, hashed = _hash_relative("model.step")
                 if hashed != step:
                     raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
             except BaseException:
@@ -1711,18 +2376,24 @@ class WorkerService:
                 self._engine.close(session.value)
             except Exception:
                 failed = True
+            try:
+                _close_cad_bridge(session.cad_bridge)
+            except Exception:
+                failed = True
         self._sessions.clear()
         for candidate in tuple(self._candidates.values()):
-            try:
-                os.close(candidate.directory_fd)
-            except OSError:
-                failed = True
+            if candidate.directory_fd >= 0:
+                try:
+                    os.close(candidate.directory_fd)
+                except OSError:
+                    failed = True
         self._candidates.clear()
         for revision in tuple(self._revisions.values()):
-            try:
-                os.close(revision.directory_fd)
-            except OSError:
-                failed = True
+            if revision.directory_fd >= 0:
+                try:
+                    os.close(revision.directory_fd)
+                except OSError:
+                    failed = True
         self._revisions.clear()
         if failed:
             raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
@@ -1742,7 +2413,10 @@ class WorkerService:
             "validation.revalidate_import",
             "validation.validate_materialization",
         }
-        if (method in descriptor_methods and not descriptors) or (
+        if sys.platform == "win32":
+            if descriptors:
+                raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        elif (method in descriptor_methods and not descriptors) or (
             method not in {*descriptor_methods, "program.begin"} and descriptors
         ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
@@ -1790,20 +2464,29 @@ class WorkerService:
         for session in tuple(self._sessions.values()):
             with contextlib.suppress(Exception):
                 self._engine.close(session.value)
+            with contextlib.suppress(Exception):
+                _close_cad_bridge(session.cad_bridge)
         self._sessions.clear()
         for candidate in tuple(self._candidates.values()):
-            with contextlib.suppress(OSError):
-                os.close(candidate.directory_fd)
+            if candidate.directory_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(candidate.directory_fd)
         self._candidates.clear()
         for revision in tuple(self._revisions.values()):
-            with contextlib.suppress(OSError):
-                os.close(revision.directory_fd)
+            if revision.directory_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(revision.directory_fd)
         self._revisions.clear()
 
 
 def _recv_header_with_descriptors(
     connection: socket.socket,
 ) -> tuple[bytes, tuple[int, ...]]:
+    if sys.platform == "win32":
+        # Windows Worker generations use an inherited private socket inside a
+        # parent-owned Job Object.  Path capabilities are carried in the
+        # canonical request body; Winsock has no SCM_RIGHTS ancillary channel.
+        return _recv_exact(connection, 4), ()
     header = bytearray()
     descriptors: list[int] = []
     ancillary_size = socket.CMSG_SPACE(array.array("i", range(4)).itemsize * 4)

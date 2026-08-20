@@ -160,7 +160,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G05 | Skill | canonical Skill 通过校验；示例、恢复表和限制与 live schema 一致 | ☐ |
 | G06 | 分发 | sdist/MCPB/Skill zip 含同一 Skill tree；wheel/installed Python 不含 Skill | ☐ |
 | G07 | 普通测试 | 全量 non-slow pytest、Ruff、changed-Python format/pycompile、offline lock、diff check 通过 | ☐ |
-| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.9.0/epoch 4，不重建现有引擎 | ☐ |
+| G08 | 受管 FreeCAD | macOS 与 Windows x86-64 slow matrix 通过；安装只同步 0.9.0/epoch 4，不重建现有引擎 | ☐ |
 | G09 | Agent E2E | empty/import、direct/program、review/cancel/restart/conflict、artifact/resource 与负例通过 | ☐ |
 | G10 | 数据保护 | runtime uninstall 与持久取消不删除/改写项目数据；执行和导出不污染源文件或暴露任意路径 | ☐ |
 | G11 | 打包后会话 | 从全新解包 MCPB 启动并复跑 discovery、真实 CAD 与资源读取 | ☐ |
@@ -169,7 +169,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G14 | 三宿主发布包 | Codex、Claude、WorkBuddy 分别完成恢复、建模和 ResourceLink/资源读取；WorkBuddy 另过兼容适配门 | ☐ |
 | G15 | Guided Photo V3 | 三个公开正例各形成可编辑 review draft；缺尺寸和多物体负例均在 Task 前停止；真实 FreeCAD 证明 DoF、BRep、单实体和参数修改 | ☐ |
 | G16 | 参数联动与边处理 | 派生仿射表达式和语义 Fillet/Chamfer 通过 focused、完整回归、重开编辑及真实 FreeCAD runtime 门；歧义与无效几何原子失败 | ☐ |
-| G17 | Windows qualification | 按 [`WINDOWS_QUALIFICATION.md`](WINDOWS_QUALIFICATION.md) 完成 pinned hosted contracts、双系统 native managed/product gate、`windows.x86_64` reviewed attestation、发布依赖激活和环境清理；计划提交本身不得声称 Windows 已支持 | ☐ |
+| G17 | Windows qualification | 已按 [`WINDOWS_QUALIFICATION.md`](WINDOWS_QUALIFICATION.md) 完成 pinned hosted contracts、native managed/product gate、`windows.x86_64` reviewed attestation、三平台发布依赖激活和环境清理 | ☑ |
 
 ## 3. 自动化与打包 Gate
 
@@ -254,7 +254,7 @@ cache、runtime 和非预期文件没有混入；MCPB 中 README 和 Skill 是�
 
 1. Ruff 与 non-slow pytest；
 2. wheel/sdist/MCPB/Skill zip 构建和包审计；
-3. macOS managed-runtime Agent slow matrix；
+3. macOS 与 Windows x86-64 managed-runtime、Agent 和 reviewed-attestation matrix；
 4. 上传一次已经过 gate 的 archive。
 
 publisher 只能下载并发布已 gate 的 archive，不得重建。GitHub Release 同时附上 `VibeCAD.mcpb` 与
@@ -352,8 +352,8 @@ Accept/Reject 用错 draft id、task id 或 generation 必须 fail closed。
 5. Accept 后生成新的 forward revision，其 `base_revision` 是调用时 HEAD、id 不等于 source revision，
    新 HEAD 指向该 revision；Reject 分支由确定性测试证明 HEAD 不变。
 
-Darwin `public-agent-matrix` release target 必须执行这条路径，不能只以 fake coordinator、API schema 或
-39-tool discovery 代替真实 CAD 证据。相同 key 与相同意图重放返回同一任务；变更 source 或
+macOS/Windows x86-64 的 reviewed product release target 必须执行这条路径，不能只以 fake
+coordinator、API schema 或 39-tool discovery 代替真实 CAD 证据。相同 key 与相同意图重放返回同一任务；变更 source 或
 expected-head 必须 conflict。
 
 ### E07：受支持 FCStd import

@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -20,9 +21,11 @@ from unittest.mock import Mock
 import pytest
 
 import vibecad.daemon as daemon_api
+import vibecad.daemon.bootstrap as daemon_bootstrap
 import vibecad.daemon.client as daemon_client
 import vibecad.daemon.local_identity as local_identity
 import vibecad.daemon.service as daemon_service
+import vibecad.daemon.windows_ipc as windows_ipc
 from vibecad.application.agent import AgentApplication
 from vibecad.daemon.local_identity import (
     LocalIdentityError,
@@ -42,6 +45,7 @@ from vibecad.interaction.checkouts import (
     _CheckoutEntryBinding,
 )
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.runtime import status
 from vibecad.workflow.lease import (
     LeaseError,
     LeaseErrorCode,
@@ -59,6 +63,7 @@ from vibecad.workflow.state import (
 from vibecad.workflow.store import StoredTaskRun
 
 DARWIN_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="macOS peer-euid POC")
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Win32 named-pipe contract")
 DAEMON_AUTHORITY = "vibecad.kernel-daemon.authority.v1"
 
 
@@ -287,15 +292,200 @@ def test_peer_identity_rejects_socket_state_change_after_native_observation(
 def test_peer_identity_has_no_non_darwin_or_secret_only_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    monkeypatch.setattr(local_identity.sys, "platform", "linux")
+    with pytest.raises(LocalIdentityError) as raised:
+        darwin_peer_identity(object())
+    assert raised.value.code is LocalIdentityErrorCode.UNSUPPORTED_PLATFORM
+
+
+@WINDOWS_ONLY
+@pytest.mark.windows_contract
+def test_windows_named_pipe_pins_same_sid_pid_and_process_generation(tmp_path: Path) -> None:
+    name = windows_ipc.named_pipe_name(tmp_path)
+    assert name == windows_ipc.named_pipe_name(tmp_path)
+    listener = windows_ipc.WindowsNamedPipeListener(name)
+    listener.settimeout(2.0)
+    accepted: list[object] = []
+
+    def accept() -> None:
+        connection, address = listener.accept()
+        accepted.extend((connection, address, local_identity.require_same_user_peer(connection)))
+
+    thread = threading.Thread(target=accept)
+    thread.start()
+    client = windows_ipc.connect_named_pipe(name, timeout=2.0)
     try:
-        monkeypatch.setattr(local_identity.sys, "platform", "linux")
-        with pytest.raises(LocalIdentityError) as raised:
-            darwin_peer_identity(left)
-        assert raised.value.code is LocalIdentityErrorCode.UNSUPPORTED_PLATFORM
+        expected_start = windows_ipc.current_process_start_ns()
+        identity = windows_ipc.require_expected_peer(
+            client,
+            pid=os.getpid(),
+            started_ns=expected_start,
+        )
+        assert identity == windows_ipc.WindowsPeerIdentity(
+            sid=windows_ipc.current_user_sid(),
+            pid=os.getpid(),
+            started_ns=expected_start,
+        )
+        assert client.get_inheritable() is False
+        with pytest.raises(OSError):
+            windows_ipc.require_expected_peer(
+                client,
+                pid=os.getpid(),
+                started_ns=expected_start + 100,
+            )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        server, address, server_identity = accepted
+        assert address is None
+        assert server_identity == identity
+        assert server.get_inheritable() is False
+        server.close()
     finally:
-        left.close()
-        right.close()
+        client.close()
+        listener.close()
+
+
+@WINDOWS_ONLY
+@pytest.mark.windows_contract
+def test_windows_descriptor_envelope_duplicates_only_from_authenticated_peer(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"authenticated capability")
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    listener = windows_ipc.WindowsNamedPipeListener(windows_ipc.named_pipe_name(tmp_path))
+    listener.settimeout(2.0)
+    observed: list[object] = []
+
+    def receive() -> None:
+        connection, _ = listener.accept()
+        local_identity.require_same_user_peer(connection)
+        received: tuple[int, ...] = ()
+        try:
+            payload, received = daemon_service._FrameReader().receive(  # noqa: SLF001
+                connection,
+                deadline=time.monotonic() + 2.0,
+                allow_descriptor=True,
+            )
+            observed.extend((payload, os.read(received[0], 64), len(received)))
+        finally:
+            for value in received:
+                os.close(value)
+            connection.close()
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    connection = windows_ipc.connect_named_pipe(
+        windows_ipc.named_pipe_name(tmp_path),
+        timeout=2.0,
+    )
+    try:
+        windows_ipc.require_expected_peer(
+            connection,
+            pid=os.getpid(),
+            started_ns=windows_ipc.current_process_start_ns(),
+        )
+        daemon_client._send_descriptor(  # noqa: SLF001
+            connection,
+            b'{"request":"opaque"}',
+            descriptor,
+            deadline=time.monotonic() + 2.0,
+        )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert observed == [b'{"request":"opaque"}', b"authenticated capability", 1]
+    finally:
+        connection.close()
+        listener.close()
+        os.close(descriptor)
+
+
+@WINDOWS_ONLY
+@pytest.mark.windows_contract
+def test_windows_daemon_spawn_inherits_only_the_exact_maintenance_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import msvcrt
+
+    lock_path = tmp_path / "maintenance.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    handle = msvcrt.get_osfhandle(descriptor)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def popen(command: list[str], **kwargs: object) -> object:
+        calls.append((command, kwargs))
+        return object()
+
+    monkeypatch.setattr(daemon_bootstrap, "_daemon_python", lambda: sys.executable)
+    monkeypatch.setattr(daemon_bootstrap.subprocess, "Popen", popen)
+    try:
+        os.set_handle_inheritable(handle, False)
+        daemon_bootstrap._spawn_daemon(startup_lock_handle=handle)  # noqa: SLF001
+        assert os.get_handle_inheritable(handle) is False
+    finally:
+        os.close(descriptor)
+
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command == [sys.executable, "-B", "-m", "vibecad.daemon"]
+    assert options["close_fds"] is True
+    assert "pass_fds" not in options
+    assert "start_new_session" not in options
+    startupinfo = options["startupinfo"]
+    assert startupinfo.lpAttributeList == {"handle_list": [handle]}
+    assert options["creationflags"] == (
+        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    )
+    environment = options["env"]
+    assert environment["VIBECAD_STARTUP_LOCK_HANDLE"] == str(handle)
+    assert status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV not in environment
+
+
+@WINDOWS_ONLY
+@pytest.mark.windows_contract
+def test_windows_real_bootstrap_ping_and_retire_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "VibeCAD"
+    run_root = home / "data" / daemon_api.DAEMON_DIRECTORY_NAME
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    client = None
+    daemon_id = None
+    try:
+        client = daemon_api.connect_or_start_local_kernel(timeout_seconds=15.0)
+        daemon_id = client.daemon_id
+        daemon_pid = client.daemon_pid
+        daemon_started_ns = client.daemon_started_ns
+        assert windows_ipc.process_start_ns(daemon_pid) == daemon_started_ns
+
+        ping = client.call("kernel.ping", {})
+        assert ping.error is None
+        assert ping.result["daemon_id"] == daemon_id
+        client.close()
+        client = None
+
+        assert daemon_api.retire_local_kernel(
+            reason="runtime_upgrade",
+            expected_daemon_id=daemon_id,
+            timeout_seconds=8.0,
+        )
+        with pytest.raises(OSError):
+            windows_ipc.process_start_ns(daemon_pid)
+        assert run_root.is_dir()
+        assert tuple(run_root.iterdir()) == ()
+        daemon_id = None
+    finally:
+        if client is not None:
+            client.close()
+        if daemon_id is not None:
+            with contextlib.suppress(daemon_api.DaemonError):
+                daemon_api.retire_local_kernel(
+                    reason="runtime_upgrade",
+                    expected_daemon_id=daemon_id,
+                    timeout_seconds=8.0,
+                )
 
 
 @DARWIN_ONLY
@@ -2670,7 +2860,10 @@ def test_run_daemon_refuses_start_while_uninstall_marker_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    home.mkdir()
+    if sys.platform == "win32":
+        status.ensure_private_directory(home, exclusive=True)
+    else:
+        home.mkdir()
     marker = home / ".uninstall_requested"
     marker.write_bytes(b"")
     marker.chmod(0o600)

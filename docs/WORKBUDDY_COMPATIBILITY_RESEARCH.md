@@ -1,11 +1,14 @@
 # WorkBuddy compatibility and model-selection research
 
 > Status: real GLM-5.2 multi-turn CAD/Release and GLM-5V-Turbo single/multi-view
-> image-to-CAD outcome certification completed with the bounded fixes and caveats below
+> image-to-CAD outcome certification completed on macOS; the current Windows
+> WorkBuddy host/resource path is also certified with the bounded fixes and
+> caveats below
 >
-> Evidence date: 2026-08-04
+> Evidence dates: 2026-08-04 (macOS) and 2026-08-20 (Windows)
 >
-> Tested installation: WorkBuddy 5.3.5 on macOS
+> Tested installations: WorkBuddy 5.3.5 on macOS; WorkBuddy 5.3.13 and CLI
+> 2.115.0 on Windows
 
 ## Product conclusion
 
@@ -53,6 +56,40 @@ The current buffered MCP resource contract is intentionally capped at 64 MiB.
 P2 rejects a Release package that cannot be retrieved within that contract;
 streaming or a larger authenticated local broker remains a later transport
 capability rather than an unbounded Blob allocation.
+
+## Windows 5.3.13 host-path certification
+
+The 2026-08-20 Windows run used WorkBuddy 5.3.13, CLI 2.115.0, an isolated
+project-local MCP/Skill configuration, a private `VIBECAD_HOME`, and the same
+managed FreeCAD 1.1.0 runtime used by VibeCAD 0.10.0. It completed the public
+project/task/model path without an alternate CAD authority:
+
+- project `project_93a2360782d22b28e324edb0ed4d9504` and task
+  `task_7dc0556a554bb5edba94288333d1afeb` converged at generation 11;
+- committed Revision `revision_1b050827ff2e788bd757d518b807ada4`
+  became HEAD;
+- the editable result was a `12 x 8 x 4 mm` box with volume `384 mm3`, and all
+  10 deterministic acceptance checks passed;
+- WorkBuddy's native deferred tool/resource path used `ToolSearch`,
+  `DeferExecuteTool`, `ReadMcpResource`, and the exact VibeCAD export operation;
+- the persisted FCStd was 2,958 bytes with SHA-256
+  `21069d6682e5cd67f7137977c2de7e6717896c527dd3861e86fd33bb376b3738`;
+- the persisted STEP was 6,836 bytes with SHA-256
+  `5cb0c60fc0d145849fc129cd34105aa9ba545221d1ca5e0938333ae5e2ed4a96`.
+
+Independent local reads matched both sizes, hashes, and native file signatures
+against the VibeCAD manifest. This certifies the exact Windows host profile and
+binary resource flow; it does not imply that every WorkBuddy model or future
+release has been certified.
+
+WorkBuddy 5.3.13's strict schema validator does not admit JSON `null` for the
+committed-artifact `draft_id` selector even though `null` remains the canonical
+MCP value. VibeCAD therefore also admits the exact string `"committed"` at the
+public parsing boundary and normalizes it immediately to the existing internal
+`None` authority. Draft IDs remain strict `draft_<32 lowercase hex>` values,
+unknown strings still fail closed, and the canonical `null` contract remains
+unchanged for other hosts. The project's canonical Skill documents this narrow
+host compatibility alias.
 
 ## Host capability matrix
 

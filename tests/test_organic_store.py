@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import vibecad.organic.store as store_module
+from vibecad import _file_compat
 from vibecad.interaction.storage import SafeRoot
 from vibecad.organic.contracts import (
     DerivedArtifact,
@@ -40,6 +42,19 @@ _MEDIA_TYPES = {
     DerivedArtifactKind.PREVIEW_PNG: "image/png",
     DerivedArtifactKind.VALIDATION_REPORT: "application/json",
 }
+
+
+def _make_private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
+
+
+def _write_private_file(path: Path, raw: bytes) -> None:
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
 
 
 def _request(*, generation: int = 1, job_digit: str = "1") -> MeshJobRequest:
@@ -190,10 +205,9 @@ def test_recovery_publishes_complete_stage_and_removes_partial_stage(tmp_path: P
     complete_stage = root / f".stage_{'1' * 32}_{request.generation:016x}_{'a' * 32}"
     final.rename(complete_stage)
     partial_stage = root / f".stage_{'2' * 32}_{2:016x}_{'b' * 32}"
-    partial_stage.mkdir(mode=0o700)
+    _make_private_directory(partial_stage)
     partial = partial_stage / "source.ply"
-    partial.write_bytes(_SOURCE)
-    partial.chmod(0o600)
+    _write_private_file(partial, _SOURCE)
 
     summary = store.recover_pending()
 
@@ -210,13 +224,11 @@ def test_recovery_removes_unpublished_manifest_and_tombstone_temporaries(
     request = _request()
     _publish(store, tmp_path, request)
     stage = root / f".stage_{'2' * 32}_{2:016x}_{'a' * 32}"
-    stage.mkdir(mode=0o700)
+    _make_private_directory(stage)
     manifest_temporary = stage / "manifest.tmp"
-    manifest_temporary.write_bytes(b"partial")
-    manifest_temporary.chmod(0o600)
+    _write_private_file(manifest_temporary, b"partial")
     tombstone_temporary = root / f".deleted_{'1' * 32}_{1:016x}_{'b' * 32}.tmp"
-    tombstone_temporary.write_bytes(b"partial")
-    tombstone_temporary.chmod(0o600)
+    _write_private_file(tombstone_temporary, b"partial")
 
     summary = store.recover_pending()
 
@@ -355,7 +367,7 @@ def test_delete_directory_swap_before_remove_fails_closed(
         if name.startswith(".delete_"):
             deleting = root / name
             deleting.rename(root / "held-generation")
-            deleting.mkdir(mode=0o700)
+            _make_private_directory(deleting)
         return original_remove(
             safe_root,
             root_fd,
@@ -381,8 +393,7 @@ def test_recovery_completes_durable_delete_protocol(
     request = _request()
     manifest = _publish(store, tmp_path, request)
     tombstone = root / f".deleted_{'1' * 32}_{request.generation:016x}.json"
-    tombstone.write_bytes(store_module._tombstone_bytes(manifest))
-    tombstone.chmod(0o600)
+    _write_private_file(tombstone, store_module._tombstone_bytes(manifest))
     final = root / f"mesh_generation_{'1' * 32}_{request.generation:016x}"
     if after_directory_rename:
         final.rename(root / f".delete_{'1' * 32}_{request.generation:016x}")
@@ -398,8 +409,7 @@ def test_recovery_finishes_partially_unlinked_delete_directory(tmp_path: Path) -
     request = _request()
     manifest = _publish(store, tmp_path, request)
     tombstone = root / f".deleted_{'1' * 32}_{request.generation:016x}.json"
-    tombstone.write_bytes(store_module._tombstone_bytes(manifest))
-    tombstone.chmod(0o600)
+    _write_private_file(tombstone, store_module._tombstone_bytes(manifest))
     final = root / f"mesh_generation_{'1' * 32}_{request.generation:016x}"
     deleting = root / f".delete_{'1' * 32}_{request.generation:016x}"
     final.rename(deleting)
@@ -464,7 +474,7 @@ def test_recovery_rejects_excess_temporary_count(
     monkeypatch.setattr(store_module, "MAX_ORGANIC_TEMPORARIES", 1)
     for token in ("a", "b"):
         stage = root / f".stage_{'1' * 32}_{1:016x}_{token * 32}"
-        stage.mkdir(mode=0o700)
+        _make_private_directory(stage)
 
     _assert_code(OrganicArtifactStoreErrorCode.BUDGET_EXCEEDED, store.recover_pending)
 
@@ -484,15 +494,34 @@ def test_payload_tampering_and_unsafe_source_mode_fail_closed(tmp_path: Path) ->
 
     other_tmp = tmp_path / "other"
     other_tmp.mkdir()
-    other_store, _ = _store(other_tmp)
+    other_store, other_root = _store(other_tmp)
     other_request = _request(job_digit="2")
     other_result = _result(other_request)
     with _payloads(tmp_path, other_request, other_result) as (source, artifacts):
-        os.fchmod(source.fd, 0o644)
-        _assert_code(
-            OrganicArtifactStoreErrorCode.INVALID_INPUT,
-            lambda: other_store.publish(other_request, source, other_result, artifacts),
-        )
+        if sys.platform == "win32":
+            unsafe_fd = _file_compat.open_windows_directory_fd(other_root)
+            try:
+                unsafe_source = OrganicPayloadSource(
+                    payload_id=source.payload_id,
+                    fd=unsafe_fd,
+                )
+                _assert_code(
+                    OrganicArtifactStoreErrorCode.INVALID_INPUT,
+                    lambda: other_store.publish(
+                        other_request,
+                        unsafe_source,
+                        other_result,
+                        artifacts,
+                    ),
+                )
+            finally:
+                os.close(unsafe_fd)
+        else:
+            os.fchmod(source.fd, 0o644)
+            _assert_code(
+                OrganicArtifactStoreErrorCode.INVALID_INPUT,
+                lambda: other_store.publish(other_request, source, other_result, artifacts),
+            )
 
 
 def test_directory_entry_swap_during_load_fails_closed(
@@ -508,7 +537,7 @@ def test_directory_entry_swap_during_load_fails_closed(
     def swap_after_verify(safe_root, directory_fd):
         result = original_verify(safe_root, directory_fd)
         final.rename(escaped)
-        final.mkdir(mode=0o700)
+        _make_private_directory(final)
         return result
 
     monkeypatch.setattr(store_module, "_verify_generation", swap_after_verify)

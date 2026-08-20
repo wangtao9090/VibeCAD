@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +16,13 @@ import pytest
 import vibecad.application.agent as agent_module
 import vibecad.application.project as project_module
 import vibecad.application.project_create as project_create_module
+from vibecad._file_compat import (
+    capture_windows_path,
+    set_private_dacl,
+)
+from vibecad._file_compat import (
+    pread as compat_pread,
+)
 from vibecad.application.agent import AgentApplication
 from vibecad.application.project_api import (
     ProjectCreateResult,
@@ -43,6 +52,13 @@ from vibecad.workflow.lease import (
 )
 
 PROJECT_ID = "project_11111111111111111111111111111111"
+_READONLY_DESCRIPTOR_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
+_POSIX_QUARANTINE_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX tombstone/receipt protocol; Windows uses exact File-ID deletion",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -210,7 +226,7 @@ def test_durable_descriptor_import_replays_by_locator_and_preserves_caller_fd(
     }
     before = os.stat(source)
     locator = bind_v2_import_locator(request, before)
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = os.open(source, _READONLY_DESCRIPTOR_FLAGS)
     try:
         created = service.create_project_from_descriptor(
             create_key=CREATE_KEY,
@@ -222,7 +238,7 @@ def test_durable_descriptor_import_replays_by_locator_and_preserves_caller_fd(
     finally:
         os.close(descriptor)
 
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = os.open(source, _READONLY_DESCRIPTOR_FLAGS)
     try:
         replayed = _durable_service(app).create_project_from_descriptor(
             create_key=CREATE_KEY,
@@ -283,9 +299,9 @@ def test_durable_descriptor_import_ignores_sender_shared_offset_mutation(
     }
     source_info = os.stat(source)
     locator = bind_v2_import_locator(request, source_info)
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = os.open(source, _READONLY_DESCRIPTOR_FLAGS)
     real_read = os.read
-    real_pread = os.pread
+    real_pread = getattr(os, "pread", compat_pread)
     perturbations: list[int] = []
 
     def perturb_if_source(value: int) -> None:
@@ -814,9 +830,15 @@ def test_durable_record_parser_rejects_unsafe_bindings_and_unbound_receipts(
     valid = _durable_import_record_for_phase(service, source, phase)
     assert valid.stage is not None
     if damage == "binding_mode":
-        invalid = replace(valid, stage=replace(valid.stage, mode=valid.stage.mode | 0o040))
+        damaged_mode = (
+            stat.S_IFDIR | stat.S_IMODE(valid.stage.mode)
+            if sys.platform == "win32"
+            else valid.stage.mode | 0o040
+        )
+        invalid = replace(valid, stage=replace(valid.stage, mode=damaged_mode))
     elif damage == "binding_uid":
-        invalid = replace(valid, stage=replace(valid.stage, uid=valid.stage.uid + 1))
+        damaged_uid = -1 if sys.platform == "win32" else valid.stage.uid + 1
+        invalid = replace(valid, stage=replace(valid.stage, uid=damaged_uid))
     elif damage == "binding_nlink":
         invalid = replace(valid, stage=replace(valid.stage, nlink=valid.stage.nlink + 1))
     else:
@@ -1043,14 +1065,21 @@ def test_durable_import_rejects_same_size_source_swap_after_reserved(
     service = _durable_service(app)
     source = _source(tmp_path, b"original-contents")
     original_copy = DurableProjectService._copy_source_to_stage
+    replacement_blocked = False
 
     def mutate_then_copy(self, opened, record):
+        nonlocal replacement_blocked
         if mutation == "replace":
             replacement = source.with_suffix(".replacement")
             replacement.write_bytes(b"replacement-data!")
             replacement.chmod(0o600)
             assert replacement.stat().st_size == source.stat().st_size
-            os.replace(replacement, source)
+            try:
+                os.replace(replacement, source)
+            except OSError as error:
+                if sys.platform != "win32" or error.winerror not in {5, 32}:
+                    raise
+                replacement_blocked = True
         else:
             source.write_bytes(b"rewritten-content")
             source.chmod(0o600)
@@ -1058,14 +1087,20 @@ def test_durable_import_rejects_same_size_source_swap_after_reserved(
         return original_copy(self, opened, record)
 
     monkeypatch.setattr(DurableProjectService, "_copy_source_to_stage", mutate_then_copy)
-    failed = service.create_project(
+    result = service.create_project(
         create_key=CREATE_KEY,
         kind=ProjectKind.IMPORT_FCSTD,
         source_path=str(source),
     )
-    _assert_port_failure(failed, ProjectServicePortErrorCode.INVALID_INPUT)
-    assert _durable_record(data_root)["phase"] == "RESERVED"
-    assert tuple((data_root / "bootstrap" / "staging").iterdir()) == ()
+    if sys.platform == "win32" and mutation == "replace":
+        assert replacement_blocked
+        _assert_port_failure(result, ProjectServicePortErrorCode.INTEGRITY_FAILURE)
+        assert _durable_record(data_root)["phase"] == "STAGED"
+        assert len(tuple((data_root / "bootstrap" / "staging").iterdir())) == 1
+    else:
+        _assert_port_failure(result, ProjectServicePortErrorCode.INVALID_INPUT)
+        assert _durable_record(data_root)["phase"] == "RESERVED"
+        assert tuple((data_root / "bootstrap" / "staging").iterdir()) == ()
     app.close()
 
 
@@ -1301,7 +1336,10 @@ def test_frozen_4096th_record_is_admitted_and_4097th_is_atomic(tmp_path: Path) -
         )
         path = requests / f"request_{index:032x}.json"
         path.write_bytes(project_create_module._record_bytes(record))  # noqa: SLF001
-        path.chmod(0o600)
+        if sys.platform == "win32":
+            set_private_dacl(path)
+        else:
+            path.chmod(0o600)
 
     _, records, _ = service._scan_store()  # noqa: SLF001
     assert records == 4096
@@ -1370,7 +1408,10 @@ def test_remaining_legacy_bootstrap_entry_blocks_new_durable_mutation(
     service = _durable_service(app)
     legacy = data_root / "bootstrap" / ".import.11111111111111111111111111111111.FCStd"
     legacy.write_bytes(b"legacy")
-    legacy.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(legacy)
+    else:
+        legacy.chmod(0o600)
 
     failed = service.create_project(
         create_key=CREATE_KEY,
@@ -1419,7 +1460,10 @@ def test_durable_sparse_unknown_entry_fails_closed_before_admission(tmp_path: Pa
     unknown = data_root / "bootstrap" / "unknown.bin"
     with unknown.open("wb") as stream:
         stream.truncate((2 * 1024 * 1024 * 1024) + 1)
-    unknown.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(unknown)
+    else:
+        unknown.chmod(0o600)
 
     value = service.create_project(
         create_key=CREATE_KEY,
@@ -1616,21 +1660,40 @@ def test_durable_import_rejects_ancestor_swap_after_descriptor_walk(
     outside.mkdir(mode=0o700)
     data_root = _data_root(tmp_path)
     app = AgentApplication.open(data_root=data_root)
-    service = _durable_service(app)
+    service = _durable_service(
+        app,
+        cad_port_factory=(
+            (lambda **_kwargs: _HashingImportPort())
+            if sys.platform == "win32"
+            else None
+        ),
+    )
     original_copy = DurableProjectService._copy_source_to_stage
+    ancestor_swap_blocked = False
 
     def swap_then_copy(self, opened, record):
-        source_root.rename(tmp_path / "detached-input-root")
+        nonlocal ancestor_swap_blocked
+        try:
+            source_root.rename(tmp_path / "detached-input-root")
+        except OSError as error:
+            if sys.platform != "win32" or error.winerror not in {5, 32}:
+                raise
+            ancestor_swap_blocked = True
+            return original_copy(self, opened, record)
         source_root.symlink_to(outside, target_is_directory=True)
         return original_copy(self, opened, record)
 
     monkeypatch.setattr(DurableProjectService, "_copy_source_to_stage", swap_then_copy)
-    failed = service.create_project(
+    result = service.create_project(
         create_key=CREATE_KEY,
         kind=ProjectKind.IMPORT_FCSTD,
         source_path=str(source),
     )
-    _assert_port_failure(failed, ProjectServicePortErrorCode.INVALID_INPUT)
+    if sys.platform == "win32":
+        assert ancestor_swap_blocked
+        assert type(result) is ProjectCreateResult
+    else:
+        _assert_port_failure(result, ProjectServicePortErrorCode.INVALID_INPUT)
     assert tuple(outside.iterdir()) == ()
     assert tuple((data_root / "bootstrap" / "staging").iterdir()) == ()
     app.close()
@@ -1713,21 +1776,36 @@ def test_durable_import_raw_source_is_opened_exactly_once(tmp_path: Path, monkey
     )
     source = _source(tmp_path)
     source_parent = source.parent.stat()
-    original_open = os.open
     raw_opens = 0
+    if sys.platform == "win32":
+        original_open = project_create_module.open_windows_external_file
 
-    def counting_open(path, flags, *args, dir_fd=None, **kwargs):
-        nonlocal raw_opens
-        if path == source.name and dir_fd is not None:
-            parent = os.fstat(dir_fd)
-            if (parent.st_dev, parent.st_ino) == (
-                source_parent.st_dev,
-                source_parent.st_ino,
-            ):
+        def counting_windows_open(path):
+            nonlocal raw_opens
+            if Path(path) == source:
                 raw_opens += 1
-        return original_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+            return original_open(path)
 
-    monkeypatch.setattr(os, "open", counting_open)
+        monkeypatch.setattr(
+            project_create_module,
+            "open_windows_external_file",
+            counting_windows_open,
+        )
+    else:
+        original_open = os.open
+
+        def counting_open(path, flags, *args, dir_fd=None, **kwargs):
+            nonlocal raw_opens
+            if path == source.name and dir_fd is not None:
+                parent = os.fstat(dir_fd)
+                if (parent.st_dev, parent.st_ino) == (
+                    source_parent.st_dev,
+                    source_parent.st_ino,
+                ):
+                    raw_opens += 1
+            return original_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+        monkeypatch.setattr(os, "open", counting_open)
     created = service.create_project(
         create_key=CREATE_KEY,
         kind=ProjectKind.IMPORT_FCSTD,
@@ -1781,7 +1859,10 @@ def test_durable_reserved_import_recovers_a_partial_stage_copy(tmp_path: Path) -
     token = body["intent_hmac"][:32]
     partial = data_root / "bootstrap" / "staging" / f".stage.{token}.FCStd"
     partial.write_bytes(b"partial")
-    partial.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(partial)
+    else:
+        partial.chmod(0o600)
 
     recovered = service.create_project(
         create_key=CREATE_KEY,
@@ -1831,7 +1912,10 @@ def test_durable_staged_import_recovers_a_partial_work_copy(
     assert work.exists()
     replacement = tmp_path / "partial-work.FCStd"
     replacement.write_bytes(b"partial")
-    replacement.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(replacement)
+    else:
+        replacement.chmod(0o600)
     os.replace(replacement, work)
 
     recovered = service.create_project(
@@ -1856,9 +1940,33 @@ def test_partial_cleanup_never_unlinks_an_entry_swapped_after_open(
     name = ".stage.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.FCStd"
     partial = root_path / name
     partial.write_bytes(b"partial")
-    partial.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(partial)
+    else:
+        partial.chmod(0o600)
     replacement = tmp_path / "replacement.FCStd"
     replacement.write_bytes(b"must-survive")
+    if sys.platform == "win32":
+        set_private_dacl(replacement)
+        original_delete = project_create_module.delete_windows_file
+        delete_calls = 0
+
+        def swap_before_exact_delete(path, *, parent, expected):
+            nonlocal delete_calls
+            delete_calls += 1
+            os.replace(replacement, partial)
+            return original_delete(path, parent=parent, expected=expected)
+
+        monkeypatch.setattr(
+            project_create_module,
+            "delete_windows_file",
+            swap_before_exact_delete,
+        )
+        removed = _remove_partial(root, name)  # noqa: SLF001
+        assert removed is False
+        assert delete_calls == 1
+        assert partial.read_bytes() == b"must-survive"
+        return
     replacement.chmod(0o600)
     original_stat = os.stat
     named_stats = 0
@@ -1892,7 +2000,10 @@ def test_cleanup_never_deletes_a_replacement_swapped_at_the_final_name_operation
     name = ".stage.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.FCStd"
     target = root_path / name
     target.write_bytes(b"record-owned")
-    target.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(target)
+    else:
+        target.chmod(0o600)
     target_info = target.stat()
     binding = project_create_module._binding(  # noqa: SLF001
         target_info,
@@ -1901,7 +2012,10 @@ def test_cleanup_never_deletes_a_replacement_swapped_at_the_final_name_operation
     )
     replacement = tmp_path / "replacement.FCStd"
     replacement.write_bytes(b"must-survive")
-    replacement.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(replacement)
+    else:
+        replacement.chmod(0o600)
     original_unlink = os.unlink
     original_rename = getattr(project_create_module, "_rename_noreplace", None)
     swapped = False
@@ -1911,6 +2025,28 @@ def test_cleanup_never_deletes_a_replacement_swapped_at_the_final_name_operation
         if not swapped:
             os.replace(replacement, target)
             swapped = True
+
+    if sys.platform == "win32":
+        original_delete = project_create_module.delete_windows_file
+
+        def swap_before_exact_delete(path, *, parent, expected):
+            swap_once()
+            return original_delete(path, parent=parent, expected=expected)
+
+        monkeypatch.setattr(
+            project_create_module,
+            "delete_windows_file",
+            swap_before_exact_delete,
+        )
+        removed = (
+            _unlink_bound(root, binding)
+            if bound_cleanup
+            else _remove_partial(root, name)
+        )
+        assert swapped is True
+        assert removed is False
+        assert target.read_bytes() == b"must-survive"
+        return
 
     def swap_before_rename(root_fd, source, destination):
         if source == name:
@@ -1960,13 +2096,52 @@ def test_cleanup_retry_converges_after_a_crash_immediately_after_quarantine_rena
     name = ".stage.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.FCStd"
     target = root_path / name
     target.write_bytes(b"record-owned")
-    target.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(target)
+    else:
+        target.chmod(0o600)
     target_info = target.stat()
     binding = project_create_module._binding(  # noqa: SLF001
         target_info,
         name=name,
         sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
     )
+    if sys.platform == "win32":
+        original_delete = project_create_module.delete_windows_file
+        crashed = False
+
+        def crash_after_exact_delete(path, *, parent, expected):
+            nonlocal crashed
+            original_delete(path, parent=parent, expected=expected)
+            if not crashed:
+                crashed = True
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            project_create_module,
+            "delete_windows_file",
+            crash_after_exact_delete,
+        )
+        with pytest.raises(KeyboardInterrupt):
+            if bound_cleanup:
+                _unlink_bound(root, binding)
+            else:
+                _remove_partial(root, name)
+        assert crashed is True
+        assert not target.exists()
+        monkeypatch.setattr(
+            project_create_module,
+            "delete_windows_file",
+            original_delete,
+        )
+        converged = (
+            _unlink_bound(root, binding)
+            if bound_cleanup
+            else _remove_partial(root, name)
+        )
+        assert converged is True
+        assert tuple(root_path.iterdir()) == ()
+        return
     original_rename = getattr(project_create_module, "_rename_noreplace", None)
     assert callable(original_rename)
     crashed = False
@@ -2011,6 +2186,7 @@ def test_cleanup_retry_converges_after_a_crash_immediately_after_quarantine_rena
 
 
 @pytest.mark.parametrize("bound_cleanup", [False, True], ids=["partial", "bound"])
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_never_deletes_a_replacement_swapped_into_the_quarantine_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2090,6 +2266,7 @@ def test_cleanup_never_deletes_a_replacement_swapped_into_the_quarantine_name(
     assert quarantine.read_bytes() == b"must-survive"
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_keeps_immutable_receipt_unchanged_after_convergence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2131,6 +2308,7 @@ def test_cleanup_keeps_immutable_receipt_unchanged_after_convergence(
     assert next(root_path.glob(".quarantine.*.FCStd")).stat().st_size == 0
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_rechecks_original_absence_after_fresh_quarantine_rename(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2192,6 +2370,7 @@ def test_cleanup_rechecks_original_absence_after_fresh_quarantine_rename(
     assert next(root_path.glob(".quarantine.*.FCStd")).read_bytes() == b"record-owned"
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_rechecks_original_absence_before_recovery_truncate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2257,6 +2436,7 @@ def test_cleanup_rechecks_original_absence_before_recovery_truncate(
 
 
 @pytest.mark.parametrize("replacement_bytes", [b"", b"{}"], ids=["zero", "malformed"])
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_pins_final_receipt_through_quarantine_truncate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2311,6 +2491,7 @@ def test_cleanup_pins_final_receipt_through_quarantine_truncate(
     assert receipt.read_bytes() == replacement_bytes
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_recovery_quota_rejection_precedes_quarantine_truncate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2356,6 +2537,7 @@ def test_recovery_quota_rejection_precedes_quarantine_truncate(
     assert quarantine.read_bytes() == b"record-owned"
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_bound_cleanup_requires_receipt_for_the_exact_expected_binding(
     tmp_path: Path,
 ) -> None:
@@ -2388,6 +2570,7 @@ def test_bound_cleanup_requires_receipt_for_the_exact_expected_binding(
     _assert_only_zero_quarantine_tombstones(root_path)
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_never_writes_an_existing_zero_receipt_entry(
     tmp_path: Path,
 ) -> None:
@@ -2428,6 +2611,7 @@ def test_cleanup_never_writes_an_existing_zero_receipt_entry(
     assert replacement.read_bytes() == b""
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_partial_receipt_short_write_recovers_without_rewriting_the_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2471,6 +2655,7 @@ def test_partial_receipt_short_write_recovers_without_rewriting_the_prefix(
 
 
 @pytest.mark.parametrize("crash_after_rename", [False, True], ids=["prepared", "published"])
+@_POSIX_QUARANTINE_ONLY
 def test_partial_receipt_prepare_and_publish_crashes_recover_immutably(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2525,6 +2710,7 @@ def test_partial_receipt_prepare_and_publish_crashes_recover_immutably(
     assert next(root_path.glob(".quarantine.*.FCStd")).stat().st_size == 0
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_receipt_quota_rejection_precedes_receipt_or_quarantine_mutation(
     tmp_path: Path,
 ) -> None:
@@ -2571,6 +2757,7 @@ def test_receipt_quota_rejection_precedes_receipt_or_quarantine_mutation(
 
 
 @pytest.mark.parametrize("bound_cleanup", [False, True], ids=["partial", "bound"])
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_preserves_original_and_quarantine_when_both_names_exist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2626,6 +2813,7 @@ def test_cleanup_preserves_original_and_quarantine_when_both_names_exist(
     assert quarantine.read_bytes() == b"record-owned"
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_lost_receipt_authority_never_truncates_a_new_original_next_to_old_quarantine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2663,6 +2851,7 @@ def test_lost_receipt_authority_never_truncates_a_new_original_next_to_old_quara
     assert receipt.read_bytes() == b""
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_mismatched_quarantine_replacement_is_never_moved_to_original_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2704,6 +2893,7 @@ def test_mismatched_quarantine_replacement_is_never_moved_to_original_name(
     assert quarantine.read_bytes() == b"unrelated replacement"
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_quarantine_data_is_not_counted_twice_against_the_active_reservation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2756,6 +2946,7 @@ def test_quarantine_data_is_not_counted_twice_against_the_active_reservation(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_store_scan_hashes_nonzero_quarantine_against_its_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2825,6 +3016,7 @@ def test_store_scan_hashes_nonzero_quarantine_against_its_receipt(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_third_quarantine_tombstone_for_one_role_is_resource_exhausted(
     tmp_path: Path,
 ) -> None:
@@ -2856,6 +3048,7 @@ def test_third_quarantine_tombstone_for_one_role_is_resource_exhausted(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_cleanup_refuses_to_create_a_third_quarantine_tombstone(tmp_path: Path) -> None:
     root_path = tmp_path / "staging"
     root_path.mkdir(mode=0o700)
@@ -2881,6 +3074,7 @@ def test_cleanup_refuses_to_create_a_third_quarantine_tombstone(tmp_path: Path) 
     assert len(tuple(root_path.glob(".quarantine.*.FCStd"))) == 2
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_zero_byte_quarantine_tombstones_still_consume_the_file_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2915,6 +3109,7 @@ def test_zero_byte_quarantine_tombstones_still_consume_the_file_budget(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_terminal_record_cannot_retain_even_a_zero_byte_owned_artifact(
     tmp_path: Path,
 ) -> None:
@@ -2942,6 +3137,7 @@ def test_terminal_record_cannot_retain_even_a_zero_byte_owned_artifact(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_terminal_nonzero_quarantine_precedes_reservation_exhaustion(
     tmp_path: Path,
 ) -> None:
@@ -2970,6 +3166,7 @@ def test_terminal_nonzero_quarantine_precedes_reservation_exhaustion(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_durable_partial_quarantine_crash_converges_before_recopy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3039,6 +3236,7 @@ def test_durable_partial_quarantine_crash_converges_before_recopy(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_durable_partial_original_and_quarantine_collision_requires_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3107,6 +3305,7 @@ def test_durable_partial_original_and_quarantine_collision_requires_recovery(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_durable_bound_quarantine_crash_replays_cleanup_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3171,6 +3370,7 @@ def test_durable_bound_quarantine_crash_replays_cleanup_receipt(
     app.close()
 
 
+@_POSIX_QUARANTINE_ONLY
 def test_durable_bound_original_and_quarantine_collision_keeps_cleanup_pending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3325,8 +3525,12 @@ def test_successful_import_retains_paired_cleanup_receipts_across_restart(
         for directory in ("staging", "work", "normalized")
         for path in (data_root / "bootstrap" / directory).glob(".quarantine-receipt.*.json")
     )
-    assert len(quarantines) == 2
-    assert len(receipts) == len(quarantines)
+    if sys.platform == "win32":
+        assert quarantines == ()
+        assert receipts == ()
+    else:
+        assert len(quarantines) == 2
+        assert len(receipts) == len(quarantines)
     receipt_names = {path.name for path in receipts}
     for quarantine in quarantines:
         match = project_create_module._QUARANTINE_NAME.fullmatch(  # noqa: SLF001
@@ -3364,6 +3568,9 @@ def test_successful_import_retains_paired_cleanup_receipts_across_restart(
         == created
     )
 
+    if sys.platform == "win32":
+        reopened_app.close()
+        return
     receipts[0].unlink()
     failed = reopened.create_project(
         create_key="project_create_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -3458,8 +3665,14 @@ def test_durable_post_cad_record_failure_never_executes_cad_twice(
     assert type(replayed) is ProjectCreateResult
     assert len(port.paths) == 1
     assert len(port.revalidation_paths) == 1
-    assert not port.paths[0].is_absolute()
-    assert not port.revalidation_paths[0].is_absolute()
+    if sys.platform == "win32":
+        assert port.paths[0].is_absolute()
+        assert port.revalidation_paths[0].is_absolute()
+        assert str(port.paths[0]).startswith("\\\\?\\")
+        assert str(port.revalidation_paths[0]).startswith("\\\\?\\")
+    else:
+        assert not port.paths[0].is_absolute()
+        assert not port.revalidation_paths[0].is_absolute()
     app.close()
 
 
@@ -3789,6 +4002,7 @@ def test_durable_eight_actual_attempts_hold_exactly_eight_live_slots(
     all_entered = threading.Event()
     release = threading.Event()
     entered = 0
+    wait_seconds = 30 if sys.platform == "win32" else 5
 
     def blocking_publish(self, record):
         nonlocal entered
@@ -3796,7 +4010,7 @@ def test_durable_eight_actual_attempts_hold_exactly_eight_live_slots(
             entered += 1
             if entered == 8:
                 all_entered.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=wait_seconds)
         return original_publish(self, record)
 
     monkeypatch.setattr(DurableProjectService, "_publish", blocking_publish)
@@ -3813,7 +4027,7 @@ def test_durable_eight_actual_attempts_hold_exactly_eight_live_slots(
     for thread in threads:
         thread.start()
     try:
-        assert all_entered.wait(timeout=5)
+        assert all_entered.wait(timeout=wait_seconds), (entered, results)
         ninth = service.create_project(
             create_key="project_create_ffffffffffffffffffffffffffffffff",
             kind=ProjectKind.EMPTY,
@@ -3823,9 +4037,9 @@ def test_durable_eight_actual_attempts_hold_exactly_eight_live_slots(
     finally:
         release.set()
         for thread in threads:
-            thread.join(timeout=5)
+            thread.join(timeout=wait_seconds)
     assert all(not thread.is_alive() for thread in threads)
-    assert all(type(value) is ProjectCreateResult for value in results)
+    assert all(type(value) is ProjectCreateResult for value in results), results
     app.close()
 
 
@@ -3937,7 +4151,11 @@ def test_import_bootstrap_publishes_only_exact_validated_generation_zero(tmp_pat
     assert result.revision.model.size_bytes == source.stat().st_size
     assert result.cleanup_required is False
     assert len(port.paths) == 1
-    assert not port.paths[0].is_absolute()
+    if sys.platform == "win32":
+        assert port.paths[0].is_absolute()
+        assert str(port.paths[0]).startswith("\\\\?\\")
+    else:
+        assert not port.paths[0].is_absolute()
     assert not port.paths[0].exists()
 
     durable = app._revision_store.revision_model_path(  # noqa: SLF001
@@ -4196,7 +4414,11 @@ def test_import_bootstrap_rejects_root_swap_without_touching_outside(
     assert caught.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
     assert tuple(outside.iterdir()) == ()
     assert tuple((data_root / "projects").iterdir()) == ()
-    assert tuple((data_root / "bootstrap-detached").iterdir()) == ()
+    detached = data_root / "bootstrap-detached"
+    if sys.platform == "win32":
+        assert not detached.exists()
+    else:
+        assert tuple(detached.iterdir()) == ()
     app.close()
 
 
@@ -4221,7 +4443,11 @@ def test_import_bootstrap_never_exposes_live_root_path_to_cad_checkpoint(
     assert caught.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
     assert tuple(outside.iterdir()) == ()
     assert tuple((data_root / "projects").iterdir()) == ()
-    assert tuple((data_root / "bootstrap-detached").iterdir()) == ()
+    detached = data_root / "bootstrap-detached"
+    if sys.platform == "win32":
+        assert not detached.exists()
+    else:
+        assert tuple(detached.iterdir()) == ()
     app.close()
 
 
@@ -4322,7 +4548,10 @@ def test_import_cleanup_failure_keeps_success_and_a_durable_retry_record(
     assert result.cleanup_required is True
     records = tuple((data_root / "bootstrap").glob("cleanup_*.json"))
     assert len(records) == 1
-    assert records[0].stat().st_mode & 0o777 == 0o600
+    if sys.platform == "win32":
+        assert Path(capture_windows_path(records[0], directory=False).path) == records[0]
+    else:
+        assert records[0].stat().st_mode & 0o777 == 0o600
     app.close()
 
     reopened = AgentApplication.open(

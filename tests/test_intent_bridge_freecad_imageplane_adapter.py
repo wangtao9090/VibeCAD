@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from vibecad import _file_compat
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
     BridgeBudget,
@@ -548,6 +549,8 @@ def test_host_owned_image_stager_is_exact_private_and_rejects_symlink(
     root = tmp_path / "staging"
     root.mkdir(mode=0o700)
     root.chmod(0o700)
+    if os.name == "nt":
+        _file_compat.set_private_dacl(root)
     payload = b"exact image source"
     stager = HostOwnedImageStager(root)
     lease = stager.stage_exact(
@@ -559,7 +562,16 @@ def test_host_owned_image_stager_is_exact_private_and_rejects_symlink(
         assert lease.path.read_bytes() == payload
         assert lease.path.parent.parent == root
         assert not lease.path.is_symlink()
-        assert stat.S_IMODE(lease.path.stat().st_mode) == 0o600
+        if os.name == "nt":
+            assert (
+                _file_compat.capture_windows_path(
+                    lease.path,
+                    directory=False,
+                ).owner_sid
+                == _file_compat.current_user_sid()
+            )
+        else:
+            assert stat.S_IMODE(lease.path.stat().st_mode) == 0o600
     assert tuple(root.iterdir()) == ()
 
     alias = tmp_path / "staging-link"
@@ -650,13 +662,16 @@ def test_real_freecad_imageplane_create_edit_roundtrip_tamper_and_rollback(
     for root in (asset_root, staging_root, checkpoint_root, native_root):
         root.mkdir(mode=0o700)
         root.chmod(0o700)
+        if os.name == "nt":
+            _file_compat.set_private_dacl(root)
     source_root = Path(__file__).parents[1] / "src"
     model_path = checkpoint_root / "ImagePlane.FCStd"
     code = f"""
 import dataclasses, hashlib, json, os, sys, zipfile
 from pathlib import Path
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD as App
 from vibecad.engine.document_assets import DocumentAssetWorkspace
 from vibecad.engine.session import Session
@@ -877,10 +892,15 @@ App.closeDocument(inner.Name)
 workspace.release_after_close(fault)
 assert tuple(asset_root.iterdir()) == ()
 """
+    child_environment = (
+        runtime_status.freecad_process_environment(os.environ)
+        if os.name == "nt"
+        else {**os.environ, "FREECAD_USER_TEMP": str(native_root)}
+    )
     subprocess.run(
         [str(runtime_python), "-c", code],
         check=True,
-        env={**os.environ, "FREECAD_USER_TEMP": str(native_root)},
+        env=child_environment,
     )
     assert model_path.is_file()
     assert tuple(asset_root.iterdir()) == ()

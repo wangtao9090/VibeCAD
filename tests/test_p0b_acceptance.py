@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import signal
 import stat
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vibecad import _file_compat
 from vibecad.application.agent import AgentApplication
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.interaction.cad import CadExecutionPort, CandidateEvidence
@@ -42,7 +44,11 @@ from vibecad.workflow.state import TaskArtifactRef
 
 _DARWIN_ONLY = pytest.mark.skipif(
     sys.platform != "darwin",
-    reason="the authenticated local daemon is currently a macOS capability",
+    reason="POSIX process/descriptor authority contract",
+)
+_DARWIN_OR_WINDOWS = pytest.mark.skipif(
+    sys.platform not in {"darwin", "win32"},
+    reason="authenticated local daemon requires Darwin or Windows",
 )
 
 
@@ -154,8 +160,12 @@ class _ReviewCadPort(CadExecutionPort):
 
 
 def _short_private_data_root() -> tuple[Path, Path]:
-    base = Path(tempfile.mkdtemp(prefix="vc-c13-", dir="/private/tmp"))
-    base.chmod(0o700)
+    if sys.platform == "win32":
+        base = Path(tempfile.gettempdir()) / f"vc-c13-{secrets.token_hex(8)}"
+        _file_compat.ensure_private_directory(base)
+    else:
+        base = Path(tempfile.mkdtemp(prefix="vc-c13-", dir="/private/tmp"))
+        base.chmod(0o700)
     return base, base / "data"
 
 
@@ -463,7 +473,17 @@ def _symlink_executable(path: Path) -> Path:
     return target
 
 
+_POSIX_DAEMON_SPAWN = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX descriptor-handoff contract; Windows HANDLE coverage is separate",
+)
+
+
 @pytest.mark.parametrize("host_name", ("freecadcmd", "FreeCAD"))
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX descriptor-handoff contract; Windows Named Pipe/HANDLE coverage is separate",
+)
 def test_each_embedded_freecad_host_uses_managed_python_for_cold_daemon(
     host_name: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -624,6 +644,7 @@ def test_each_embedded_freecad_host_uses_managed_python_for_cold_daemon(
     assert captures == [managed_prefix, managed_prefix]
 
 
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_mutable_sys_prefix_program_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -679,6 +700,7 @@ def test_python_program_path_is_exact_for_current_development_interpreter() -> N
     assert os.path.normpath(program) == program
 
 
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_cross_generation_active_host(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -743,6 +765,7 @@ def test_daemon_python_rejects_cross_generation_active_host(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_symlink_and_hardlink_host_aliases(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -800,6 +823,7 @@ def test_daemon_python_rejects_symlink_and_hardlink_host_aliases(
     "attack",
     ("program_path", "generation_evidence", "sys_executable", "sys_prefix"),
 )
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_unstable_startup_and_generation(
     attack: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -880,6 +904,7 @@ def test_daemon_python_rejects_unstable_startup_and_generation(
     "entry_kind",
     ("missing", "directory", "fifo", "non_executable"),
 )
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_invalid_exact_development_entry(
     entry_kind: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -923,6 +948,7 @@ def test_daemon_python_rejects_invalid_exact_development_entry(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_rejects_development_entry_target_swap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -983,6 +1009,7 @@ def test_daemon_python_rejects_development_entry_target_swap(
         ("captured", "FreeCAD", "symlink"),
     ),
 )
+@_POSIX_DAEMON_SPAWN
 def test_development_python_rejects_collision_with_every_derived_host(
     host_scope: str,
     host_name: str,
@@ -1029,6 +1056,7 @@ def test_development_python_rejects_collision_with_every_derived_host(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_managed_host_identity_must_be_unique(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1076,6 +1104,7 @@ def test_managed_host_identity_must_be_unique(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_managed_host_identity_must_be_distinct_from_captured_prefix_hosts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1127,6 +1156,7 @@ def test_managed_host_identity_must_be_distinct_from_captured_prefix_hosts(
 
 
 @pytest.mark.parametrize("selected", (True, False))
+@_POSIX_DAEMON_SPAWN
 def test_managed_python_rejects_collision_with_selected_or_unselected_host(
     selected: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -1178,6 +1208,7 @@ def test_managed_python_rejects_collision_with_selected_or_unselected_host(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_managed_python_rejects_forged_equal_target_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1236,6 +1267,7 @@ def test_managed_python_rejects_forged_equal_target_evidence(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_managed_python_rejects_forged_equal_prefix_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1288,6 +1320,7 @@ def test_managed_python_rejects_forged_equal_prefix_identity(
     assert popen_calls == []
 
 
+@_POSIX_DAEMON_SPAWN
 def test_managed_python_rejects_readiness_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1335,6 +1368,7 @@ def test_managed_python_rejects_readiness_drift(
 
 
 @pytest.mark.parametrize("entry", ("python.exe", "Scripts/python.exe"))
+@_POSIX_DAEMON_SPAWN
 def test_windows_exact_development_python_entries_are_admitted(
     entry: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1367,6 +1401,7 @@ def test_windows_exact_development_python_entries_are_admitted(
     assert popen_calls == [[str(python), "-B", "-m", "vibecad.daemon"]]
 
 
+@_POSIX_DAEMON_SPAWN
 def test_daemon_python_checks_full_active_a_b_b_a_a_sequence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1437,6 +1472,7 @@ def test_daemon_python_checks_full_active_a_b_b_a_a_sequence(
         "prefix_inode",
     ),
 )
+@_POSIX_DAEMON_SPAWN
 def test_development_final_callback_precedes_final_live_recapture(
     final_callback: str,
     mutation: str,
@@ -1527,6 +1563,7 @@ def test_development_final_callback_precedes_final_live_recapture(
         "prefix_inode",
     ),
 )
+@_POSIX_DAEMON_SPAWN
 def test_managed_final_callback_precedes_final_live_recapture(
     final_callback: str,
     mutation: str,
@@ -1806,7 +1843,7 @@ def test_known_import_response_is_not_rewritten_by_post_response_source_change(
     monkeypatch.setattr(
         client_module,
         "_open_import_source",
-        lambda _path, *, managed_identity: pinned,
+        lambda _path, **_kwargs: pinned,
     )
     monkeypatch.setattr(
         client_module.LocalKernelClient,
@@ -1903,12 +1940,24 @@ def test_daemon_bootstrap_concurrent_starters_keep_one_published_winner(
     monkeypatch.setattr(
         daemon_bootstrap,
         "read_boot_state",
-        lambda _root: SimpleNamespace(receipt=SimpleNamespace(pid=7_001)),
+        lambda _root: SimpleNamespace(receipt=SimpleNamespace(pid=7_001, started_ns=123_456_789)),
     )
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            daemon_bootstrap,
+            "process_start_ns",
+            lambda _pid: 123_456_789,
+        )
+        monkeypatch.setattr(
+            daemon_bootstrap,
+            "process_is_same_or_direct_child",
+            lambda *_args, **_kwargs: True,
+        )
     monkeypatch.setattr(
         daemon_bootstrap.os,
         "killpg",
         lambda pid, signum: terminated_groups.append((pid, signum)),
+        raising=False,
     )
     monkeypatch.setattr(
         daemon_bootstrap,
@@ -1920,7 +1969,7 @@ def test_daemon_bootstrap_concurrent_starters_keep_one_published_winner(
     for worker in workers:
         worker.start()
     for worker in workers:
-        worker.join(timeout=5)
+        worker.join(timeout=15 if sys.platform == "win32" else 5)
 
     assert all(not worker.is_alive() for worker in workers)
     assert errors == []
@@ -2194,7 +2243,11 @@ def test_retire_helper_never_treats_empty_run_root_as_process_completion(
         nonlocal now
         now += duration
 
-    monkeypatch.setattr(daemon_bootstrap, "_process_alive", lambda pid: pid == 4_242)
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_process_alive",
+        lambda pid, **_kwargs: pid == 4_242,
+    )
     with pytest.raises(DaemonError) as raised:
         daemon_bootstrap.retire_local_kernel(
             reason="runtime_upgrade",
@@ -2209,7 +2262,7 @@ def test_retire_helper_never_treats_empty_run_root_as_process_completion(
     assert run_root.is_dir() and list(run_root.iterdir()) == []
 
 
-@_DARWIN_ONLY
+@_DARWIN_OR_WINDOWS
 @pytest.mark.parametrize("empty_at_entry", [True, False])
 def test_retire_helper_requires_unclaimed_authority_when_receipt_is_absent(
     tmp_path: Path,
@@ -2293,10 +2346,14 @@ def test_uninstall_marker_blocks_daemon_connect_and_spawn(
     from vibecad.daemon.state import DaemonError, DaemonErrorCode
 
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(home)
     marker = home / ".uninstall_requested"
     marker.write_bytes(b"")
     marker.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(marker)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     calls: list[str] = []
 
@@ -2332,10 +2389,14 @@ def test_uninstall_marker_blocks_public_workbench_connect(
     from vibecad.runtime import paths
 
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(home)
     marker = home / ".uninstall_requested"
     marker.write_bytes(b"")
     marker.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(marker)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     calls: list[Path] = []
 
@@ -2462,7 +2523,7 @@ def test_public_open_retires_one_incompatible_kernel_then_starts_one_replacement
     client.close()
 
 
-@_DARWIN_ONLY
+@_DARWIN_OR_WINDOWS
 def test_retire_helper_stops_detached_daemon_and_next_boot_gets_new_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2473,8 +2534,12 @@ def test_retire_helper_stops_detached_daemon_and_next_boot_gets_new_identity(
     from vibecad.daemon.state import read_boot_state
     from vibecad.runtime import paths
 
-    base = Path(tempfile.mkdtemp(prefix="vc-c13-retire-", dir="/private/tmp"))
-    base.chmod(0o700)
+    if sys.platform == "win32":
+        base = Path(tempfile.gettempdir()) / f"vc-c13-retire-{secrets.token_hex(8)}"
+        _file_compat.ensure_private_directory(base)
+    else:
+        base = Path(tempfile.mkdtemp(prefix="vc-c13-retire-", dir="/private/tmp"))
+        base.chmod(0o700)
     monkeypatch.setenv("VIBECAD_HOME", str(base))
     first = None
     second = None
@@ -2537,7 +2602,7 @@ def test_mcp_application_opener_uses_the_public_daemon_client(
     assert server._open_agent_application() is expected
 
 
-@_DARWIN_ONLY
+@_DARWIN_OR_WINDOWS
 def test_mcp_import_admission_failures_keep_public_envelope_and_never_create(
     daemon_acceptance_rig: _DaemonAcceptanceRig,
     monkeypatch: pytest.MonkeyPatch,
@@ -2554,17 +2619,18 @@ def test_mcp_import_admission_failures_keep_public_envelope_and_never_create(
     symlink.symlink_to(source)
     hardlink = rig.base / "hardlink.FCStd"
     os.link(source, hardlink)
-    fifo = rig.base / "fifo.FCStd"
-    os.mkfifo(fifo)
     directory = rig.base / "directory.FCStd"
     directory.mkdir()
-    rejected = (
+    rejected = [
         rig.base / "missing.FCStd",
         symlink,
         hardlink,
-        fifo,
         directory,
-    )
+    ]
+    if sys.platform != "win32":
+        fifo = rig.base / "fifo.FCStd"
+        os.mkfifo(fifo)
+        rejected.insert(-1, fifo)
 
     class Slot:
         @staticmethod
@@ -2600,7 +2666,7 @@ def test_mcp_import_admission_failures_keep_public_envelope_and_never_create(
     assert after == before
 
 
-@_DARWIN_ONLY
+@_DARWIN_OR_WINDOWS
 def test_two_clients_share_one_daemon_task_draft_verdict_and_accepted_head(
     daemon_acceptance_rig: _DaemonAcceptanceRig,
     monkeypatch: pytest.MonkeyPatch,
@@ -2736,7 +2802,7 @@ def test_two_clients_share_one_daemon_task_draft_verdict_and_accepted_head(
         reconnected.close()
 
 
-@_DARWIN_ONLY
+@_DARWIN_OR_WINDOWS
 def test_two_clients_share_rejected_draft_while_head_remains_unchanged(
     daemon_acceptance_rig: _DaemonAcceptanceRig,
     monkeypatch: pytest.MonkeyPatch,

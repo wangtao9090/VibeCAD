@@ -172,6 +172,12 @@ Call `adopt_reconstruction` only after the user chooses the displayed proposal. 
 
 Call `get_artifact_manifest` first with the exact task generation, revision, and nullable draft binding. If it returns `materialized=true`, consume its typed `ResourceLink` entries and call `resources/read` for their URIs. If it returns `materialized=false`, call `export_task_artifacts` once with a retained export key, then consume its returned `ResourceLink` entries through `resources/read`. The manifest query is read-only: never expect it to create, copy, validate, or repair a delivery. Verify format, byte size, and SHA-256 evidence before handing off the FCStd and STEP files.
 
+For a committed artifact, send `draft_id: null` when the host supports JSON null correctly.
+WorkBuddy 5.3.13 must instead send the exact compatibility value
+`draft_id: "committed"`; VibeCAD normalizes it to the same committed authority.
+For an active draft, every host must send the exact returned `draft_...` identifier.
+The field remains required in all cases.
+
 Never request, expose, or read an arbitrary filesystem path. Artifact access must use the verified resource URI returned by VibeCAD.
 
 ## Release delivery

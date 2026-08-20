@@ -13,6 +13,17 @@ import threading
 from enum import StrEnum
 from pathlib import Path
 
+from vibecad._file_compat import (
+    LOCK_EX,
+    LOCK_NB,
+    LOCK_UN,
+    WindowsPathCapability,
+    capture_windows_path,
+    flock,
+    open_private_file,
+    validate_windows_path,
+)
+
 __all__ = (
     "LeaseError",
     "LeaseErrorCode",
@@ -165,6 +176,34 @@ class _WindowsFileLock:
             raise LeaseError(LeaseErrorCode.IO_ERROR)
 
 
+class _WindowsNativeFileLock:
+    """LockFileEx adapter used only by the native Windows production path."""
+
+    __slots__ = ()
+    platform_key = "windows"
+
+    def acquire(self, fd: int) -> None:
+        try:
+            flock(fd, LOCK_EX | LOCK_NB)
+        except OSError as exc:
+            if isinstance(exc, BlockingIOError) or exc.errno in {
+                errno.EACCES,
+                errno.EAGAIN,
+            }:
+                raise LeaseError(LeaseErrorCode.CONTENDED) from None
+            if exc.errno in {errno.ENOSYS, errno.ENOTSUP}:
+                raise LeaseError(LeaseErrorCode.LOCK_UNAVAILABLE) from None
+            raise LeaseError(LeaseErrorCode.IO_ERROR) from None
+
+    def release(self, fd: int) -> None:
+        try:
+            flock(fd, LOCK_UN)
+        except OSError as exc:
+            if exc.errno in {errno.ENOSYS, errno.ENOTSUP}:
+                raise LeaseError(LeaseErrorCode.LOCK_UNAVAILABLE) from None
+            raise LeaseError(LeaseErrorCode.IO_ERROR) from None
+
+
 def _windows_open_flags(os_module) -> int:
     return os_module.O_RDWR | os_module.O_BINARY | os_module.O_NOINHERIT
 
@@ -174,6 +213,8 @@ def _select_platform_adapter(platform_name: str):
         import fcntl
 
         return _PosixFileLock(fcntl)
+    if platform_name == "win32" and os.name == "nt":
+        return _WindowsNativeFileLock()
     raise LeaseError(LeaseErrorCode.UNSUPPORTED_PLATFORM)
 
 
@@ -492,6 +533,7 @@ def _cleanup_failed_acquire(adapter, locked: bool, fd, key, owner_token: str):
 class ResourceLease:
     __slots__ = (
         "_entry_identity",
+        "_entry_capability",
         "_fd",
         "_issuer",
         "_reservation",
@@ -536,6 +578,7 @@ def _new_lease(
     reservation: _Reservation,
     entry_identity: tuple[int, int],
     project_id,
+    entry_capability: WindowsPathCapability | None = None,
 ):
     lease = object.__new__(lease_type)
     object.__setattr__(lease, "_issuer", issuer)
@@ -544,6 +587,7 @@ def _new_lease(
     object.__setattr__(lease, "_registry_key", registry_key)
     object.__setattr__(lease, "_reservation", reservation)
     object.__setattr__(lease, "_entry_identity", entry_identity)
+    object.__setattr__(lease, "_entry_capability", entry_capability)
     object.__setattr__(lease, "resource_key", resource_key)
     object.__setattr__(lease, "owner_token", owner_token)
     object.__setattr__(lease, "released", False)
@@ -558,28 +602,45 @@ class ResourceLeaseManager:
         "_creator_pid",
         "_root_identity",
         "_root_parts",
+        "_root_capability",
+        "_root_path",
         "_seal",
     )
 
     def __init__(self, lock_root, *, trust) -> None:
         if type(trust) is not LeaseRootTrust or trust is not LeaseRootTrust.TRUSTED_LOCAL:
             raise LeaseError(LeaseErrorCode.UNTRUSTED_ROOT)
+        if sys.platform != "win32" or os.name != "nt":
+            # Preserve the POSIX admission order: capability discovery must
+            # fail before parsing or opening anything below the supplied root.
+            _require_posix_capabilities(os)
         adapter = _new_platform_adapter()
-        _require_posix_capabilities(os)
         creator_pid = os.getpid()
         parts = _coerce_root(lock_root)
-        root_fd, root_stat = _open_root(parts)
-        close_failed = False
-        try:
-            os.close(root_fd)
-        except OSError:
-            close_failed = True
-        if close_failed:
-            raise LeaseError(LeaseErrorCode.IO_ERROR)
+        root_path = Path(*parts)
+        root_capability: WindowsPathCapability | None = None
+        if sys.platform == "win32" and os.name == "nt":
+            try:
+                root_capability = capture_windows_path(root_path, directory=True)
+            except (OSError, TypeError, ValueError):
+                raise LeaseError(LeaseErrorCode.UNSAFE_ROOT) from None
+            root_identity = (root_capability.volume, root_capability.file_id)
+        else:
+            root_fd, root_stat = _open_root(parts)
+            close_failed = False
+            try:
+                os.close(root_fd)
+            except OSError:
+                close_failed = True
+            if close_failed:
+                raise LeaseError(LeaseErrorCode.IO_ERROR)
+            root_identity = (root_stat.st_dev, root_stat.st_ino)
         self._adapter = adapter
         self._creator_pid = creator_pid
         self._root_parts = parts
-        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
+        self._root_identity = root_identity
+        self._root_capability = root_capability
+        self._root_path = root_path
         self._seal = object()
 
     def _ensure_process(self) -> None:
@@ -598,6 +659,8 @@ class ResourceLeaseManager:
         return self._acquire_validated(resource_key, canonical)
 
     def _acquire_validated(self, resource_key: str, project_id):
+        if sys.platform == "win32" and os.name == "nt":
+            return self._acquire_validated_windows(resource_key, project_id)
         root_fd, root_stat = _open_root(self._root_parts, self._root_identity)
         owner_token = secrets.token_hex(32)
         registry_key = (
@@ -666,6 +729,83 @@ class ResourceLeaseManager:
             project_id,
         )
 
+    def _acquire_validated_windows(self, resource_key: str, project_id):
+        root_capability = self._root_capability
+        if type(root_capability) is not WindowsPathCapability:
+            raise LeaseError(LeaseErrorCode.UNSAFE_ROOT)
+        registry_key = (
+            self._adapter.platform_key,
+            root_capability.volume,
+            root_capability.file_id,
+            resource_key,
+        )
+        owner_token = secrets.token_hex(32)
+        reservation = _Reservation(owner_token)
+        if not _reserve_process_reservation(registry_key, reservation):
+            raise LeaseError(LeaseErrorCode.CONTENDED, resource_key=resource_key)
+        fd: int | None = None
+        locked = False
+        primary_error: LeaseError | None = None
+        entry_capability: WindowsPathCapability | None = None
+        try:
+            # Reject same-process contention before performing the comparatively
+            # expensive SID/DACL/File-ID recapture.  Under a retry storm this
+            # keeps contenders from starving the actual lease holder, while the
+            # winner still validates the complete native authority before use.
+            try:
+                validate_windows_path(root_capability, directory=True)
+            except (OSError, TypeError, ValueError):
+                raise LeaseError(LeaseErrorCode.UNSAFE_ROOT) from None
+            fd, entry_capability = open_private_file(
+                self._root_path / f"{resource_key}.lock",
+                create=True,
+                read_write=True,
+                expected_parent=root_capability,
+            )
+            reservation.fd = fd
+            self._adapter.acquire(fd)
+            locked = True
+            validate_windows_path(entry_capability, directory=False)
+            validate_windows_path(root_capability, directory=True)
+            opened = os.fstat(fd)
+            if (int(opened.st_dev), int(opened.st_ino)) != (
+                entry_capability.volume,
+                entry_capability.file_id,
+            ):
+                raise LeaseError(LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+        except LeaseError as exc:
+            primary_error = exc
+        except (OSError, TypeError, ValueError):
+            primary_error = LeaseError(
+                LeaseErrorCode.UNSAFE_LOCK_ENTRY,
+                resource_key=resource_key,
+            )
+        if primary_error is not None or fd is None or entry_capability is None:
+            _cleanup_failed_acquire(
+                self._adapter,
+                locked,
+                fd,
+                registry_key,
+                owner_token,
+            )
+            if primary_error is not None:
+                raise primary_error
+            raise LeaseError(LeaseErrorCode.IO_ERROR, resource_key=resource_key)
+        lease_type = ResourceLease if project_id is None else ProjectWriteLease
+        return _new_lease(
+            lease_type,
+            self,
+            self._seal,
+            resource_key,
+            owner_token,
+            fd,
+            registry_key,
+            reservation,
+            (entry_capability.volume, entry_capability.file_id),
+            project_id,
+            entry_capability,
+        )
+
     def release(self, lease, *, owner_token) -> None:
         self._ensure_process()
         if type(lease) is not ResourceLease and type(lease) is not ProjectWriteLease:
@@ -722,6 +862,7 @@ def _require_current_lease(lease) -> None:
         registry_key = lease._registry_key
         reservation = lease._reservation
         entry_identity = lease._entry_identity
+        entry_capability = lease._entry_capability
     except AttributeError:
         invalid_lease = True
     if invalid_lease:
@@ -747,6 +888,11 @@ def _require_current_lease(lease) -> None:
         or type(entry_identity) is not tuple
         or len(entry_identity) != 2
         or any(type(item) is not int for item in entry_identity)
+        or (
+            issuer._adapter.platform_key == "windows"
+            and type(entry_capability) is not WindowsPathCapability
+        )
+        or (issuer._adapter.platform_key != "windows" and entry_capability is not None)
     ):
         raise LeaseError(LeaseErrorCode.INVALID_LEASE)
     with _PROCESS_REGISTRY_LOCK:
@@ -763,21 +909,44 @@ def _require_current_lease(lease) -> None:
         root_fd = None
         primary_error = None
         try:
-            root_fd, root_stat = _open_root(issuer._root_parts, issuer._root_identity)
-            expected_registry_key = (
-                issuer._adapter.platform_key,
-                root_stat.st_dev,
-                root_stat.st_ino,
-                resource_key,
-            )
-            if registry_key != expected_registry_key:
-                raise LeaseError(LeaseErrorCode.INVALID_LEASE)
-            _validate_open_entry(
-                resource_key + ".lock",
-                root_fd,
-                fd,
-                entry_identity,
-            )
+            if issuer._adapter.platform_key == "windows":
+                root_capability = issuer._root_capability
+                if (
+                    type(root_capability) is not WindowsPathCapability
+                    or type(entry_capability) is not WindowsPathCapability
+                ):
+                    raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+                validate_windows_path(root_capability, directory=True)
+                validate_windows_path(entry_capability, directory=False)
+                opened = os.fstat(fd)
+                if (
+                    (int(opened.st_dev), int(opened.st_ino)) != entry_identity
+                    or entry_identity != (entry_capability.volume, entry_capability.file_id)
+                    or registry_key
+                    != (
+                        "windows",
+                        root_capability.volume,
+                        root_capability.file_id,
+                        resource_key,
+                    )
+                ):
+                    raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+            else:
+                root_fd, root_stat = _open_root(issuer._root_parts, issuer._root_identity)
+                expected_registry_key = (
+                    issuer._adapter.platform_key,
+                    root_stat.st_dev,
+                    root_stat.st_ino,
+                    resource_key,
+                )
+                if registry_key != expected_registry_key:
+                    raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+                _validate_open_entry(
+                    resource_key + ".lock",
+                    root_fd,
+                    fd,
+                    entry_identity,
+                )
         except LeaseError as error:
             primary_error = error
         except OSError:

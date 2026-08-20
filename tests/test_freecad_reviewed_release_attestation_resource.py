@@ -191,6 +191,30 @@ def test_rejects_missing_release_pin_before_reading_a_resource(monkeypatch):
     assert raised.value.path == "package_attestation/pin"
 
 
+def test_windows_platform_has_a_fixed_resource_and_fails_closed_without_its_pin(monkeypatch):
+    monkeypatch.setattr(
+        resource,
+        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM",
+        {},
+    )
+    monkeypatch.setattr(resource, "_platform_id", lambda: "windows.x86_64")
+    monkeypatch.setattr(
+        resource,
+        "_read_packaged_resource_bytes",
+        lambda _name: pytest.fail("must not read an unpinned Windows resource"),
+    )
+
+    with pytest.raises(CapabilityCatalogError) as raised:
+        resource.load_current_packaged_freecad_reviewed_release_attestation()
+
+    assert raised.value.code is CapabilityCatalogErrorCode.INVALID_STATUS
+    assert raised.value.path == "package_attestation/pin"
+    assert (
+        resource.FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID["windows.x86_64"]
+        == "freecad-reviewed-release-attestation-windows-x86_64-v1.json"
+    )
+
+
 def test_rejects_a_missing_fixed_package_resource(monkeypatch):
     raw = _raw()
     _pin(monkeypatch, raw)
@@ -222,11 +246,20 @@ def test_checked_in_resources_track_the_cross_platform_catalog126_release(
     loaded_x86 = resource.load_current_packaged_freecad_reviewed_release_attestation()
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.arm64")
     loaded_arm = resource.load_current_packaged_freecad_reviewed_release_attestation()
+    monkeypatch.setattr(resource, "_platform_id", lambda: "windows.x86_64")
+    loaded_windows = resource.load_current_packaged_freecad_reviewed_release_attestation()
 
-    assert loaded_x86.release_version == loaded_arm.release_version == __version__ == "0.10.0"
+    assert (
+        loaded_x86.release_version
+        == loaded_arm.release_version
+        == loaded_windows.release_version
+        == __version__
+        == "0.10.0"
+    )
     assert PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM == {
         (__version__, "macos.arm64"): loaded_arm.resource_sha256,
         (__version__, "macos.x86_64"): loaded_x86.resource_sha256,
+        (__version__, "windows.x86_64"): loaded_windows.resource_sha256,
     }
     x86_raw = json.loads(loaded_x86.raw)
     assert x86_raw["runtime_backend"]["platform_id"] == "macos.x86_64"
@@ -260,17 +293,47 @@ def test_checked_in_resources_track_the_cross_platform_catalog126_release(
         expected_source_attestation_sha256=loaded_arm.resource_sha256,
     )
 
-    assert [
-        (operation["operation_id"], operation["formal_spec_sha256"])
-        for operation in x86_raw["verification_set"]["formal_operations"]
-    ] == [
-        (operation["operation_id"], operation["formal_spec_sha256"])
-        for operation in arm_raw["verification_set"]["formal_operations"]
-    ]
-    assert [
-        (native["native_type_id"], native["formal_operation_ids"])
-        for native in x86_raw["verification_set"]["native_types"]
-    ] == [
-        (native["native_type_id"], native["formal_operation_ids"])
-        for native in arm_raw["verification_set"]["native_types"]
-    ]
+    windows_raw = json.loads(loaded_windows.raw)
+    assert windows_raw["runtime_backend"]["platform_id"] == "windows.x86_64"
+    assert len(windows_raw["verification_set"]["receipts"]) == 21
+    assert len(windows_raw["verification_set"]["formal_operations"]) == 126
+    assert len(windows_raw["verification_set"]["native_types"]) == 102
+    assert (
+        windows_raw["verification_set"]["current_formal_catalog_sha256"]
+        == (
+            verification_runtime._current_catalogs()[2]  # noqa: SLF001
+        )
+    )
+    decode_freecad_reviewed_release_attestation(
+        loaded_windows.raw,
+        expected_source_attestation_sha256=loaded_windows.resource_sha256,
+    )
+
+    assert (
+        [
+            (operation["operation_id"], operation["formal_spec_sha256"])
+            for operation in x86_raw["verification_set"]["formal_operations"]
+        ]
+        == [
+            (operation["operation_id"], operation["formal_spec_sha256"])
+            for operation in arm_raw["verification_set"]["formal_operations"]
+        ]
+        == [
+            (operation["operation_id"], operation["formal_spec_sha256"])
+            for operation in windows_raw["verification_set"]["formal_operations"]
+        ]
+    )
+    assert (
+        [
+            (native["native_type_id"], native["formal_operation_ids"])
+            for native in x86_raw["verification_set"]["native_types"]
+        ]
+        == [
+            (native["native_type_id"], native["formal_operation_ids"])
+            for native in arm_raw["verification_set"]["native_types"]
+        ]
+        == [
+            (native["native_type_id"], native["formal_operation_ids"])
+            for native in windows_raw["verification_set"]["native_types"]
+        ]
+    )

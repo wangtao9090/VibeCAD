@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from vibecad.runtime import spec
 
@@ -215,14 +216,14 @@ def test_release_workflow_gates_publishers_with_version_quality_managed_and_pack
     )
 
 
-def test_release_quality_gate_runs_on_the_supported_darwin_platform():
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    quality = re.search(
-        r"(?ms)^  quality:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        workflow,
-    )
-    assert quality is not None
-    assert re.search(r"(?m)^    runs-on: macos-latest$", quality.group("body"))
+def test_release_quality_gate_runs_on_every_supported_platform():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    quality = workflow["jobs"]["quality"]
+    assert quality["runs-on"] == "${{ matrix.runner }}"
+    assert quality["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"runner": ["macos-latest", "windows-2022"]},
+    }
 
 
 def test_ci_runtime_gate_binds_private_freecad_process_directories():
@@ -272,7 +273,7 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     ) in managed_body
 
 
-def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms():
+def test_release_reviewed_attestation_gate_covers_exact_trusted_platforms():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     gate = re.search(
         r"(?ms)^  reviewed-attestation:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
@@ -282,21 +283,34 @@ def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms(
     body = gate.group("body")
 
     assert re.search(r"(?m)^    runs-on: \$\{\{ matrix\.runner \}\}$", body)
-    assert re.search(
-        r"(?m)^          - platform_id: macos\.x86_64\n"
-        r"            runner: macos-15-intel\n"
-        r"          - platform_id: macos\.arm64\n"
-        r"            runner: macos-15$",
-        body,
-    )
+    parsed = yaml.safe_load(workflow)["jobs"]["reviewed-attestation"]
+    assert parsed["strategy"]["matrix"]["include"] == [
+        {
+            "platform_id": "macos.x86_64",
+            "runner": "macos-15-intel",
+            "bootstrap_python": "bin/python",
+        },
+        {
+            "platform_id": "macos.arm64",
+            "runner": "macos-15",
+            "bootstrap_python": "bin/python",
+        },
+        {
+            "platform_id": "windows.x86_64",
+            "runner": "windows-2022",
+            "bootstrap_python": "Scripts/python.exe",
+        },
+    ]
     assert "fail-fast: false" in body
+    assert all(step.get("shell") == "bash" for step in parsed["steps"] if "run" in step)
     assert 'runtime_home="$RUNNER_TEMP/vibecad-reviewed-attestation"' in body
     assert 'test ! -e "$runtime_home"' in body
     assert body.count("actions/download-artifact@v4") == 1
     assert "name: python-distributions" in body
     assert "[[ ${#wheels[@]} -eq 1 ]]" in body
     assert "VIBECAD_PIP_SPEC: ${{ steps.package.outputs.wheel }}" in body
-    assert 'uv pip install --python "$bootstrap/bin/python" --no-deps "$VIBECAD_PIP_SPEC"' in body
+    assert 'bootstrap_python="$bootstrap/${{ matrix.bootstrap_python }}"' in body
+    assert 'uv pip install --python "$bootstrap_python" --no-deps "$VIBECAD_PIP_SPEC"' in body
     assert "RuntimeInstaller().install()" in body
     assert "from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id" in body
     assert "assert actual == expected" in body
@@ -313,6 +327,15 @@ def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms(
     assert body.index(f"packaged={packaged_loader}()") < body.index(generator)
     assert '"$VIBECAD_MANAGED_FREECAD_PYTHON" -I' in body
     assert generator in body
+    assert "continue-on-error" not in body
+    for publisher in ("pypi", "mcpb"):
+        publisher_job = yaml.safe_load(workflow)["jobs"][publisher]
+        assert publisher_job["needs"] == [
+            "package-gate",
+            "managed-agent",
+            "reviewed-attestation",
+        ]
+        assert publisher_job.get("if") != "always()"
 
 
 def test_release_workflow_uses_explicit_least_privilege_permissions():

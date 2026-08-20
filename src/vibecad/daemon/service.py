@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -34,6 +35,13 @@ from vibecad.daemon.state import (
     recover_stale_state,
     require_published_state,
 )
+from vibecad.daemon.windows_ipc import (
+    HANDLE_ENVELOPE_BYTES,
+    WindowsNamedPipeConnection,
+    current_process_start_ns,
+    duplicate_handle_from_peer,
+    split_handle_envelope,
+)
 from vibecad.interaction.protocol_v2 import (
     MAX_V2_CONNECTIONS,
     MAX_V2_FRAME_PAYLOAD_BYTES,
@@ -59,6 +67,8 @@ _MAX_ANCILLARY_DESCRIPTORS = 8
 _ACCEPT_POLL_SECONDS = 0.2
 _SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _STARTUP_MAINTENANCE_TIMEOUT_SECONDS = 15.0
+_WINDOWS_RETIRE_DRAIN_SECONDS = 1.0
+_WINDOWS_STARTUP_LOCK_HANDLE_ENV = "VIBECAD_STARTUP_LOCK_HANDLE"
 _PUBLIC_DISPATCH_FAILURES = frozenset(
     {
         V2ErrorCode.UNKNOWN_METHOD,
@@ -124,13 +134,24 @@ class _FrameReader:
 
     @staticmethod
     def _part(
-        connection: socket.socket,
+        connection: socket.socket | WindowsNamedPipeConnection,
         size: int,
         *,
         deadline: float,
     ) -> tuple[bytes, list[int]]:
         result = bytearray()
         descriptors: list[int] = []
+        if isinstance(connection, WindowsNamedPipeConnection):
+            while len(result) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                connection.settimeout(remaining)
+                fragment = connection.recv(size - len(result))
+                if not fragment:
+                    raise _ConnectionClosed
+                result.extend(fragment)
+            return bytes(result), descriptors
         ancillary_size = socket.CMSG_SPACE(_MAX_ANCILLARY_DESCRIPTORS * array.array("i").itemsize)
         try:
             while len(result) < size:
@@ -158,7 +179,7 @@ class _FrameReader:
 
     def receive(
         self,
-        connection: socket.socket,
+        connection: socket.socket | WindowsNamedPipeConnection,
         *,
         deadline: float,
         allow_descriptor: bool = False,
@@ -172,7 +193,10 @@ class _FrameReader:
         if declared == 0:
             _close_descriptors(header_descriptors)
             raise V2ProtocolError(V2ErrorCode.MALFORMED_FRAME)
-        if declared > MAX_V2_FRAME_PAYLOAD_BYTES:
+        transport_limit = MAX_V2_FRAME_PAYLOAD_BYTES
+        if isinstance(connection, WindowsNamedPipeConnection):
+            transport_limit += HANDLE_ENVELOPE_BYTES
+        if declared > transport_limit:
             _close_descriptors(header_descriptors)
             raise V2ProtocolError(V2ErrorCode.FRAME_TOO_LARGE)
         try:
@@ -185,13 +209,33 @@ class _FrameReader:
             _close_descriptors(header_descriptors)
             raise
         descriptors = header_descriptors + payload_descriptors
+        if isinstance(connection, WindowsNamedPipeConnection):
+            try:
+                payload, source_handle = split_handle_envelope(payload)
+                if len(payload) > MAX_V2_FRAME_PAYLOAD_BYTES:
+                    raise V2ProtocolError(V2ErrorCode.FRAME_TOO_LARGE)
+                if source_handle is not None:
+                    if not allow_descriptor:
+                        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+                    descriptors.append(duplicate_handle_from_peer(connection, source_handle))
+            except V2ProtocolError:
+                _close_descriptors(descriptors)
+                raise
+            except (OSError, TypeError, ValueError):
+                _close_descriptors(descriptors)
+                raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST) from None
         if not allow_descriptor and descriptors:
             _close_descriptors(descriptors)
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
         return payload, tuple(descriptors)
 
 
-def _send(connection: socket.socket, payload: bytes, *, deadline: float) -> None:
+def _send(
+    connection: socket.socket | WindowsNamedPipeConnection,
+    payload: bytes,
+    *,
+    deadline: float,
+) -> None:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
@@ -320,7 +364,7 @@ class LocalKernelDaemon:
         lease_manager: ResourceLeaseManager,
         authority: ResourceLease,
         application: object,
-        listener: socket.socket,
+        listener: object,
         published: PublishedDaemonState,
         facade: LocalKernelFacade,
         stop: threading.Event,
@@ -340,7 +384,7 @@ class LocalKernelDaemon:
         self._state_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._connections_lock = threading.Lock()
-        self._connections: dict[socket.socket, threading.Thread] = {}
+        self._connections: dict[object, threading.Thread] = {}
         self._fatal_error: DaemonError | None = None
         self._state = LocalKernelState.RUNNING
         self._accept_thread = threading.Thread(
@@ -401,7 +445,9 @@ class LocalKernelDaemon:
                 root=run_root,
                 layout=layout,
                 daemon_id="daemon_" + secrets.token_hex(16),
-                started_ns=time.time_ns(),
+                started_ns=(
+                    current_process_start_ns() if sys.platform == "win32" else time.time_ns()
+                ),
                 endpoint=endpoint,
             )
             authority.require_current()
@@ -579,7 +625,11 @@ class LocalKernelDaemon:
                     with contextlib.suppress(OSError):
                         accepted.close()
 
-    def _serve_connection(self, connection: socket.socket, accepted_at: float) -> None:
+    def _serve_connection(
+        self,
+        connection: socket.socket | WindowsNamedPipeConnection,
+        accepted_at: float,
+    ) -> None:
         protocol = None
         session_id = None
         session_cleanup_error = None
@@ -624,6 +674,14 @@ class LocalKernelDaemon:
                         deadline=time.monotonic() + V2_IDLE_TIMEOUT_SECONDS,
                     )
                     if retire_after_send:
+                        if isinstance(connection, WindowsNamedPipeConnection):
+                            # DisconnectNamedPipe may discard unread outbound
+                            # bytes.  Wait until the authenticated client has
+                            # consumed the retirement response and closed its
+                            # one-shot connection before waking main teardown.
+                            connection.settimeout(_WINDOWS_RETIRE_DRAIN_SECONDS)
+                            with contextlib.suppress(OSError, TimeoutError):
+                                connection.recv(1)
                         self._request_retire()
                 finally:
                     _close_descriptors(descriptors)
@@ -767,7 +825,23 @@ def run_daemon() -> int:
             status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV,
             None,
         )
-        if inherited is None:
+        inherited_handle = os.environ.pop(_WINDOWS_STARTUP_LOCK_HANDLE_ENV, None)
+        if inherited is not None and inherited_handle is not None:
+            return 1
+        if inherited_handle is not None:
+            if sys.platform != "win32":
+                return 1
+            try:
+                raw_handle = int(inherited_handle, 10)
+            except (TypeError, ValueError):
+                return 1
+            if str(raw_handle) != inherited_handle or raw_handle <= 0:
+                return 1
+            adopter = getattr(status, "inherited_runtime_maintenance_claim_handle", None)
+            if not callable(adopter):
+                return 1
+            startup_guard = adopter(raw_handle)
+        elif inherited is None:
             startup_guard = status.runtime_maintenance_lock(
                 timeout=_STARTUP_MAINTENANCE_TIMEOUT_SECONDS,
             )

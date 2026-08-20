@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import errno
-import fcntl
 import hashlib
 import hmac
 import json
@@ -35,6 +34,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Protocol, runtime_checkable
 
+from vibecad import _file_compat
+from vibecad._file_compat import WindowsPathCapability
 from vibecad.execution.freecad_reviewed_artifact_host import (
     REVIEWED_ARTIFACT_MANIFEST_NAME,
     TaskInputSnapshotLease,
@@ -392,6 +393,12 @@ def _valid_directory(value: os.stat_result, *, device: int | None = None) -> boo
 
 
 def _valid_file(value: os.stat_result, *, device: int | None = None) -> bool:
+    if sys.platform == "win32":
+        return (
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and (device is None or value.st_dev == device)
+        )
     return (
         stat.S_ISREG(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -507,10 +514,14 @@ def _read_source(source: TrustedReviewedInput) -> tuple[ReviewedArtifactCatalogR
         fd = source.fd
         try:
             before = os.fstat(fd)
-            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            _file_compat.require_read_only(fd)
+            windows_capability = (
+                _file_compat.capture_windows_fd(fd, directory=False)
+                if sys.platform == "win32"
+                else None
+            )
             if (
                 not _valid_file(before)
-                or flags & os.O_ACCMODE != os.O_RDONLY
                 or before.st_size != descriptor.size_bytes
                 or before.st_size > MAX_REVIEWED_ARTIFACT_BYTES
             ):
@@ -519,7 +530,7 @@ def _read_source(source: TrustedReviewedInput) -> tuple[ReviewedArtifactCatalogR
             offset = 0
             remaining = before.st_size
             while remaining:
-                chunk = os.pread(fd, min(_READ_CHUNK_BYTES, remaining), offset)
+                chunk = _file_compat.pread(fd, min(_READ_CHUNK_BYTES, remaining), offset)
                 if not chunk:
                     _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
                 chunks.append(chunk)
@@ -535,6 +546,14 @@ def _read_source(source: TrustedReviewedInput) -> tuple[ReviewedArtifactCatalogR
                 or after.st_ctime_ns != before.st_ctime_ns
             ):
                 _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+            if windows_capability is not None:
+                current_capability = _file_compat.capture_windows_fd(
+                    fd,
+                    directory=False,
+                    generation_token=windows_capability.generation_token,
+                )
+                if current_capability != windows_capability:
+                    _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
         except ReviewedInputIngressError:
             raise
         except (OSError, OverflowError):
@@ -787,6 +806,387 @@ def _read_regular(
                 os.close(descriptor)
 
 
+def _windows_write_file(directory: Path, name: str, payload: bytes) -> None:
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        _fail(ReviewedInputIngressErrorCode.STORE_FAILURE)
+    path = directory / name
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            _file_compat.windows_extended_path(path),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0),
+            _FILE_MODE,
+        )
+        _file_compat.set_private_dacl(path)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset : offset + _READ_CHUNK_BYTES])
+            if written <= 0:
+                _fail(ReviewedInputIngressErrorCode.STORE_FAILURE)
+            offset += written
+        os.fsync(descriptor)
+        capability = _file_compat.capture_windows_fd(descriptor, directory=False)
+        current = os.fstat(descriptor)
+        if current.st_size != len(payload) or (current.st_dev, current.st_ino) != (
+            capability.volume,
+            capability.file_id,
+        ):
+            _fail(ReviewedInputIngressErrorCode.STORE_FAILURE)
+    except ReviewedInputIngressError:
+        raise
+    except OSError:
+        _fail(ReviewedInputIngressErrorCode.STORE_FAILURE)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def _windows_read_regular(path: Path, *, maximum: int) -> bytes:
+    descriptor = -1
+    try:
+        before = _file_compat.capture_windows_path(path, directory=False)
+        descriptor = os.open(
+            _file_compat.windows_extended_path(path),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+        )
+        _file_compat.require_read_only(descriptor)
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            before.volume,
+            before.file_id,
+        ) or not 1 <= opened.st_size <= maximum:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = _file_compat.capture_windows_path(
+            path,
+            directory=False,
+            generation_token=before.generation_token,
+        )
+        current = os.fstat(descriptor)
+        if after != before or (current.st_dev, current.st_ino, current.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ):
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+        return b"".join(chunks)
+    except ReviewedInputIngressError:
+        raise
+    except OSError:
+        _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def _windows_remove_flat_directory(
+    capability: WindowsPathCapability,
+    *,
+    expected_names: set[str] | None = None,
+) -> None:
+    try:
+        path = _file_compat.validate_windows_path(capability, directory=True)
+        names = {item.name for item in path.iterdir()}
+        if expected_names is not None and names != expected_names:
+            _fail(ReviewedInputIngressErrorCode.CLEANUP_FAILED)
+        for name in names:
+            item = path / name
+            _file_compat.capture_windows_path(item, directory=False)
+            os.unlink(_file_compat.windows_extended_path(item))
+        os.rmdir(_file_compat.windows_extended_path(path))
+    except FileNotFoundError:
+        return
+    except ReviewedInputIngressError:
+        raise
+    except OSError:
+        _fail(ReviewedInputIngressErrorCode.CLEANUP_FAILED)
+
+
+class _WindowsReviewedInputBackend:
+    __slots__ = ("_closed", "_creator_pid", "_parent", "_root")
+
+    def __init__(
+        self,
+        *,
+        application_root: Path,
+        expected_root_identity: tuple[int, int],
+    ) -> None:
+        try:
+            parent = _file_compat.capture_windows_path(application_root, directory=True)
+            if (parent.volume, parent.file_id) != expected_root_identity:
+                raise OSError
+        except OSError:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+        self._parent = parent
+        self._root: WindowsPathCapability | None = None
+        self._creator_pid = os.getpid()
+        self._closed = False
+
+    def require_live(self) -> Path:
+        if self._closed or self._creator_pid != os.getpid():
+            _fail(ReviewedInputIngressErrorCode.CLOSED)
+        try:
+            return _file_compat.validate_windows_path(self._parent, directory=True)
+        except OSError:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+
+    def open_root(self, *, create: bool) -> tuple[Path, WindowsPathCapability]:
+        parent = self.require_live()
+        path = parent / REVIEWED_INPUT_CATALOG_DIRECTORY
+        try:
+            if create and not path.exists():
+                try:
+                    path.mkdir()
+                    _file_compat.set_private_dacl(path)
+                except FileExistsError:
+                    pass
+            token = self._root.generation_token if self._root is not None else None
+            capability = _file_compat.capture_windows_path(
+                path,
+                directory=True,
+                generation_token=token,
+            )
+            if capability.volume != self._parent.volume:
+                raise OSError
+            if self._root is None:
+                self._root = capability
+            elif capability != self._root:
+                raise OSError
+            return path, capability
+        except FileNotFoundError:
+            _fail(ReviewedInputIngressErrorCode.NOT_FOUND)
+        except OSError:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+
+    def load_catalog(
+        self,
+        root: Path,
+        *,
+        name: str,
+        task_id: str,
+        project_id: str | None,
+        base_revision: str,
+    ) -> tuple[SealedReviewedInputCatalog, WindowsPathCapability]:
+        path = root / name
+        try:
+            capability = _file_compat.capture_windows_path(path, directory=True)
+            names = {item.name for item in path.iterdir()}
+            raw = _windows_read_regular(
+                path / REVIEWED_INPUT_CATALOG_MANIFEST,
+                maximum=_MANIFEST_MAX_BYTES,
+            )
+            receipt = _decode_catalog(raw)
+            if (
+                receipt.task_id != task_id
+                or receipt.base_revision != base_revision
+                or (project_id is not None and receipt.project_id != project_id)
+                or names
+                != {
+                    REVIEWED_INPUT_CATALOG_MANIFEST,
+                    *(record.artifact_id for record in receipt.records),
+                }
+            ):
+                _fail(ReviewedInputIngressErrorCode.AUTHORITY_VIOLATION)
+            for record in receipt.records:
+                payload = _windows_read_regular(
+                    path / record.artifact_id,
+                    maximum=record.maximum_bytes,
+                )
+                if len(payload) != record.size_bytes or not hmac.compare_digest(
+                    hashlib.sha256(payload).hexdigest(), record.content_sha256
+                ):
+                    _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+                _validate_record_authority(record, payload)
+            _file_compat.validate_windows_path(capability, directory=True)
+            return receipt, capability
+        except FileNotFoundError:
+            _fail(ReviewedInputIngressErrorCode.NOT_FOUND)
+        except ReviewedInputIngressError:
+            raise
+        except OSError:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+
+    def seal(
+        self,
+        *,
+        binding: tuple[str, str, str],
+        receipt: SealedReviewedInputCatalog,
+        loaded: tuple[tuple[ReviewedArtifactCatalogRecord, bytes], ...],
+    ) -> SealedReviewedInputCatalog:
+        by_id = {record.artifact_id: payload for record, payload in loaded}
+        name = _catalog_name(binding[0], binding[2])
+        stage_name = f".run_{receipt.catalog_sha256}.{secrets.token_hex(16)}.tmp"
+        root, _ = self.open_root(create=True)
+        stage = root / stage_name
+        stage_capability: WindowsPathCapability | None = None
+        try:
+            try:
+                existing, _ = self.load_catalog(
+                    root,
+                    name=name,
+                    task_id=binding[0],
+                    project_id=binding[1],
+                    base_revision=binding[2],
+                )
+            except ReviewedInputIngressError as error:
+                if error.code is not ReviewedInputIngressErrorCode.NOT_FOUND:
+                    raise
+            else:
+                if not hmac.compare_digest(existing.catalog_sha256, receipt.catalog_sha256):
+                    _fail(ReviewedInputIngressErrorCode.CONFLICT)
+                return existing
+            stage.mkdir()
+            _file_compat.set_private_dacl(stage)
+            stage_capability = _file_compat.capture_windows_path(stage, directory=True)
+            for record in receipt.records:
+                _windows_write_file(stage, record.artifact_id, by_id[record.artifact_id])
+            _windows_write_file(stage, REVIEWED_INPUT_CATALOG_MANIFEST, receipt.canonical_bytes)
+            try:
+                stage.rename(root / name)
+            except FileExistsError:
+                _windows_remove_flat_directory(stage_capability)
+                stage_capability = None
+                existing, _ = self.load_catalog(
+                    root,
+                    name=name,
+                    task_id=binding[0],
+                    project_id=binding[1],
+                    base_revision=binding[2],
+                )
+                if not hmac.compare_digest(existing.catalog_sha256, receipt.catalog_sha256):
+                    _fail(ReviewedInputIngressErrorCode.CONFLICT)
+                return existing
+            stage_capability = None
+            verified, _ = self.load_catalog(
+                root,
+                name=name,
+                task_id=binding[0],
+                project_id=binding[1],
+                base_revision=binding[2],
+            )
+            if not hmac.compare_digest(verified.catalog_sha256, receipt.catalog_sha256):
+                _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+            return verified
+        except ReviewedInputIngressError:
+            if stage_capability is not None:
+                with contextlib.suppress(ReviewedInputIngressError):
+                    _windows_remove_flat_directory(stage_capability)
+            raise
+        except OSError:
+            if stage_capability is not None:
+                with contextlib.suppress(ReviewedInputIngressError):
+                    _windows_remove_flat_directory(stage_capability)
+            _fail(ReviewedInputIngressErrorCode.STORE_FAILURE)
+
+    def acquire(
+        self,
+        *,
+        task: str,
+        project: str,
+        base: str,
+        run: str,
+    ) -> TaskInputSnapshotLease:
+        root, root_capability = self.open_root(create=False)
+        name = _catalog_name(task, base)
+        receipt, _ = self.load_catalog(
+            root,
+            name=name,
+            task_id=task,
+            project_id=project,
+            base_revision=base,
+        )
+        snapshot = ReviewedArtifactCatalogSnapshot(
+            task_id=task,
+            project_id=project,
+            base_revision=base,
+            run_id=run,
+            records=receipt.records,
+        )
+        run_name = (
+            ".run_"
+            + hashlib.sha256(
+                _RUN_NAME_DOMAIN
+                + _canonical_json(
+                    {
+                        "base_revision": base,
+                        "project_id": project,
+                        "run_id": run,
+                        "task_id": task,
+                    },
+                    maximum=2048,
+                )
+            ).hexdigest()
+            + f".{secrets.token_hex(16)}.tmp"
+        )
+        path = root / run_name
+        capability: WindowsPathCapability | None = None
+        transferred = False
+        try:
+            path.mkdir()
+            _file_compat.set_private_dacl(path)
+            capability = _file_compat.capture_windows_path(path, directory=True)
+            catalog = root / name
+            for record in snapshot.records:
+                payload = _windows_read_regular(
+                    catalog / record.artifact_id,
+                    maximum=record.maximum_bytes,
+                )
+                _windows_write_file(path, record.artifact_id, payload)
+            _windows_write_file(
+                path,
+                REVIEWED_ARTIFACT_MANIFEST_NAME,
+                _canonical_json(snapshot.to_mapping()),
+            )
+            lease = TaskInputSnapshotLease(
+                snapshot=snapshot,
+                directory_capability=capability,
+                cleanup_parent_capability=root_capability,
+                cleanup_name=run_name,
+            )
+            transferred = True
+            return lease
+        except ReviewedInputIngressError:
+            raise
+        except BaseException:
+            _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
+        finally:
+            if not transferred and capability is not None:
+                with contextlib.suppress(ReviewedInputIngressError):
+                    _windows_remove_flat_directory(capability)
+
+    def discard(self, *, task: str, project: str, base: str) -> None:
+        try:
+            root, _ = self.open_root(create=False)
+            _, capability = self.load_catalog(
+                root,
+                name=_catalog_name(task, base),
+                task_id=task,
+                project_id=project,
+                base_revision=base,
+            )
+        except ReviewedInputIngressError as error:
+            if error.code is ReviewedInputIngressErrorCode.NOT_FOUND:
+                return
+            raise
+        _windows_remove_flat_directory(capability)
+
+    def close(self) -> None:
+        self._closed = True
+
+
 class ReviewedInputCatalogStore:
     """Identity-pinned host catalog and TaskInputSnapshotProvider implementation."""
 
@@ -797,6 +1197,7 @@ class ReviewedInputCatalogStore:
         "_parent_fd",
         "_parent_identity",
         "_root_identity",
+        "_windows_backend",
     )
 
     def __init__(
@@ -813,6 +1214,19 @@ class ReviewedInputCatalogStore:
             or any(type(item) is not int for item in expected_root_identity)
         ):
             raise TypeError("invalid reviewed input store composition")
+        self._windows_backend: _WindowsReviewedInputBackend | None = None
+        self._creator_pid = os.getpid()
+        self._closed = False
+        self._lock = threading.RLock()
+        if sys.platform == "win32":
+            self._windows_backend = _WindowsReviewedInputBackend(
+                application_root=application_root,
+                expected_root_identity=expected_root_identity,
+            )
+            self._parent_fd = -1
+            self._parent_identity = (0, 0, 0, 0)
+            self._root_identity = None
+            return
         parent_fd = -1
         try:
             parent_fd = os.open(application_root, _directory_flags())
@@ -835,9 +1249,6 @@ class ReviewedInputCatalogStore:
         self._parent_fd = parent_fd
         self._parent_identity = _directory_identity(parent)
         self._root_identity: tuple[int, int, int, int] | None = None
-        self._creator_pid = os.getpid()
-        self._closed = False
-        self._lock = threading.RLock()
 
     def _require_live(self) -> None:
         if self._closed or os.getpid() != self._creator_pid:
@@ -976,6 +1387,12 @@ class ReviewedInputCatalogStore:
         root_fd = -1
         stage_fd = -1
         with self._lock:
+            if self._windows_backend is not None:
+                return self._windows_backend.seal(
+                    binding=binding,
+                    receipt=receipt,
+                    loaded=loaded,
+                )
             try:
                 root_fd = self._open_root(create=True)
                 try:
@@ -1079,6 +1496,21 @@ class ReviewedInputCatalogStore:
         root_fd = -1
         catalog_fd = -1
         with self._lock:
+            if self._windows_backend is not None:
+                try:
+                    root, _ = self._windows_backend.open_root(create=False)
+                    self._windows_backend.load_catalog(
+                        root,
+                        name=name,
+                        task_id=source.task_id,
+                        project_id=None,
+                        base_revision=source.base_revision,
+                    )
+                    return True
+                except ReviewedInputIngressError as error:
+                    if error.code is ReviewedInputIngressErrorCode.NOT_FOUND:
+                        return False
+                    raise
             try:
                 root_fd = self._open_root(create=False)
                 _, catalog_fd = self._load_catalog(
@@ -1136,6 +1568,13 @@ class ReviewedInputCatalogStore:
             + f".{secrets.token_hex(16)}.tmp"
         )
         with self._lock:
+            if self._windows_backend is not None:
+                return self._windows_backend.acquire(
+                    task=task,
+                    project=project,
+                    base=base,
+                    run=run,
+                )
             try:
                 root_fd = self._open_root(create=False)
                 receipt, catalog_fd = self._load_catalog(
@@ -1213,6 +1652,9 @@ class ReviewedInputCatalogStore:
         root_fd = -1
         catalog_fd = -1
         with self._lock:
+            if self._windows_backend is not None:
+                self._windows_backend.discard(task=task, project=project, base=base)
+                return
             try:
                 try:
                     root_fd = self._open_root(create=False)
@@ -1244,6 +1686,9 @@ class ReviewedInputCatalogStore:
             if self._closed:
                 return
             self._closed = True
+            if self._windows_backend is not None:
+                self._windows_backend.close()
+                return
             descriptor = self._parent_fd
             self._parent_fd = -1
             try:

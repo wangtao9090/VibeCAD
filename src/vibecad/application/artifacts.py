@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import errno
-import fcntl
 import hashlib
 import json
 import math
@@ -29,6 +28,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from vibecad import _file_compat as fcntl
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     RevisionArtifactRef,
@@ -52,6 +52,408 @@ from vibecad.workflow.store import (
     TaskStoreError,
     TaskStoreErrorCode,
 )
+
+_native_os = os
+
+
+class _WindowsArtifactDirEntry:
+    """DirEntry facade whose identity comes from a real opened Windows file."""
+
+    __slots__ = ("_owner", "_path", "name", "path")
+
+    def __init__(self, owner: _ArtifactOS, path: Path) -> None:
+        self._owner = owner
+        self._path = path
+        self.name = path.name
+        self.path = _native_os.fspath(path)
+
+    def __fspath__(self) -> str:
+        return self.path
+
+    def stat(self, *, follow_symlinks: bool = True):
+        return self._owner._capture(self._path)[0]
+
+    def is_symlink(self) -> bool:
+        value = _native_os.lstat(fcntl.windows_extended_path(self._path))
+        return stat.S_ISLNK(value.st_mode) or bool(
+            int(getattr(value, "st_file_attributes", 0)) & 0x00000400
+        )
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        try:
+            return stat.S_ISDIR(self.stat(follow_symlinks=follow_symlinks).st_mode)
+        except OSError:
+            return False
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        try:
+            return stat.S_ISREG(self.stat(follow_symlinks=follow_symlinks).st_mode)
+        except OSError:
+            return False
+
+    def inode(self) -> int:
+        return int(self.stat(follow_symlinks=False).st_ino)
+
+
+class _ArtifactOS:
+    """Module-local Win32 dir-fd adapter; POSIX calls remain byte-for-byte native."""
+
+    __slots__ = ("_native", "__dict__")
+
+    def __init__(self, native) -> None:
+        self._native = native
+
+    def __getattr__(self, name: str):
+        return getattr(self._native, name)
+
+    @staticmethod
+    def _normalized(path: object) -> Path:
+        value = Path(path)  # type: ignore[arg-type]
+        return Path(_native_os.path.abspath(value))
+
+    @staticmethod
+    def _child(directory_fd: int, name: object) -> Path:
+        if (
+            type(directory_fd) is not int
+            or directory_fd < 0
+            or type(name)
+            not in {
+                str,
+                bytes,
+            }
+        ):
+            raise OSError(errno.EINVAL, "invalid relative Windows filesystem operation")
+        if type(name) is bytes:
+            try:
+                rendered = name.decode("ascii")
+            except UnicodeError:
+                raise OSError(errno.EINVAL, "invalid Windows child name") from None
+        else:
+            rendered = name
+        if (
+            not rendered
+            or rendered in {".", ".."}
+            or Path(rendered).is_absolute()
+            or "/" in rendered
+            or "\\" in rendered
+            or Path(rendered).name != rendered
+        ):
+            raise OSError(errno.EINVAL, "invalid Windows child name")
+        parent = fcntl.capture_windows_fd(directory_fd, directory=True)
+        return Path(parent.path) / rendered
+
+    @classmethod
+    def _path(cls, path: object, directory_fd: int | None) -> Path:
+        return cls._normalized(path) if directory_fd is None else cls._child(directory_fd, path)
+
+    @staticmethod
+    def _capture(path: Path):
+        value = _native_os.lstat(fcntl.windows_extended_path(path))
+        if stat.S_ISDIR(value.st_mode):
+            capability = fcntl.capture_windows_path(path, directory=True)
+        elif stat.S_ISREG(value.st_mode):
+            capability = fcntl.capture_windows_path(path, directory=False)
+        else:
+            raise OSError(errno.EACCES, "unsafe Windows filesystem object")
+        return value, capability
+
+    def lstat(self, path: object, *, dir_fd: int | None = None):
+        if sys.platform != "win32":
+            if dir_fd is None:
+                return self._native.lstat(path)
+            return self._native.lstat(path, dir_fd=dir_fd)
+        target = self._path(path, dir_fd)
+        return self._capture(target)[0]
+
+    def stat(
+        self,
+        path: object,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ):
+        if sys.platform != "win32":
+            return self._native.stat(
+                path,
+                dir_fd=dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+        target = self._path(path, dir_fd)
+        return self._capture(target)[0]
+
+    def fstat(self, descriptor: int):
+        value = self._native.fstat(descriptor)
+        if sys.platform == "win32":
+            if stat.S_ISDIR(value.st_mode):
+                fcntl.capture_windows_fd(descriptor, directory=True)
+            elif stat.S_ISREG(value.st_mode):
+                fcntl.capture_windows_fd(descriptor, directory=False)
+            else:
+                raise OSError(errno.EACCES, "unsafe Windows descriptor object")
+        return value
+
+    def open(
+        self,
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if sys.platform != "win32":
+            if dir_fd is None:
+                return self._native.open(path, flags, mode)
+            return self._native.open(path, flags, mode, dir_fd=dir_fd)
+        target = self._path(path, dir_fd)
+        try:
+            existing = _native_os.lstat(fcntl.windows_extended_path(target))
+        except FileNotFoundError:
+            existing = None
+        write_flags = _native_os.O_WRONLY | _native_os.O_RDWR
+        if existing is not None and stat.S_ISDIR(existing.st_mode):
+            if flags & write_flags:
+                raise OSError(errno.EISDIR, "directory is not writable through a CRT fd")
+            return fcntl.open_windows_directory_fd(target)
+        create = bool(flags & _native_os.O_CREAT)
+        exclusive = bool(flags & _native_os.O_EXCL)
+        writable = bool(flags & write_flags)
+        parent_capability = fcntl.capture_windows_path(target.parent, directory=True)
+        descriptor, _capability = fcntl.open_private_file(
+            target,
+            create=create,
+            read_write=writable,
+            exclusive=exclusive,
+            expected_parent=parent_capability,
+        )
+        try:
+            if flags & _native_os.O_TRUNC:
+                if not writable:
+                    raise OSError(errno.EINVAL, "read-only descriptor cannot truncate")
+                self._native.ftruncate(descriptor, 0)
+            if flags & _native_os.O_APPEND:
+                self._native.lseek(descriptor, 0, _native_os.SEEK_END)
+            return descriptor
+        except BaseException:
+            self._native.close(descriptor)
+            raise
+
+    def scandir(self, path: object = "."):
+        if sys.platform != "win32" or type(path) is not int:
+            return self._native.scandir(path)
+        capability = fcntl.capture_windows_fd(path, directory=True)
+        directory = Path(capability.path)
+        native_entries = tuple(self._native.scandir(fcntl.windows_extended_path(directory)))
+        entries = tuple(
+            _WindowsArtifactDirEntry(self, directory / entry.name) for entry in native_entries
+        )
+        for entry in entries:
+            self._capture(entry._path)
+        if (
+            fcntl.capture_windows_fd(
+                path,
+                directory=True,
+                generation_token=capability.generation_token,
+            )
+            != capability
+        ):
+            raise OSError(errno.EACCES, "Windows directory identity changed")
+        return iter(entries)
+
+    def mkdir(
+        self,
+        path: object,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if sys.platform != "win32":
+            if dir_fd is None:
+                self._native.mkdir(path, mode)
+            else:
+                self._native.mkdir(path, mode, dir_fd=dir_fd)
+            return
+        target = self._path(path, dir_fd)
+        if _native_os.path.lexists(fcntl.windows_extended_path(target)):
+            raise FileExistsError(errno.EEXIST, "directory exists", _native_os.fspath(target))
+        parent = fcntl.capture_windows_path(target.parent, directory=True)
+        fcntl.ensure_private_directory(target, expected_parent=parent)
+
+    def chmod(
+        self,
+        path: object,
+        mode: int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if sys.platform != "win32":
+            self._native.chmod(
+                path,
+                mode,
+                dir_fd=dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+            return
+        target = self._path(path, dir_fd)
+        fcntl.set_private_dacl(target)
+        self._capture(target)
+
+    def fchmod(self, descriptor: int, mode: int) -> None:
+        if sys.platform != "win32":
+            self._native.fchmod(descriptor, mode)
+            return
+        value = self._native.fstat(descriptor)
+        fcntl.capture_windows_fd(descriptor, directory=stat.S_ISDIR(value.st_mode))
+
+    def fsync(self, descriptor: int) -> None:
+        if sys.platform != "win32":
+            self._native.fsync(descriptor)
+            return
+        value = self._native.fstat(descriptor)
+        if stat.S_ISDIR(value.st_mode):
+            before = fcntl.capture_windows_fd(descriptor, directory=True)
+            after = fcntl.capture_windows_fd(
+                descriptor,
+                directory=True,
+                generation_token=before.generation_token,
+            )
+            if after != before:
+                raise OSError(errno.EACCES, "Windows directory identity changed")
+            return
+        self._native.fsync(descriptor)
+
+    def unlink(self, path: object, *, dir_fd: int | None = None) -> None:
+        if sys.platform != "win32":
+            self._native.unlink(path, dir_fd=dir_fd)
+            return
+        target = self._path(path, dir_fd)
+        parent = fcntl.capture_windows_path(target.parent, directory=True)
+        expected = fcntl.capture_windows_path(target, directory=False)
+        fcntl.delete_windows_file(target, parent=parent, expected=expected)
+
+    def rmdir(self, path: object, *, dir_fd: int | None = None) -> None:
+        if sys.platform != "win32":
+            self._native.rmdir(path, dir_fd=dir_fd)
+            return
+        target = self._path(path, dir_fd)
+        fcntl.capture_windows_path(target, directory=True)
+        self._native.rmdir(fcntl.windows_extended_path(target))
+
+    @classmethod
+    def _move_paths(
+        cls,
+        source: object,
+        destination: object,
+        source_fd: int | None,
+        destination_fd: int | None,
+    ) -> tuple[Path, Path]:
+        return cls._path(source, source_fd), cls._path(destination, destination_fd)
+
+    def _move(
+        self,
+        source: object,
+        destination: object,
+        *,
+        src_dir_fd: int | None,
+        dst_dir_fd: int | None,
+        replace: bool,
+    ) -> None:
+        source_path, destination_path = self._move_paths(
+            source,
+            destination,
+            src_dir_fd,
+            dst_dir_fd,
+        )
+        source_value, source_capability = self._capture(source_path)
+        directory = stat.S_ISDIR(source_value.st_mode)
+        source_parent = fcntl.capture_windows_path(source_path.parent, directory=True)
+        destination_parent = fcntl.capture_windows_path(destination_path.parent, directory=True)
+        current_destination = None
+        try:
+            _destination_value, current_destination = self._capture(destination_path)
+        except FileNotFoundError:
+            pass
+        if replace and not directory:
+            fcntl.replace_windows_file(
+                source_path,
+                destination_path,
+                source_parent=source_parent,
+                destination_parent=destination_parent,
+                expected_source=source_capability,
+                expected_destination=current_destination,
+            )
+            return
+        operation = self._native.replace if replace else self._native.rename
+        operation(
+            fcntl.windows_extended_path(source_path),
+            fcntl.windows_extended_path(destination_path),
+        )
+        moved = fcntl.capture_windows_path(destination_path, directory=directory)
+        if (
+            moved.volume,
+            moved.file_id,
+            moved.owner_sid,
+            moved.security_sha256,
+        ) != (
+            source_capability.volume,
+            source_capability.file_id,
+            source_capability.owner_sid,
+            source_capability.security_sha256,
+        ):
+            raise OSError(errno.EACCES, "Windows move identity changed")
+        fcntl.validate_windows_path(source_parent, directory=True)
+        fcntl.validate_windows_path(destination_parent, directory=True)
+
+    def replace(
+        self,
+        source: object,
+        destination: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if sys.platform != "win32":
+            self._native.replace(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            return
+        self._move(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            replace=True,
+        )
+
+    def rename(
+        self,
+        source: object,
+        destination: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if sys.platform != "win32":
+            self._native.rename(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            return
+        self._move(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            replace=False,
+        )
+
+
+os = _ArtifactOS(_native_os)
 
 MAX_ARTIFACT_SOURCE_BYTES = 512 * 1024 * 1024
 MAX_ARTIFACT_PAIR_BYTES = 1024 * 1024 * 1024
@@ -80,6 +482,7 @@ _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
 _REVISION_ID = re.compile(r"^revision_[0-9a-f]{32}$")
 _DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
+_COMMITTED_DRAFT_SCOPE = "committed"
 _ARTIFACT_ID = re.compile(r"^artifact_[0-9a-f]{32}$")
 _VERIFICATION_ID = re.compile(r"^verification_[0-9a-f]{32}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -848,7 +1251,9 @@ def _validate_api_request(value: object) -> ArtifactExportRequest:
     if generation < 0 or generation > MAX_SAFE_JSON_INTEGER:
         _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/expected_generation")
     draft = data["draft_id"]
-    if draft is not None:
+    if draft == _COMMITTED_DRAFT_SCOPE:
+        draft = None
+    elif draft is not None:
         if type(draft) is not str:
             _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/draft_id")
         if _DRAFT_ID.fullmatch(draft) is None:
@@ -887,7 +1292,9 @@ def _validate_manifest_api_request(value: object) -> ArtifactManifestRequest:
     if generation < 0 or generation > MAX_SAFE_JSON_INTEGER:
         _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/expected_generation")
     draft = data["draft_id"]
-    if draft is not None:
+    if draft == _COMMITTED_DRAFT_SCOPE:
+        draft = None
+    elif draft is not None:
         if type(draft) is not str:
             _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/draft_id")
         if _DRAFT_ID.fullmatch(draft) is None:
@@ -1214,7 +1621,10 @@ def _identity(value: os.stat_result) -> _FileIdentity:
         mode=stat.S_IMODE(value.st_mode),
         size=value.st_size,
         mtime_ns=value.st_mtime_ns,
-        ctime_ns=value.st_ctime_ns,
+        # Windows ChangeTime can be committed after a rename/open boundary;
+        # use the kernel-reported creation time as the stable identity epoch.
+        # The DACL digest and File ID remain the security boundary.
+        ctime_ns=(int(value.st_birthtime_ns) if sys.platform == "win32" else value.st_ctime_ns),
     )
 
 
@@ -1265,6 +1675,12 @@ def _same_directory_binding(value: os.stat_result, expected: _FileIdentity) -> b
 
 
 def _private_directory(value: os.stat_result) -> bool:
+    if sys.platform == "win32":
+        # SID/protected-DACL/reparse trust is established by the Win32 handle
+        # adapter before this metadata-only predicate is reached.  Keep the
+        # actual Windows stat fields in durable identities; do not invent UID
+        # or POSIX mode values.
+        return stat.S_ISDIR(value.st_mode) and value.st_nlink >= 1
     return (
         stat.S_ISDIR(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -1273,6 +1689,12 @@ def _private_directory(value: os.stat_result) -> bool:
 
 
 def _private_file(value: os.stat_result, *, allow_empty: bool = True) -> bool:
+    if sys.platform == "win32":
+        return (
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and (allow_empty or value.st_size > 0)
+        )
     return (
         stat.S_ISREG(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -1297,6 +1719,14 @@ def _rename_directory_noreplace(
 ) -> None:
     """Atomically rename one directory without ever replacing a destination."""
 
+    if sys.platform == "win32":
+        os.rename(
+            source_name,
+            destination_name,
+            src_dir_fd=source_parent_fd,
+            dst_dir_fd=destination_parent_fd,
+        )
+        return
     try:
         import ctypes  # noqa: PLC0415
 
@@ -1393,6 +1823,46 @@ def _validate_cad_from_pinned_directory(
     poison: Callable[[], None],
 ) -> ValidatedMaterializationEvidence:
     """Call CAD with fixed relative names bound to one open private directory."""
+
+    if sys.platform == "win32":
+        try:
+            capability = fcntl.capture_windows_fd(directory_fd, directory=True)
+            opened = os.fstat(directory_fd)
+            if not _same_directory_binding(opened, expected):
+                raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
+            directory = Path(capability.path)
+            files = {
+                name: fcntl.capture_windows_path(directory / name, directory=False)
+                for name in ("model.FCStd", "model.step")
+            }
+            result = cad.validate_materialization(
+                fcstd=directory / "model.FCStd",
+                step=directory / "model.step",
+            )
+            for name, before in files.items():
+                if (
+                    fcntl.capture_windows_path(
+                        directory / name,
+                        directory=False,
+                        generation_token=before.generation_token,
+                    )
+                    != before
+                ):
+                    raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
+            if fcntl.capture_windows_fd(
+                directory_fd,
+                directory=True,
+                generation_token=capability.generation_token,
+            ) != capability or not _same_directory_binding(os.fstat(directory_fd), expected):
+                raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
+        except ArtifactStoreError:
+            raise
+        except OSError:
+            poison()
+            raise ArtifactStoreError(ArtifactStoreErrorCode.RECOVERY_REQUIRED) from None
+        if type(result) is not ValidatedMaterializationEvidence:
+            raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
+        return result
 
     flags = (
         os.O_RDONLY
@@ -1698,7 +2168,10 @@ def _parse_cleanup_receipt(raw: bytes) -> _CleanupReceipt:
     ):
         raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
     values = tuple(int(item) for item in raw_directory)
-    if int(created) <= 0 or values[2] != os.geteuid() or values[3] != 0o700 or values[4] < 1:
+    posix_identity_invalid = sys.platform != "win32" and (
+        values[2] != os.geteuid() or values[3] != 0o700
+    )
+    if int(created) <= 0 or posix_identity_invalid or values[4] < 1:
         raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)
     return _CleanupReceipt(
         phase=_ORPHAN_CLEANUP_PHASE,
@@ -2539,10 +3012,16 @@ class ArtifactStore:
         self._materializations_fd = -1
         try:
             if expected_root_identity is None:
-                created = not root.exists()
-                root.mkdir(mode=0o700, parents=True, exist_ok=True)
-                if created:
-                    os.chmod(root, 0o700)
+                if sys.platform == "win32":
+                    try:
+                        fcntl.capture_windows_path(root, directory=True)
+                    except FileNotFoundError:
+                        fcntl.ensure_private_directory(root)
+                else:
+                    created = not root.exists()
+                    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    if created:
+                        os.chmod(root, 0o700)
             root_value = os.lstat(root)
             if not _private_directory(root_value):
                 raise ArtifactStoreError(ArtifactStoreErrorCode.INTEGRITY_FAILURE)

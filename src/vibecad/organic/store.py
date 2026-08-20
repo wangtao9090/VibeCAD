@@ -7,7 +7,7 @@ import ctypes
 import errno
 import hashlib
 import json
-import os
+import os as _native_os
 import re
 import secrets
 import stat
@@ -18,7 +18,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 
-from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad import _file_compat
+from vibecad.interaction.storage import SafeRoot, StorageFailure, os
 from vibecad.organic.contracts import (
     MAX_OUTPUT_ITEM_BYTES,
     MAX_SOURCE_BYTES,
@@ -194,14 +195,7 @@ def _source_filename(request: MeshJobRequest) -> str:
 
 
 def _safe_regular(info: os.stat_result, root: SafeRoot, *, maximum: int) -> bool:
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == root.uid
-        and stat.S_IMODE(info.st_mode) == 0o600
-        and info.st_nlink == 1
-        and info.st_dev == root.identity[0]
-        and 0 <= info.st_size <= maximum
-    )
+    return root.regular_file(info, maximum=maximum)
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
@@ -209,6 +203,11 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
 
 
 def _stat_binding(info: os.stat_result) -> tuple[int, ...]:
+    identity_epoch = (
+        int(info.st_birthtime_ns)
+        if sys.platform == "win32" and hasattr(info, "st_birthtime_ns")
+        else info.st_ctime_ns
+    )
     return (
         info.st_dev,
         info.st_ino,
@@ -218,7 +217,7 @@ def _stat_binding(info: os.stat_result) -> tuple[int, ...]:
         info.st_nlink,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        identity_epoch,
     )
 
 
@@ -232,13 +231,10 @@ def _stat_at(parent_fd: int, name: str) -> os.stat_result | None:
 
 
 def _list_names(directory_fd: int, *, maximum: int) -> tuple[str, ...]:
-    names: list[str] = []
     try:
-        with os.scandir(directory_fd) as entries:
-            for entry in entries:
-                names.append(entry.name)
-                if len(names) > maximum:
-                    _raise(OrganicArtifactStoreErrorCode.BUDGET_EXCEEDED)
+        names = list(os.listdir(directory_fd))
+        if len(names) > maximum:
+            _raise(OrganicArtifactStoreErrorCode.BUDGET_EXCEEDED)
     except OrganicArtifactStoreError:
         raise
     except OSError:
@@ -254,6 +250,14 @@ def _fsync(fd: int) -> None:
 
 
 def _rename_directory_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    if sys.platform == "win32":
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        return
     try:
         library = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":
@@ -404,14 +408,22 @@ def _copy_fd(
     expected_size: int,
     expected_sha256: str,
 ) -> None:
+    source_capability = None
     try:
-        before = os.fstat(source_fd)
+        before = _native_os.fstat(source_fd)
+        if sys.platform == "win32":
+            source_capability = _file_compat.capture_windows_external_fd(source_fd)
     except OSError:
         _raise(OrganicArtifactStoreErrorCode.INVALID_INPUT)
     if (
         not stat.S_ISREG(before.st_mode)
-        or before.st_uid != root.uid
-        or stat.S_IMODE(before.st_mode) != 0o600
+        or (
+            sys.platform != "win32"
+            and (
+                before.st_uid != root.uid
+                or stat.S_IMODE(before.st_mode) != 0o600
+            )
+        )
         or before.st_nlink != 1
         or before.st_size != expected_size
         or expected_size <= 0
@@ -440,7 +452,15 @@ def _copy_fd(
             digest.update(chunk)
             offset += len(chunk)
         _fsync(target_fd)
-        after = os.fstat(source_fd)
+        after = _native_os.fstat(source_fd)
+        if sys.platform == "win32":
+            assert source_capability is not None
+            current_source = _file_compat.capture_windows_external_fd(
+                source_fd,
+                generation_token=source_capability.generation_token,
+            )
+            if current_source != source_capability:
+                _raise(OrganicArtifactStoreErrorCode.INVALID_INPUT)
         if _stat_binding(before) != _stat_binding(after) or digest.hexdigest() != expected_sha256:
             _raise(OrganicArtifactStoreErrorCode.INVALID_INPUT)
     except OSError:
@@ -809,10 +829,6 @@ class OrganicArtifactStore:
     def _hold(self) -> Iterator[int]:
         if os.getpid() != self._pid:
             _raise(OrganicArtifactStoreErrorCode.LEASE_UNAVAILABLE)
-        try:
-            import fcntl
-        except ImportError:
-            _raise(OrganicArtifactStoreErrorCode.LEASE_UNAVAILABLE)
         thread_id = threading.get_ident()
         with _PROCESS_LOCKS_GUARD:
             if self._entry.owner_thread == thread_id:
@@ -835,7 +851,7 @@ class OrganicArtifactStore:
                 _raise(OrganicArtifactStoreErrorCode.INTEGRITY_FAILURE)
             with _PROCESS_LOCKS_GUARD:
                 self._entry.active_fd = lock_fd
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _file_compat.flock(lock_fd, _file_compat.LOCK_EX)
             current = _stat_at(root_fd, _LOCK_NAME)
             if current is None or _stat_binding(current) != _stat_binding(info):
                 _raise(OrganicArtifactStoreErrorCode.INTEGRITY_FAILURE)
@@ -847,7 +863,7 @@ class OrganicArtifactStore:
         finally:
             if lock_fd >= 0:
                 with contextlib.suppress(OSError):
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    _file_compat.flock(lock_fd, _file_compat.LOCK_UN)
                 _close(lock_fd)
             if root_fd >= 0:
                 _close(root_fd)

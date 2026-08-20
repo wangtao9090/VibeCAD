@@ -1083,6 +1083,7 @@ _PUBLIC_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PROJECT_PATTERN = r"^project_[0-9a-f]{32}$"
 _REVISION_PATTERN = r"^revision_[0-9a-f]{32}$"
 _DRAFT_PATTERN = r"^draft_[0-9a-f]{32}$"
+_COMMITTED_ARTIFACT_SCOPE = "committed"
 _ARTIFACT_PATTERN = r"^artifact_[0-9a-f]{32}$"
 _VERIFICATION_PATTERN = r"^verification_[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
@@ -1272,6 +1273,16 @@ def _closed_schema(
 
 def _nullable(schema: dict[str, object]) -> dict[str, object]:
     return {"anyOf": (schema, {"type": "null"})}
+
+
+def _artifact_draft_scope_schema() -> dict[str, object]:
+    return {
+        "oneOf": (
+            _id_schema(_DRAFT_PATTERN),
+            {"type": "string", "const": _COMMITTED_ARTIFACT_SCOPE},
+            {"type": "null"},
+        )
+    }
 
 
 def _version_schema() -> dict[str, object]:
@@ -2741,7 +2752,7 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "task_id": _id_schema(_TASK_ID.pattern),
                 "expected_generation": _safe_integer_schema(minimum=0),
                 "revision_id": _id_schema(_REVISION_PATTERN),
-                "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
+                "draft_id": _artifact_draft_scope_schema(),
             }
         )
     if name == "export_task_artifacts":
@@ -2752,7 +2763,7 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "task_id": _id_schema(_TASK_ID.pattern),
                 "expected_generation": _safe_integer_schema(minimum=0),
                 "revision_id": _id_schema(_REVISION_PATTERN),
-                "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
+                "draft_id": _artifact_draft_scope_schema(),
             }
         )
     if name == "create_release":

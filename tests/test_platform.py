@@ -1,6 +1,10 @@
 import pytest
 
+from vibecad.execution import _resource_compat
+from vibecad.execution import revisions as revisions_module
 from vibecad.runtime import platform as p
+
+pytestmark = pytest.mark.windows_contract
 
 
 def test_known_platforms(monkeypatch):
@@ -32,3 +36,18 @@ def test_os_predicates(monkeypatch):
     assert p.is_macos() and not p.is_windows()
     monkeypatch.setattr(p.sys, "platform", "win32")
     assert p.is_windows() and not p.is_macos()
+
+
+def test_revision_persistence_module_imports_without_posix_resource_support():
+    assert revisions_module.resource is _resource_compat
+    assert callable(_resource_compat.getrlimit)
+    assert callable(_resource_compat.setrlimit)
+
+
+def test_windows_resource_compatibility_fails_closed():
+    if p.sys.platform != "win32":
+        pytest.skip("Windows-only compatibility contract")
+    with pytest.raises(OSError, match="unavailable"):
+        _resource_compat.getrlimit(_resource_compat.RLIMIT_FSIZE)
+    with pytest.raises(OSError, match="unavailable"):
+        _resource_compat.setrlimit(_resource_compat.RLIMIT_FSIZE, (1, 1))

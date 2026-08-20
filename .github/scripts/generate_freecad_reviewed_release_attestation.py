@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -27,6 +26,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibecad import __version__
+from vibecad._file_compat import (
+    LOCK_EX,
+    LOCK_SH,
+    LOCK_UN,
+    capture_windows_path,
+    flock,
+    open_private_file,
+    set_private_dacl,
+    validate_windows_path,
+)
 from vibecad.execution.freecad_current_managed_verification import (
     CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT,
     CURRENT_MANAGED_VERIFICATION_NATIVE_TYPE_COUNT,
@@ -51,10 +60,12 @@ _PINS_PATH = _ATTESTATION_DIRECTORY / "freecad_reviewed_release_attestation_pins
 _RESOURCE_NAME_BY_PLATFORM_ID = {
     "macos.arm64": "freecad-reviewed-release-attestation-macos-arm64-v1.json",
     "macos.x86_64": "freecad-reviewed-release-attestation-macos-x86_64-v1.json",
+    "windows.x86_64": "freecad-reviewed-release-attestation-windows-x86_64-v1.json",
 }
 _PIN_NAME = "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM"
 _MAX_EXISTING_FILE_BYTES = 2 * 1024 * 1024
 _FREECAD_USER_TEMP_ENV = "FREECAD_USER_TEMP"
+_WINDOWS_LOCK_NAME = ".vibecad-reviewed-release-attestation.lock"
 
 _PINS_DOCSTRING = """Generated platform pins for packaged reviewed FreeCAD attestations.
 
@@ -276,6 +287,10 @@ def _attestation_index_lock(*, exclusive: bool):
 
     if type(exclusive) is not bool:
         raise GenerationError("invalid attestation lock mode")
+    if sys.platform == "win32":
+        with _windows_attestation_index_lock(exclusive=exclusive):
+            yield
+        return
     descriptor = -1
     try:
         expected = _ATTESTATION_DIRECTORY.lstat()
@@ -289,7 +304,7 @@ def _attestation_index_lock(*, exclusive: bool):
         )
         descriptor = os.open(_ATTESTATION_DIRECTORY, flags)
         _validate_attestation_lock_directory(descriptor, expected)
-        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        flock(descriptor, LOCK_EX if exclusive else LOCK_SH)
     except GenerationError:
         if descriptor >= 0:
             with contextlib.suppress(OSError):
@@ -306,7 +321,70 @@ def _attestation_index_lock(*, exclusive: bool):
         _validate_attestation_lock_directory(descriptor, expected)
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            flock(descriptor, LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+
+def _validate_windows_attestation_lock(
+    *,
+    expected_directory: os.stat_result,
+    lock_capability,
+) -> None:
+    try:
+        live = _ATTESTATION_DIRECTORY.lstat()
+        lock_path = validate_windows_path(lock_capability, directory=False)
+    except (OSError, TypeError, ValueError) as exc:
+        raise GenerationError("cannot validate the attestation directory lock") from exc
+    if (
+        not stat.S_ISDIR(live.st_mode)
+        or stat.S_ISLNK(live.st_mode)
+        or (live.st_dev, live.st_ino) != (expected_directory.st_dev, expected_directory.st_ino)
+        or lock_path != _ATTESTATION_DIRECTORY / _WINDOWS_LOCK_NAME
+    ):
+        raise GenerationError("the attestation directory changed while locked")
+
+
+@contextlib.contextmanager
+def _windows_attestation_index_lock(*, exclusive: bool):
+    descriptor = -1
+    try:
+        expected = _ATTESTATION_DIRECTORY.lstat()
+        if (
+            not stat.S_ISDIR(expected.st_mode)
+            or stat.S_ISLNK(expected.st_mode)
+            or _ATTESTATION_DIRECTORY.resolve(strict=True) != _ATTESTATION_DIRECTORY
+        ):
+            raise GenerationError("the attestation lock target is not a real directory")
+        descriptor, capability = open_private_file(
+            _ATTESTATION_DIRECTORY / _WINDOWS_LOCK_NAME,
+            create=True,
+            read_write=True,
+        )
+        flock(descriptor, LOCK_EX if exclusive else LOCK_SH)
+        _validate_windows_attestation_lock(
+            expected_directory=expected,
+            lock_capability=capability,
+        )
+    except GenerationError:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise GenerationError("cannot acquire the attestation directory lock") from exc
+    try:
+        yield
+        _validate_windows_attestation_lock(
+            expected_directory=expected,
+            lock_capability=capability,
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            flock(descriptor, LOCK_UN)
         with contextlib.suppress(OSError):
             os.close(descriptor)
 
@@ -384,15 +462,25 @@ def _private_freecad_user_temp():
     failed = False
     with tempfile.TemporaryDirectory(prefix=".vibecad-reviewed-freecad-") as raw_root:
         root = Path(raw_root).resolve(strict=True)
-        root.chmod(0o700)
         info = root.lstat()
-        if (
-            root.is_symlink()
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) != 0o700
-        ):
-            raise GenerationError("cannot establish a private FreeCAD document cache")
+        if sys.platform == "win32":
+            try:
+                if root.is_symlink() or not stat.S_ISDIR(info.st_mode):
+                    raise OSError("unsafe FreeCAD document cache")
+                set_private_dacl(root)
+                root_capability = capture_windows_path(root, directory=True)
+            except (OSError, TypeError, ValueError) as exc:
+                raise GenerationError("cannot establish a private FreeCAD document cache") from exc
+        else:
+            root.chmod(0o700)
+            info = root.lstat()
+            if (
+                root.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700
+            ):
+                raise GenerationError("cannot establish a private FreeCAD document cache")
         os.environ[_FREECAD_USER_TEMP_ENV] = str(root)
         try:
             yield root
@@ -413,6 +501,13 @@ def _private_freecad_user_temp():
                     ) from exc
                 if residual:
                     raise GenerationError("FreeCAD left a document cache entry behind")
+                if sys.platform == "win32":
+                    try:
+                        validate_windows_path(root_capability, directory=True)
+                    except (OSError, TypeError, ValueError) as exc:
+                        raise GenerationError(
+                            "cannot verify the private FreeCAD document cache"
+                        ) from exc
 
 
 def _build_release_attestation() -> GenerationResult:
@@ -498,7 +593,8 @@ def _stage_file(*, directory: Path, name: str, raw: bytes) -> Path:
     try:
         descriptor, raw_path = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
         path = Path(raw_path)
-        os.fchmod(descriptor, 0o644)
+        if sys.platform != "win32":
+            os.fchmod(descriptor, 0o644)
         view = memoryview(raw)
         while view:
             written = os.write(descriptor, view)
@@ -520,6 +616,21 @@ def _stage_file(*, directory: Path, name: str, raw: bytes) -> Path:
 
 
 def _fsync_directory(directory: Path) -> None:
+    if sys.platform == "win32":
+        try:
+            info = directory.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or directory.resolve(strict=True) != directory
+            ):
+                raise OSError("unsafe attestation directory")
+        except OSError as exc:
+            raise GenerationError("cannot validate the attestation directory") from exc
+        # Win32 does not expose a directory fsync through the CRT.  Every staged
+        # file is flushed before its atomic NTFS rename; revalidate the stable
+        # directory generation here instead of attempting an unsupported open.
+        return
     descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)

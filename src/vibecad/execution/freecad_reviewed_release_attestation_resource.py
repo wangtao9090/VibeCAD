@@ -31,6 +31,7 @@ FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID: Final = Mappi
     {
         "macos.arm64": "freecad-reviewed-release-attestation-macos-arm64-v1.json",
         "macos.x86_64": "freecad-reviewed-release-attestation-macos-x86_64-v1.json",
+        "windows.x86_64": "freecad-reviewed-release-attestation-windows-x86_64-v1.json",
     }
 )
 MAX_FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_BYTES: Final = 2 * 1024 * 1024

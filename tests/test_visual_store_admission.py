@@ -3,11 +3,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from tests.test_visual_service import _proposal
+from vibecad._file_compat import set_private_dacl
 from vibecad.application.data import ApplicationDataLayout
 from vibecad.runtime.contracts import RuntimeBudget, RuntimeLifecycleState
 from vibecad.visual.admission_inputs import (
@@ -615,6 +617,8 @@ def test_admission_tamper_and_orphan_files_fail_closed(tmp_path: Path) -> None:
     )
     orphan.write_bytes(b"{}")
     orphan.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(orphan)
     with pytest.raises(ReconstructionDraftStoreError) as unexpected:
         orphan_store.load(orphan_proposed.reconstruction_id)
     assert unexpected.value.code is ReconstructionDraftStoreErrorCode.RESOURCE_EXHAUSTED

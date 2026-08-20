@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import struct
+import sys
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from PIL import Image, ImageCms, PngImagePlugin
 
 import vibecad.visual.inputs as visual_inputs_module
+from vibecad._file_compat import capture_windows_path, set_private_dacl
 from vibecad.visual import (
     MAX_IMAGE_SOURCE_BYTES,
     NORMALIZATION_PROFILE,
@@ -141,7 +143,7 @@ def _seal_paths(
     fds: list[int] = []
     try:
         for index, path in enumerate(paths):
-            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
             fds.append(fd)
             descriptors.append(
                 DescriptorSource(
@@ -276,8 +278,13 @@ def test_seal_get_and_reopen_preserve_jpeg_png_multiview_contract(tmp_path: Path
     )
     assert reopened.get(sealed.id) == sealed
     sealed_dir = root / sealed.id
-    assert sealed_dir.stat().st_mode & 0o777 == 0o700
-    assert all(path.stat().st_mode & 0o777 == 0o600 for path in sealed_dir.iterdir())
+    if os.name == "nt":
+        capture_windows_path(sealed_dir, directory=True)
+        for path in sealed_dir.iterdir():
+            capture_windows_path(path, directory=False)
+    else:
+        assert sealed_dir.stat().st_mode & 0o777 == 0o700
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in sealed_dir.iterdir())
 
     normalized_top = sealed_dir / f"{sealed.inputs[1].normalized.id}.png"
     with Image.open(normalized_top) as image:
@@ -548,10 +555,13 @@ def test_locator_is_bound_to_exact_request_and_file_identity(tmp_path: Path) -> 
     source = tmp_path / "source.png"
     _save_png(source)
     request = _request((ImageMime.PNG, ViewRole.FRONT))
-    fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+    fd = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
     try:
         locator = bind_visual_input_locator(request, 0, os.fstat(fd))
-        locator["ino"] = int(locator["ino"]) + 1
+        if sys.platform == "win32":
+            locator["ino"] = f"{int(locator['ino'], 16) + 1:032x}"
+        else:
+            locator["ino"] = int(locator["ino"]) + 1
         descriptor = DescriptorSource(fd=fd, locator=locator)
         with pytest.raises(VisualInputStoreError) as caught:
             store.seal(request, (descriptor,))
@@ -696,7 +706,10 @@ def test_finalize_retires_id_without_manifest_and_permanently_blocks_reuse(
     assert store.delete_exact(sealed.id, digest) is None
     marker = root / f".deleted_{sealed.id.removeprefix('image_set_')}.json"
     assert marker.is_file()
-    assert marker.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        capture_windows_path(marker, directory=False)
+    else:
+        assert marker.stat().st_mode & 0o777 == 0o600
     with pytest.raises(VisualInputStoreError) as caught:
         store.get(sealed.id)
     assert caught.value.code is VisualInputStoreErrorCode.NOT_FOUND
@@ -771,6 +784,10 @@ def test_finalize_delete_exact_rejects_wrong_digest_and_never_touches_reappeared
     retired = root / f".retired_{sealed.id.removeprefix('image_set_')}.json"
     assert retired.is_file()
     assert not marker.exists()
+    if os.name == "nt":
+        set_private_dacl(backup)
+        for item in backup.rglob("*"):
+            set_private_dacl(item)
     os.rename(backup, root / sealed.id)
     with pytest.raises(VisualInputStoreError) as caught:
         store.finalize_delete_exact(sealed.id, sealed.manifest_sha256)
@@ -866,9 +883,13 @@ def test_delete_exact_recovers_after_durable_marker_fault(
     if fault == "before_rename":
         original = visual_inputs_module._rename_directory_noreplace
 
-        def fail_directory_publish(parent_fd: int, source_name: str, destination: str) -> None:
+        def fail_directory_publish(
+            parent_fd: int,
+            source_name: str,
+            destination: str,
+        ) -> None:
             if source_name == sealed.id:
-                os.mkdir(destination, 0o700, dir_fd=parent_fd)
+                visual_inputs_module.os.mkdir(destination, 0o700, dir_fd=parent_fd)
             original(parent_fd, source_name, destination)
 
         monkeypatch.setattr(
@@ -997,6 +1018,8 @@ def test_delete_marker_publish_does_not_overwrite_racing_destination(
         if source_name == temporary.name:
             marker.write_bytes(competing_raw)
             os.chmod(marker, 0o600)
+            if os.name == "nt":
+                set_private_dacl(marker)
         original(parent_fd, source_name, destination)
 
     monkeypatch.setattr(
@@ -1095,6 +1118,8 @@ def test_retired_publish_does_not_overwrite_racing_destination(
         if source_name == temporary.name:
             retired.write_bytes(racing_raw)
             os.chmod(retired, 0o600)
+            if os.name == "nt":
+                set_private_dacl(retired)
             racing_inode = retired.stat().st_ino
         original(parent_fd, source_name, destination)
 
@@ -1123,6 +1148,8 @@ def test_delete_marker_temporary_is_only_recovered_for_an_intact_unmarked_source
     temporary = root / f".delete_marker_{suffix}.tmp"
     temporary.write_bytes(b"interrupted marker")
     os.chmod(temporary, 0o600)
+    if os.name == "nt":
+        set_private_dacl(temporary)
 
     if target_state == "final_marker_present":
         marker = root / f".deleted_{suffix}.json"
@@ -1130,6 +1157,8 @@ def test_delete_marker_temporary_is_only_recovered_for_an_intact_unmarked_source
             visual_inputs_module._delete_marker_raw(sealed.id, sealed.manifest_sha256)
         )
         os.chmod(marker, 0o600)
+        if os.name == "nt":
+            set_private_dacl(marker)
     else:
         directory = root / sealed.id
         for child in directory.iterdir():

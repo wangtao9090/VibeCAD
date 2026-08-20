@@ -5,12 +5,15 @@ from __future__ import annotations
 import contextlib
 import os
 import secrets
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
 
+from vibecad import _file_compat
+from vibecad._file_compat import WindowsPathCapability
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CheckpointedCandidate,
@@ -618,6 +621,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
         run_id = f"run_{secrets.token_hex(16)}"
         lease: TaskInputSnapshotLease | None = None
         transferred_fd = -1
+        transferred_capability: dict[str, object] | None = None
         cleanup_failed = False
         try:
             try:
@@ -640,9 +644,22 @@ class WorkerCadExecutionPort(CadExecutionPort):
                 ):
                     raise ValueError("provider returned a snapshot for another run")
                 descriptor = lease.descriptor_mapping()
-                transferred_fd = lease.duplicate_directory_fd()
+                if sys.platform == "win32":
+                    transferred_capability = lease.windows_capability_mapping()
+                else:
+                    transferred_fd = lease.duplicate_directory_fd()
             except Exception:
                 raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+            if sys.platform == "win32":
+                return self._call(
+                    worker,
+                    "execute_program",
+                    program=program,
+                    candidate=state.value,
+                    session=candidate.binding.session,
+                    artifact_snapshot=descriptor,
+                    artifact_snapshot_capability=transferred_capability,
+                )
             return self._call(
                 worker,
                 "execute_program",
@@ -772,10 +789,21 @@ class WorkerCadExecutionPort(CadExecutionPort):
             candidate=state.value,
         )
 
-    def _open_directory(self, path: Path) -> tuple[int, str]:
+    def _open_directory(self, path: Path) -> tuple[int | WindowsPathCapability, str]:
         if type(path) is not type(Path("/")) or path.name in {"", ".", ".."}:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         parent = path.parent
+        if sys.platform == "win32":
+            try:
+                capability = _file_compat.capture_windows_path(
+                    Path(os.path.abspath(parent)),
+                    directory=True,
+                )
+                if Path(capability.path) / path.name != Path(os.path.abspath(path)):
+                    raise OSError
+                return capability, path.name
+            except (OSError, TypeError, ValueError):
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
         descriptor = -1
         try:
             descriptor = os.open(parent, _DIRECTORY_FLAGS)
@@ -794,15 +822,24 @@ class WorkerCadExecutionPort(CadExecutionPort):
         worker = self._start_worker()
         descriptor, name = self._open_directory(path)
         try:
-            result = self._call(
-                worker,
-                "validate_import",
-                directory_fd=descriptor,
-                name=name,
-            )
+            if type(descriptor) is WindowsPathCapability:
+                result = self._call(
+                    worker,
+                    "validate_import",
+                    directory_capability=descriptor,
+                    name=name,
+                )
+            else:
+                result = self._call(
+                    worker,
+                    "validate_import",
+                    directory_fd=descriptor,
+                    name=name,
+                )
         finally:
-            with contextlib.suppress(OSError):
-                os.close(descriptor)
+            if type(descriptor) is int:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
         if type(result) is not ValidatedImportEvidence:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         return result
@@ -812,15 +849,24 @@ class WorkerCadExecutionPort(CadExecutionPort):
         worker = self._start_worker()
         descriptor, name = self._open_directory(path)
         try:
-            result = self._call(
-                worker,
-                "revalidate_normalized_import",
-                directory_fd=descriptor,
-                name=name,
-            )
+            if type(descriptor) is WindowsPathCapability:
+                result = self._call(
+                    worker,
+                    "revalidate_normalized_import",
+                    directory_capability=descriptor,
+                    name=name,
+                )
+            else:
+                result = self._call(
+                    worker,
+                    "revalidate_normalized_import",
+                    directory_fd=descriptor,
+                    name=name,
+                )
         finally:
-            with contextlib.suppress(OSError):
-                os.close(descriptor)
+            if type(descriptor) is int:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
         if type(result) is not ValidatedImportEvidence:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         return result
@@ -843,14 +889,22 @@ class WorkerCadExecutionPort(CadExecutionPort):
         worker = self._start_worker()
         descriptor, _name = self._open_directory(fcstd)
         try:
-            result = self._call(
-                worker,
-                "validate_materialization",
-                directory_fd=descriptor,
-            )
+            if type(descriptor) is WindowsPathCapability:
+                result = self._call(
+                    worker,
+                    "validate_materialization",
+                    directory_capability=descriptor,
+                )
+            else:
+                result = self._call(
+                    worker,
+                    "validate_materialization",
+                    directory_fd=descriptor,
+                )
         finally:
-            with contextlib.suppress(OSError):
-                os.close(descriptor)
+            if type(descriptor) is int:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
         if type(result) is not ValidatedMaterializationEvidence:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         return result

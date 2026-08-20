@@ -181,9 +181,7 @@ def _graph(
     revolution_axis: RevolutionAxis = RevolutionAxis.HORIZONTAL,
     operation_definition: str | None = None,
 ) -> ParametricFeatureGraphV2:
-    operation_terms = next(
-        item for item in RESIDUAL_OPERATION_TERMS if item.operation is operation
-    )
+    operation_terms = next(item for item in RESIDUAL_OPERATION_TERMS if item.operation is operation)
     static_terms = list(RESIDUAL_PFG_TERMS)
     if operation_definition is not None:
         index = static_terms.index(operation_terms.operation_term)
@@ -207,9 +205,7 @@ def _graph(
         *,
         minimum: int = 1,
     ) -> None:
-        ports.append(
-            _port(f"port_{kind}", role, value_type, minimum=minimum, maximum=1)
-        )
+        ports.append(_port(f"port_{kind}", role, value_type, minimum=minimum, maximum=1))
         if minimum or value is not None:
             parameters.append(_parameter(kind, role, value_type, value))
             parameter_bindings.append(
@@ -239,9 +235,7 @@ def _graph(
                 "port_base",
                 RESIDUAL_BASE_ROLE_TERM,
                 RESIDUAL_SOLID_TYPE_TERM,
-                minimum=(
-                    0 if operation is PartDesignResidualOperation.REVOLUTION else 1
-                ),
+                minimum=(0 if operation is PartDesignResidualOperation.REVOLUTION else 1),
             )
         )
         dependencies.append(
@@ -439,13 +433,9 @@ def _proof_term(term_ref_id: str, term_id: str) -> BridgeTermRef:
 
 
 RULE = _proof_term("rule_residual_target", "rule.residual-target-reviewed")
-PREDICATE = _proof_term(
-    "predicate_residual_target", "predicate.residual-target-reviewed"
-)
+PREDICATE = _proof_term("predicate_residual_target", "predicate.residual-target-reviewed")
 ROLE_PREMISE = _proof_term("role_residual_candidate", "proof-role.residual-candidate")
-ROLE_CONCLUSION = _proof_term(
-    "role_residual_validated", "proof-role.residual-validated"
-)
+ROLE_CONCLUSION = _proof_term("role_residual_validated", "proof-role.residual-validated")
 RESIDUAL_STRUCTURE_BRIDGE = _bridge_from_pfg(RESIDUAL_STRUCTURE_TERM)
 
 
@@ -606,9 +596,7 @@ def _request(
     policy = TrustedRulePolicy(evaluators=(_ResidualEvaluator(),))
     request = BackendLoweringRequest(
         adapter=FREECAD_PARTDESIGN_RESIDUAL_ADAPTER_DESCRIPTOR,
-        terms=tuple(
-            (*RESIDUAL_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)
-        ),
+        terms=tuple((*RESIDUAL_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)),
         documents=(intent_document, capability_document),
         intent_artifact_ids=(intent_document.artifact_id,),
         capability_artifact_ids=(capability_document.artifact_id,),
@@ -681,9 +669,7 @@ def test_shared_adapter_lowers_narrow_family_deterministically(
     extent: HoleExtent,
     axis: RevolutionAxis,
 ) -> None:
-    request, reader, policy = _request(
-        _graph(operation, extent=extent, revolution_axis=axis)
-    )
+    request, reader, policy = _request(_graph(operation, extent=extent, revolution_axis=axis))
     sink = _MemoryPlanSink()
     adapter = FreeCADPartDesignResidualAdapter(sink)
     result, receipt = _lower(adapter, request, reader, policy)
@@ -757,9 +743,7 @@ def test_numeric_n_n_plus_one_and_plan_tamper_gates() -> None:
     with pytest.raises(PartDesignResidualRuleError):
         decode_partdesign_residual_backend_plan(duplicate)
 
-    request, reader, policy = _request(
-        _graph(PartDesignResidualOperation.HOLE), max_output_bytes=1
-    )
+    request, reader, policy = _request(_graph(PartDesignResidualOperation.HOLE), max_output_bytes=1)
     with pytest.raises(IntentBridgeError) as caught:
         _lower(FreeCADPartDesignResidualAdapter(_MemoryPlanSink()), request, reader, policy)
     assert caught.value.code is IntentBridgeErrorCode.BUDGET_EXCEEDED
@@ -833,9 +817,7 @@ def test_real_freecad_residual_batch_create_edit_reopen_and_rollback(
     )
     cases = []
     for index, (operation, extent, axis) in enumerate(case_specs):
-        request, reader, policy = _request(
-            _graph(operation, extent=extent, revolution_axis=axis)
-        )
+        request, reader, policy = _request(_graph(operation, extent=extent, revolution_axis=axis))
         adapter = FreeCADPartDesignResidualAdapter(_MemoryPlanSink())
         result, receipt = _lower(adapter, request, reader, policy)
         plan, payload = adapter.read_plan(receipt)
@@ -849,9 +831,7 @@ def test_real_freecad_residual_batch_create_edit_reopen_and_rollback(
                 "content_sha256": result.plan_document.content_sha256,
                 "plan_sha256": result.plan_document.document_digest,
                 "body_id": plan.body_id,
-                "base": None
-                if plan.base is None
-                else (plan.base.node_id, plan.base.result_id),
+                "base": None if plan.base is None else (plan.base.node_id, plan.base.result_id),
                 "profile": None
                 if plan.profile is None
                 else (plan.profile.node_id, plan.profile.result_id),
@@ -862,8 +842,9 @@ def test_real_freecad_residual_batch_create_edit_reopen_and_rollback(
     output_root.mkdir()
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part, Sketcher
 from vibecad.parametric.freecad_partdesign_residual_rules import (

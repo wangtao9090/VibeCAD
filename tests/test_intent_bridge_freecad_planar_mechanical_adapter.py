@@ -360,8 +360,9 @@ def test_real_freecad_batch_zero_one_sixteen_edit_save_reopen_and_rollback(
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD
 from vibecad.parametric.freecad_planar_mechanical_rules import (

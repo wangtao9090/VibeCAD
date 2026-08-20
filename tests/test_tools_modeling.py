@@ -234,7 +234,7 @@ def test_native_cone_sphere_torus_create_save_and_reopen_real(runtime_env, tmp_p
     code = (
         status._PREP
         + f"import sys; sys.path.insert(0, {_SRC!r})\n"
-        + "import math\n"
+        + "import math, os\n"
         + "from pathlib import Path\n"
         + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
         + "from vibecad.execution.executor import (InProcessCadExecutor, "
@@ -291,7 +291,12 @@ def test_native_cone_sphere_torus_create_save_and_reopen_real(runtime_env, tmp_p
         + "    assert all(obj.Shape.isValid() and len(obj.Shape.Solids) == 1 for obj in items)\n"
         + "    before = _entity_observations(session)\n"
         + "    executor.checkpoint_fcstd(session, model)\n"
-        + "    step.touch(mode=0o600)\n"
+        + "    if os.name == 'nt':\n"
+        + "        from vibecad._file_compat import open_private_file\n"
+        + "        descriptor, _ = open_private_file(step, exclusive=True)\n"
+        + "        os.close(descriptor)\n"
+        + "    else:\n"
+        + "        step.touch(mode=0o600)\n"
         + "    _export_session_step(session=session, model_path=model, step_path=step)\n"
         + "    assert step.stat().st_size > 0\n"
         + "    loaded = executor.load_fcstd(model)\n"

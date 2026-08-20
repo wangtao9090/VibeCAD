@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import threading
 from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
@@ -16,6 +17,11 @@ import pytest
 
 import vibecad.execution as execution_package
 import vibecad.execution.revisions as revisions_module
+from vibecad._file_compat import (
+    open_windows_directory_fd,
+    set_private_dacl,
+    windows_extended_path,
+)
 from vibecad.execution.revisions import (
     CandidateReservationPresence,
     CandidateReservationPresenceStatus,
@@ -58,6 +64,22 @@ ARTIFACT_STEP = "artifact_11111111111111111111111111111111"
 TRANSACTION_ID = "transaction_0123456789abcdef0123456789abcdef"
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
+_POSIX_IDENTITY_ONLY = pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="the UID/mode source-binding contract is POSIX-specific",
+)
+_POSIX_FILE_LIMIT_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="RLIMIT_FSIZE and SIGXFSZ are POSIX-specific",
+)
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "descriptor-relative POSIX revision-store contract; Windows uses the "
+        "native capability suite in test_windows_revision_store.py"
+    ),
+)
 
 
 class ExplosiveInput:
@@ -597,6 +619,9 @@ def roots(tmp_path: Path) -> tuple[Path, Path]:
     lock_root.mkdir(mode=0o700)
     os.chmod(store_root, 0o700)
     os.chmod(lock_root, 0o700)
+    if os.name == "nt":
+        set_private_dacl(store_root)
+        set_private_dacl(lock_root)
     return store_root, lock_root
 
 
@@ -658,6 +683,9 @@ def _import_trusted(
 
 def _source_binding(source: Path) -> RevisionSourceBinding:
     value = source.stat(follow_symlinks=False)
+    ctime_ns = value.st_ctime_ns
+    if sys.platform == "win32":
+        ctime_ns = int(getattr(value, "st_birthtime_ns", ctime_ns))
     return RevisionSourceBinding(
         dev=value.st_dev,
         ino=value.st_ino,
@@ -666,7 +694,7 @@ def _source_binding(source: Path) -> RevisionSourceBinding:
         nlink=value.st_nlink,
         size=value.st_size,
         mtime_ns=value.st_mtime_ns,
-        ctime_ns=value.st_ctime_ns,
+        ctime_ns=ctime_ns,
     )
 
 
@@ -677,10 +705,15 @@ def _import_trusted_at(
     lease: ProjectWriteLease,
 ) -> ProjectHead:
     raw = source.read_bytes()
-    parent_fd = os.open(
-        source.parent,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    )
+    if sys.platform == "win32":
+        set_private_dacl(source.parent)
+        set_private_dacl(source)
+        parent_fd = open_windows_directory_fd(source.parent)
+    else:
+        parent_fd = os.open(
+            source.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
     try:
         return store.import_trusted_fcstd_at(
             project_id,
@@ -739,16 +772,42 @@ def _all_tree_bytes(root: Path) -> dict[str, bytes]:
     return result
 
 
+def _physical_tree(root: Path) -> tuple[tuple[Path, os.stat_result], ...]:
+    if sys.platform != "win32":
+        return tuple((path, path.stat(follow_symlinks=False)) for path in root.rglob("*"))
+    pending = [root]
+    observed: list[tuple[Path, os.stat_result]] = []
+    while pending:
+        directory = pending.pop()
+        with os.scandir(windows_extended_path(directory)) as iterator:
+            for entry in iterator:
+                child = directory / entry.name
+                value = entry.stat(follow_symlinks=False)
+                observed.append((child, value))
+                attributes = int(getattr(value, "st_file_attributes", 0))
+                if (
+                    stat.S_ISDIR(value.st_mode)
+                    and not stat.S_ISLNK(value.st_mode)
+                    and not bool(attributes & 0x400)
+                ):
+                    pending.append(child)
+    return tuple(observed)
+
+
 def _physical_ordinary_bytes(root: Path) -> int:
     return sum(
-        path.stat(follow_symlinks=False).st_size
-        for path in root.rglob("*")
-        if path.is_file() and not path.is_symlink()
+        value.st_size
+        for _path, value in _physical_tree(root)
+        if stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode)
     )
 
 
 def _physical_ordinary_files(root: Path) -> int:
-    return sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+    return sum(
+        1
+        for _path, value in _physical_tree(root)
+        if stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode)
+    )
 
 
 def _physical_project_directories(root: Path) -> int:
@@ -756,14 +815,18 @@ def _physical_project_directories(root: Path) -> int:
 
 
 def _physical_revision_directories(root: Path) -> int:
-    return sum(1 for path in root.rglob("*") if path.is_dir() and path.parent.name == "revisions")
+    return sum(
+        1
+        for path, value in _physical_tree(root)
+        if stat.S_ISDIR(value.st_mode) and path.parent.name == "revisions"
+    )
 
 
 def _physical_candidate_reservation_directories(root: Path) -> int:
     return sum(
         1
-        for path in root.rglob("*")
-        if path.is_dir() and path.parent.name in {"candidates", "reservations"}
+        for path, value in _physical_tree(root)
+        if stat.S_ISDIR(value.st_mode) and path.parent.name in {"candidates", "reservations"}
     )
 
 
@@ -1594,6 +1657,7 @@ def test_overlapping_published_generation_zero_and_staged_candidate_fail_closed_
         ((900_000_000, 1_000_000_000), (536_870_912, 1_000_000_000)),
     ],
 )
+@_POSIX_FILE_LIMIT_ONLY
 def test_candidate_file_limit_uses_minimum_soft_and_restores_the_exact_tuple(
     store_parts,
     monkeypatch: pytest.MonkeyPatch,
@@ -1693,7 +1757,7 @@ def test_candidate_file_limit_requires_first_main_init_then_is_idempotent_in_fou
         assert not worker.is_alive()
     assert worker_errors == []
     assert sorted(completed) == [0, 1, 2, 3]
-    assert len(resource_calls) == 8
+    assert len(resource_calls) == (0 if os.name == "nt" else 8)
 
 
 def test_candidate_file_limit_is_one_process_global_gate_across_distinct_stores(
@@ -1769,6 +1833,41 @@ def test_candidate_file_limit_is_one_process_global_gate_across_distinct_stores(
     assert errors == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-limit compatibility contract")
+def test_windows_candidate_file_limit_keeps_the_process_gate_without_posix_primitives(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: (_ for _ in ()).throw(AssertionError("unexpected signal call")),
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (_ for _ in ()).throw(AssertionError("unexpected rlimit call")),
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "setrlimit",
+        lambda _resource_number, _limits: (_ for _ in ()).throw(
+            AssertionError("unexpected rlimit call")
+        ),
+    )
+
+    revisions_module._initialize_candidate_file_limit_runtime()
+    with revisions_module._candidate_file_limit(store):
+        pass
+
+    assert runtime._poisoned_pid is None
+
+
+@_POSIX_FILE_LIMIT_ONLY
 def test_candidate_file_limit_poison_is_visible_before_the_process_gate_unlocks(
     store_parts,
     monkeypatch: pytest.MonkeyPatch,
@@ -1812,6 +1911,7 @@ def test_candidate_file_limit_poison_is_visible_before_the_process_gate_unlocks(
     _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
 
 
+@_POSIX_FILE_LIMIT_ONLY
 def test_candidate_file_limit_restore_failure_poison_is_sticky_in_the_same_process(
     store_parts,
     monkeypatch: pytest.MonkeyPatch,
@@ -1853,6 +1953,7 @@ def test_candidate_file_limit_restore_failure_poison_is_sticky_in_the_same_proce
     _assert_closed_error(reinitialize.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
 
 
+@_POSIX_FILE_LIMIT_ONLY
 def test_candidate_file_limit_failed_gate_release_poison_is_recovery_required(
     store_parts,
     monkeypatch: pytest.MonkeyPatch,
@@ -1896,6 +1997,7 @@ def test_public_surface_is_direct_module_only_and_exact():
         assert name not in execution_package.__all__
 
 
+@_POSIX_IDENTITY_ONLY
 def test_descriptor_native_import_public_seam_is_exact():
     binding_type = getattr(revisions_module, "RevisionSourceBinding", None)
 
@@ -3707,17 +3809,35 @@ def test_candidate_reservation_probe_is_exact_and_strictly_read_only(
     revision_id = REVISION_B
 
     with manager.acquire_project_write(PROJECT_ID):
-        reserved = revisions_module._reserve_quota(
-            store,
-            "candidate",
-            PROJECT_ID,
-            head,
-            revision_id,
-            reservation_key,
-            None,
-            8,
-        )
-    assert reserved[2] is None
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            key_digest, key_code = revisions_module._reservation_key_digest(reservation_key)
+            assert key_code is None
+            reservation, reused = revisions_windows._reserve_quota(
+                store,
+                "candidate",
+                PROJECT_ID,
+                head,
+                revision_id,
+                key_digest,
+                None,
+                8,
+            )
+            assert reservation["revision_id"] == revision_id
+            assert reused is False
+        else:
+            reserved = revisions_module._reserve_quota(
+                store,
+                "candidate",
+                PROJECT_ID,
+                head,
+                revision_id,
+                reservation_key,
+                None,
+                8,
+            )
+            assert reserved[2] is None
     before = _all_tree_bytes(root)
 
     def forbidden_mutation(*_args, **_kwargs):
@@ -5831,6 +5951,7 @@ def test_import_at_rejects_nonexact_inputs_without_implicit_protocols(
     assert _all_tree_bytes(root) == before
 
 
+@_POSIX_IDENTITY_ONLY
 def test_revision_source_binding_rejects_nonexact_field_types():
     valid = {
         "dev": 1,
@@ -5858,7 +5979,10 @@ def test_revision_source_binding_rejects_nonexact_field_types():
         ("mode", stat.S_IFDIR | 0o700),
         ("mode", stat.S_IFREG | 0o644),
         ("uid", -1),
-        ("uid", os.geteuid() + 1),
+        (
+            "uid",
+            os.geteuid() + 1 if hasattr(os, "geteuid") else None,
+        ),
         ("nlink", -1),
         ("nlink", 0),
         ("nlink", 2),
@@ -5868,6 +5992,7 @@ def test_revision_source_binding_rejects_nonexact_field_types():
         ("ctime_ns", -1),
     ],
 )
+@_POSIX_IDENTITY_ONLY
 def test_revision_source_binding_rejects_untrusted_values_without_store_effect(
     store_parts,
     field: str,
@@ -8516,8 +8641,14 @@ def test_cross_project_quota_scan_waits_for_candidate_name_cleanup_to_finish(
     second_lease = manager.acquire_project_write(OTHER_PROJECT_ID)
     first_revision = store.begin_revision(PROJECT_ID, first_head, first_lease)
     candidate_name = _candidate_dir(root, first_revision).name
+    wait_seconds = 30 if sys.platform == "win32" else 5
     original_rmdir = revisions_module.os.rmdir
-    original_snapshot = revisions_module._quota_snapshot
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        original_snapshot = revisions_windows._quota_admission_state
+    else:
+        original_snapshot = revisions_module._quota_snapshot
     cleanup_entered = threading.Event()
     release_cleanup = threading.Event()
     second_started = threading.Event()
@@ -8528,10 +8659,13 @@ def test_cross_project_quota_scan_waits_for_candidate_name_cleanup_to_finish(
 
     def blocked_candidate_rmdir(path, *args, **kwargs):
         nonlocal blocked_once
-        if path == candidate_name and not blocked_once:
+        candidate_match = path == candidate_name
+        if sys.platform == "win32":
+            candidate_match = Path(path).name == candidate_name
+        if candidate_match and not blocked_once:
             blocked_once = True
             cleanup_entered.set()
-            assert release_cleanup.wait(timeout=5)
+            assert release_cleanup.wait(timeout=wait_seconds)
         return original_rmdir(path, *args, **kwargs)
 
     def tracked_snapshot(*args, **kwargs):
@@ -8555,18 +8689,25 @@ def test_cross_project_quota_scan_waits_for_candidate_name_cleanup_to_finish(
             errors.append(error)
 
     monkeypatch.setattr(revisions_module.os, "rmdir", blocked_candidate_rmdir)
-    monkeypatch.setattr(revisions_module, "_quota_snapshot", tracked_snapshot)
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            revisions_windows,
+            "_quota_admission_state",
+            tracked_snapshot,
+        )
+    else:
+        monkeypatch.setattr(revisions_module, "_quota_snapshot", tracked_snapshot)
     first = threading.Thread(target=rollback_first)
     second = threading.Thread(target=begin_second)
     try:
         first.start()
-        assert cleanup_entered.wait(timeout=5)
+        assert cleanup_entered.wait(timeout=wait_seconds)
         second.start()
-        assert second_started.wait(timeout=5)
+        assert second_started.wait(timeout=wait_seconds)
         assert not scan_entered.wait(timeout=0.05)
         release_cleanup.set()
-        first.join(timeout=5)
-        second.join(timeout=5)
+        first.join(timeout=wait_seconds)
+        second.join(timeout=wait_seconds)
         assert not first.is_alive()
         assert not second.is_alive()
         assert errors == []
@@ -8580,9 +8721,9 @@ def test_cross_project_quota_scan_waits_for_candidate_name_cleanup_to_finish(
         assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
     finally:
         release_cleanup.set()
-        first.join(timeout=5)
+        first.join(timeout=wait_seconds)
         if second.ident is not None:
-            second.join(timeout=5)
+            second.join(timeout=wait_seconds)
         if not first_lease.released:
             first_lease.release(owner_token=first_lease.owner_token)
         if not second_lease.released:
@@ -8709,6 +8850,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "O_TRUNC",
         "O_WRONLY",
         "SEEK_SET",
+        "name",
     }
     allowed_module_symbols = {
         "__future__": {"annotations"},
@@ -8719,12 +8861,19 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "os": allowed_os_attributes,
         "pathlib": {"Path"},
         "re": {"fullmatch"},
-        "resource": {"RLIMIT_FSIZE", "RLIM_INFINITY", "getrlimit", "setrlimit"},
         "secrets": {"token_hex"},
-        "signal": {"SIGXFSZ", "SIG_IGN", "getsignal", "signal"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "sys": {"platform"},
         "threading": {"RLock", "current_thread", "main_thread"},
-        "time": {"sleep"},
+        "time": {"monotonic", "sleep"},
+        "vibecad.execution": {"revisions_windows"},
+        "vibecad.execution._resource_compat": {
+            "RLIMIT_FSIZE",
+            "RLIM_INFINITY",
+            "getrlimit",
+            "setrlimit",
+        },
+        "vibecad.execution._signal_compat": {"SIGXFSZ", "SIG_IGN", "getsignal", "signal"},
         "vibecad.workflow.errors": {"MAX_SAFE_JSON_INTEGER"},
         "vibecad.workflow.lease": {
             "LeaseError",
@@ -8742,14 +8891,48 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "os": allowed_os_calls,
         "pathlib": {"Path"},
         "re": {"fullmatch"},
-        "resource": {"getrlimit", "setrlimit"},
         "secrets": {"token_hex"},
-        "signal": {"getsignal", "signal"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "sys": set(),
         "threading": {"RLock", "current_thread", "main_thread"},
-        "time": {"sleep"},
+        "time": {"monotonic", "sleep"},
+        "vibecad.execution": set(),
+        "vibecad.execution._resource_compat": {"getrlimit", "setrlimit"},
+        "vibecad.execution._signal_compat": {"getsignal", "signal"},
         "vibecad.workflow.errors": set(),
         "vibecad.workflow.lease": set(),
+    }
+    allowed_windows_backend_calls = {
+        "_require_lease",
+        "_reserve_quota",
+        "_validate_lease_after",
+        "candidate_path",
+        "commit_revision",
+        "copy_revision_artifacts_at",
+        "initialize_project",
+        "initialize_store",
+        "load_head",
+        "load_revision",
+        "observe_model_source",
+        "open_worker_candidate",
+        "open_worker_revision",
+        "prepare_revision",
+        "probe_candidate_reservation",
+        "reconcile",
+        "reconcile_candidate_reservation",
+        "release_reservation",
+        "replace_candidate_model_at",
+        "reserve_candidate",
+        "revision_artifact_path",
+        "revision_model_path",
+        "rollback_revision",
+        "seal_revision",
+        "seed_candidate_from_revision",
+        "set_reservation_phase",
+        "snapshot_store",
+        "validate_candidate_file_budget_under_lease",
+        "validate_candidate_payload",
+        "validate_candidate_reservation",
     }
     allowed_builtin_calls = {
         "RuntimeError",
@@ -8851,8 +9034,16 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "vibecad.workflow.errors",
         "vibecad.workflow.lease",
     } <= imports
+    lazy_windows_backend_imports = sum(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "vibecad.execution"
+        and any(alias.name == "revisions_windows" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    assert lazy_windows_backend_imports > 0
     for fixed_name in set(module_names) | imported_bound_names | local_callables:
-        assert binding_counts[fixed_name] == 1
+        expected = lazy_windows_backend_imports if fixed_name == "revisions_windows" else 1
+        assert binding_counts[fixed_name] == expected
     assert not set(binding_counts) & protected_builtin_names
 
     def is_approved_sha256_call(node: ast.AST) -> bool:
@@ -8871,6 +9062,11 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             module_name = module_names.get(function.value.id)
             if module_name is not None:
                 return module_name, function.attr
+            if imported_names.get(function.value.id) == (
+                "vibecad.execution",
+                "revisions_windows",
+            ):
+                return "vibecad.execution.revisions_windows", function.attr
         return None
 
     def is_approved_handler_type(node: ast.AST) -> bool:
@@ -9372,6 +9568,12 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
                 module_name = module_names[node.value.id]
                 assert node.attr in allowed_module_symbols[module_name]
                 assert isinstance(node.ctx, ast.Load)
+            elif isinstance(node.value, ast.Name) and imported_names.get(node.value.id) == (
+                "vibecad.execution",
+                "revisions_windows",
+            ):
+                assert node.attr in allowed_windows_backend_calls
+                assert isinstance(node.ctx, ast.Load)
             else:
                 assert node.attr not in forbidden_attributes
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -9468,6 +9670,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             elif module_call is not None and module_call[0] == "stat":
                 assert len(node.args) == 1
                 assert node.keywords == []
+            elif module_call is not None and module_call[0] == (
+                "vibecad.execution.revisions_windows"
+            ):
+                assert module_call[1] in allowed_windows_backend_calls
             elif module_call in {("os", "geteuid"), ("os", "getpid")}:
                 assert node.args == []
                 assert node.keywords == []
@@ -9475,6 +9681,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             if isinstance(node.func.value, ast.Name) and node.func.value.id in module_names:
                 module_name = module_names[node.func.value.id]
                 assert node.func.attr in allowed_module_calls[module_name]
+            elif isinstance(node.func.value, ast.Name) and imported_names.get(
+                node.func.value.id
+            ) == ("vibecad.execution", "revisions_windows"):
+                assert node.func.attr in allowed_windows_backend_calls
             else:
                 assert node.func.attr in allowed_non_module_attribute_calls
                 if node.func.attr == "update":

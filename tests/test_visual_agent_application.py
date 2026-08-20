@@ -62,7 +62,7 @@ def _seal(
         same_scale=True,
         processing_authorization=processing_authorization,
     )
-    descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
     try:
         return application.seal_visual_image_set(
             request=request,

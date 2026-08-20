@@ -2,8 +2,10 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from vibecad.runtime import spec, status
 
 
+@pytest.mark.windows_contract
 def test_fresh_home_maintenance_root_creation_is_concurrency_safe(monkeypatch, tmp_path):
     home = tmp_path / "fresh-home"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -41,6 +44,9 @@ def test_fresh_home_maintenance_root_creation_is_concurrency_safe(monkeypatch, t
     assert all(not worker.is_alive() for worker in workers)
     assert errors == []
     assert home.is_dir() and not home.is_symlink()
+    if sys.platform == "win32":
+        capability = status.capture_windows_path(home, directory=True)
+        assert capability.owner_sid.startswith("S-1-")
 
 
 def test_maintenance_root_never_follows_a_symlink_ancestor(monkeypatch, tmp_path):
@@ -50,7 +56,7 @@ def test_maintenance_root_never_follows_a_symlink_ancestor(monkeypatch, tmp_path
     alias.symlink_to(durable, target_is_directory=True)
     monkeypatch.setenv("VIBECAD_HOME", str(alias / "vibecad-home"))
 
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(ValueError, match="unavailable|alias"):
         status.write_status(status.RuntimeStatus(message="unsafe"))
 
     assert tuple(durable.iterdir()) == ()
@@ -84,6 +90,7 @@ def test_read_status_default_when_absent(monkeypatch, tmp_path):
     assert status.read_status().phase is status.Phase.NOT_STARTED
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO contract")
 def test_read_status_rejects_fifo_without_blocking(monkeypatch, tmp_path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -306,6 +313,7 @@ def test_write_runtime_receipt_uses_atomic_replace(monkeypatch, tmp_path):
     sentinel, _ = _managed_paths(monkeypatch, tmp_path)
     replaced = []
     real_replace = status.os.replace
+    real_windows_replace = status.replace_windows_file
 
     def record_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
         replaced.append((src, dst, src_dir_fd, dst_dir_fd))
@@ -316,14 +324,29 @@ def test_write_runtime_receipt_uses_atomic_replace(monkeypatch, tmp_path):
             dst_dir_fd=dst_dir_fd,
         )
 
+    def record_windows_replace(src, dst, **kwargs):
+        replaced.append((src, dst, None, None))
+        return real_windows_replace(src, dst, **kwargs)
+
     monkeypatch.setattr(status.os, "replace", record_replace)
+    monkeypatch.setattr(status, "replace_windows_file", record_windows_replace)
     status.write_runtime_receipt()
 
-    assert replaced and replaced[0][1] == sentinel.name
-    assert replaced[0][0] != sentinel.name
-    assert replaced[0][2] == replaced[0][3]
+    assert replaced
+    if sys.platform == "win32":
+        assert Path(replaced[0][1]) == sentinel
+        assert Path(replaced[0][0]).parent == sentinel.parent
+        assert Path(replaced[0][0]).name != sentinel.name
+        assert replaced[0][2:] == (None, None)
+    else:
+        assert replaced[0][1] == sentinel.name
+        assert replaced[0][0] != sentinel.name
+        assert replaced[0][2] == replaced[0][3]
     assert json.loads(sentinel.read_text(encoding="utf-8")) == spec.expected_receipt()
-    assert not (sentinel.parent / replaced[0][0]).exists()
+    temporary = Path(replaced[0][0])
+    if not temporary.is_absolute():
+        temporary = sentinel.parent / temporary
+    assert not temporary.exists()
 
 
 @pytest.mark.parametrize("writer", ["status", "managed", "external"])
@@ -336,14 +359,16 @@ def test_runtime_writes_never_follow_parent_replacement_into_data(
     runtime = home / "runtime"
     data = home / "data"
     env = runtime / "mamba" / "envs" / "vibecad"
-    (env / "bin").mkdir(parents=True)
-    (env / "bin" / "python").write_bytes(b"python")
+    managed_python = status.paths.env_python_for(env)
+    managed_python.parent.mkdir(parents=True)
+    managed_python.write_bytes(b"python")
     data.mkdir()
     durable = data / "HEAD"
     durable.write_bytes(b"durable")
     external = tmp_path / "external"
-    (external / "bin").mkdir(parents=True)
-    (external / "bin" / "python").write_bytes(b"python")
+    external_python = status.paths.env_python_for(external)
+    external_python.parent.mkdir(parents=True)
+    external_python.write_bytes(b"python")
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(external))
     original_atomic_write = status._atomic_write
@@ -358,7 +383,7 @@ def test_runtime_writes_never_follow_parent_replacement_into_data(
         return original_atomic_write(path, raw, pinned_parent=pinned_parent)
 
     monkeypatch.setattr(status, "_atomic_write", write_after_swap)
-    with pytest.raises(ValueError, match="identity changed"):
+    with pytest.raises(ValueError, match="identity changed|contains an alias"):
         if writer == "status":
             status.write_status(status.RuntimeStatus(message="unsafe"))
         elif writer == "managed":
@@ -464,6 +489,7 @@ def test_safe_install_log_append_is_bounded_and_appends(monkeypatch, tmp_path):
         status.append_install_log("x" * (status._MAX_LOG_APPEND_BYTES + 1))
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO contract")
 def test_receipt_reader_rejects_fifo_without_blocking(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     legacy = home / "mamba" / "envs" / "vibecad"
@@ -537,7 +563,11 @@ def test_freecad_process_environment_is_private_replaceable_and_exact(
     for directory in [home / "runtime" / "freecad-user", *map(Path, expected.values())]:
         info = directory.lstat()
         assert stat.S_ISDIR(info.st_mode)
-        assert stat.S_IMODE(info.st_mode) & 0o077 == 0
+        if sys.platform == "win32":
+            capability = status.capture_windows_path(directory, directory=True)
+            assert capability.owner_sid.startswith("S-1-")
+        else:
+            assert stat.S_IMODE(info.st_mode) & 0o077 == 0
 
 
 def test_freecad_process_environment_rejects_alias_without_touching_target(
@@ -610,6 +640,7 @@ def test_freecad_process_environment_rejects_bound_external_overlap_before_write
     assert not (runtime / "freecad-user").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode/ancestor contract")
 def test_freecad_process_environment_rejects_attacker_writable_ancestor(
     monkeypatch,
     tmp_path,
@@ -662,7 +693,21 @@ def test_freecad_process_environment_detects_runtime_root_replacement(
             runtime.symlink_to(data, target_is_directory=True)
         return pinned
 
-    monkeypatch.setattr(status, "_ensure_private_child_directory", ensure_then_swap)
+    if sys.platform == "win32":
+        original_fallback = status._fallback_private_directory
+
+        def fallback_then_swap(path):
+            nonlocal swapped
+            directory = original_fallback(path)
+            if path.name == "freecad-user" and not swapped:
+                swapped = True
+                runtime.rename(home / "detached-runtime")
+                runtime.symlink_to(data, target_is_directory=True)
+            return directory
+
+        monkeypatch.setattr(status, "_fallback_private_directory", fallback_then_swap)
+    else:
+        monkeypatch.setattr(status, "_ensure_private_child_directory", ensure_then_swap)
 
     with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
         status.freecad_process_environment()
@@ -671,6 +716,7 @@ def test_freecad_process_environment_detects_runtime_root_replacement(
     assert tuple(path.name for path in data.iterdir()) == ("HEAD",)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX effective-UID contract")
 def test_freecad_process_environment_rejects_wrong_owner(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     (home / "runtime").mkdir(parents=True, mode=0o700)
@@ -733,7 +779,7 @@ def test_probe_supplies_freecad_environment_when_passwd_lookup_is_unavailable(
             return type("Failed", (), {"returncode": 1})()
         return P()
 
-    monkeypatch.setattr(status.subprocess, "run", child_with_no_passwd)
+    monkeypatch.setattr(status, "_spawn_probe_process", child_with_no_passwd)
 
     assert status._probe(Path(sys.executable), "pass") is True
     assert {key: captured[key] for key in expected} == expected
@@ -799,16 +845,27 @@ def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, t
     command = captured["command"]
     options = captured["kwargs"]
     assert "preexec_fn" not in options
-    assert len(options["pass_fds"]) == 1
-    assert command[:4] == [sys.executable, "-I", "-B", "-c"]
-    assert command[4] == status._FD_EXEC_HELPER
-    assert command[5] == str(options["pass_fds"][0])
-    assert command[6:] == [f"./{python.name}", "-I", "-B", "-c", status._VERIFY_SNIPPET]
+    if sys.platform == "win32":
+        assert "pass_fds" not in options
+        assert command == [str(python), "-I", "-B", "-c", status._VERIFY_SNIPPET]
+    else:
+        assert len(options["pass_fds"]) == 1
+        assert command[:4] == [sys.executable, "-I", "-B", "-c"]
+        assert command[4] == status._FD_EXEC_HELPER
+        assert command[5] == str(options["pass_fds"][0])
+        assert command[6:] == [
+            f"./{python.name}",
+            "-I",
+            "-B",
+            "-c",
+            status._VERIFY_SNIPPET,
+        ]
     assert {
         key: options["env"][key] for key in _FREECAD_PROCESS_ENV_KEYS
     } == _expected_freecad_process_environment(home)
 
 
+@pytest.mark.windows_contract
 def test_health_snippet_has_win_dll_prep():
     # M4: -c 片段在 import 前注入 PATH 兜底
     assert "Library" in status._HEALTH_SNIPPET and "import FreeCAD" in status._HEALTH_SNIPPET
@@ -949,7 +1006,14 @@ def test_external_receipt_binds_prefix_identity_and_never_writes_override(monkey
     assert receipt == spec.expected_receipt(external=True)
     assert status.paths.ready_sentinel() == home / "runtime" / "external-runtime.json"
     assert not (override / ".vibecad_ready").exists()
-    assert status.paths.external_runtime_receipt().stat().st_mode & 0o777 == 0o600
+    if sys.platform == "win32":
+        capability = status.capture_windows_path(
+            status.paths.external_runtime_receipt(),
+            directory=False,
+        )
+        assert capability.owner_sid.startswith("S-1-")
+    else:
+        assert status.paths.external_runtime_receipt().stat().st_mode & 0o777 == 0o600
     bound = json.loads(status.paths.external_runtime_receipt().read_text(encoding="utf-8"))
     assert set(bound) == set(spec.expected_receipt(external=True)) | {
         "prefix",
@@ -963,7 +1027,7 @@ def test_external_receipt_binds_prefix_identity_and_never_writes_override(monkey
     parked = tmp_path / "parked"
     override.rename(parked)
     override.mkdir()
-    status.paths.env_python_for(override).parent.mkdir(parents=True)
+    status.paths.env_python_for(override).parent.mkdir(parents=True, exist_ok=True)
     status.paths.env_python_for(override).touch()
     assert status.runtime_ready() is False
 
@@ -1087,6 +1151,7 @@ def test_file_lock_exclusive_and_reentrant(tmp_path):
     assert status.FileLock(tmp_path / "lock").try_acquire() is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PID/flock reclaim contract")
 def test_file_lock_reclaims_dead_pid(tmp_path, monkeypatch):
     lock_dir = tmp_path / "lock"
     lock_dir.mkdir(mode=0o700)
@@ -1102,6 +1167,7 @@ def test_file_lock_reclaims_dead_pid(tmp_path, monkeypatch):
     replacement._force_remove()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PID/flock reclaim contract")
 def test_file_lock_never_reclaims_an_old_but_live_owner(tmp_path, monkeypatch):
     lock_dir = tmp_path / "lock"
     lock = status.FileLock(lock_dir)
@@ -1113,6 +1179,7 @@ def test_file_lock_never_reclaims_an_old_but_live_owner(tmp_path, monkeypatch):
     assert lock_dir.is_dir()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PID/flock reclaim contract")
 def test_file_lock_dual_dead_owner_reclaim_has_one_winner(tmp_path, monkeypatch):
     lock_dir = tmp_path / "lock"
     lock_dir.mkdir(mode=0o700)
@@ -1160,6 +1227,7 @@ def test_file_lock_dual_dead_owner_reclaim_has_one_winner(tmp_path, monkeypatch)
     assert not lock_dir.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PID/flock reclaim contract")
 def test_file_lock_converges_from_dead_crash_left_reclaim_marker(tmp_path, monkeypatch):
     lock_dir = tmp_path / "lock"
     lock_dir.mkdir(mode=0o700)
@@ -1234,6 +1302,8 @@ def test_file_lock_wait_never_recreates_a_missing_parent(tmp_path):
     assert not parent.exists()
 
 
+@pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows compatibility contract")
 def test_windows_compatibility_path_keeps_status_receipt_and_lock_working(
     monkeypatch,
     tmp_path,
@@ -1258,6 +1328,117 @@ def test_windows_compatibility_path_keeps_status_receipt_and_lock_working(
     assert not lock_path.exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows HANDLE contract")
+@pytest.mark.windows_contract
+def test_windows_maintenance_lock_adopts_owned_unprotected_home_without_polling(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "inherited-home"
+    home.mkdir()
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    started = time.monotonic()
+    with status.runtime_maintenance_lock(timeout=30.0, poll_interval=1.0):
+        capability = status.capture_windows_path(home, directory=True)
+        assert capability.owner_sid.startswith("S-1-")
+
+    assert time.monotonic() - started < 2.0
+    assert not status.paths.maintenance_lock().exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows HANDLE contract")
+@pytest.mark.windows_contract
+def test_windows_maintenance_lock_closes_empty_home_remove_before_claim_race(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    real_try_acquire = status.FileLock.try_acquire
+    removed = False
+
+    def remove_home_once_before_claim(lock):
+        nonlocal removed
+        if not removed:
+            removed = True
+            home.rmdir()
+        return real_try_acquire(lock)
+
+    monkeypatch.setattr(status.FileLock, "try_acquire", remove_home_once_before_claim)
+
+    with status.runtime_maintenance_lock(timeout=5.0, poll_interval=0.005) as claim:
+        assert removed is True
+        capability = status.validate_windows_handle_path(
+            claim.inheritable_claim_handle(),
+            status.paths.maintenance_lock(),
+            directory=True,
+        )
+        assert capability.owner_sid.startswith("S-1-")
+
+    assert not status.paths.maintenance_lock().exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows HANDLE contract")
+@pytest.mark.windows_contract
+def test_windows_maintenance_claim_handle_is_inherited_released_and_reacquired(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    child_code = (
+        "import os\n"
+        "from vibecad.runtime import status\n"
+        "handle=int(os.environ.pop('VIBECAD_TEST_CLAIM_HANDLE'))\n"
+        "with status.inherited_runtime_maintenance_claim_handle(handle):\n"
+        "    assert not os.get_handle_inheritable(handle)\n"
+        "    print('adopted', flush=True)\n"
+    )
+
+    with status.runtime_maintenance_lock(timeout=5.0, poll_interval=0.02) as claim:
+        handle = claim.inheritable_claim_handle()
+        owner, owner_capability = claim._read_windows_owner(claim._windows_claim_capability)
+        assert owner_capability is not None
+        assert owner is not None
+        assert owner["started_filetime"] == status._windows_process_created_filetime(os.getpid())
+        capability = status.validate_windows_handle_path(
+            handle,
+            status.paths.maintenance_lock(),
+            directory=True,
+        )
+        assert capability.owner_sid.startswith("S-1-")
+        assert os.get_handle_inheritable(handle) is False
+        environment = os.environ.copy()
+        environment["VIBECAD_TEST_CLAIM_HANDLE"] = str(handle)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.lpAttributeList = {"handle_list": [handle]}
+        os.set_handle_inheritable(handle, True)
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", child_code],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                close_fds=True,
+                startupinfo=startupinfo,
+            )
+        finally:
+            os.set_handle_inheritable(handle, False)
+        output, _ = process.communicate(timeout=10.0)
+        assert process.returncode == 0
+        assert output.strip() == "adopted"
+        assert claim.inheritable_claim_handle() == handle
+
+    assert not status.paths.maintenance_lock().exists()
+    with status.runtime_maintenance_lock(timeout=5.0, poll_interval=0.02) as next_claim:
+        assert next_claim.inheritable_claim_handle() > 0
+    assert not status.paths.maintenance_lock().exists()
+
+
+@pytest.mark.windows_contract
 def test_windows_compatibility_path_rejects_obvious_parent_alias(monkeypatch, tmp_path):
     durable = tmp_path / "durable"
     durable.mkdir()
@@ -1273,37 +1454,82 @@ def test_windows_compatibility_path_rejects_obvious_parent_alias(monkeypatch, tm
     assert tuple(durable.iterdir()) == ()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows PID-generation contract")
+@pytest.mark.windows_contract
 def test_windows_fallback_converges_from_dead_reclaim_marker(monkeypatch, tmp_path):
     monkeypatch.setattr(status.sys, "platform", "win32")
     monkeypatch.setattr(status, "_secure_dir_fd_available", lambda: False)
-    dead_owner = 2_000_000_000
-    dead_claimant = 1_999_999_999
+
+    def stopped_process_generation() -> tuple[int, str]:
+        executable = getattr(sys, "_base_executable", sys.executable)
+        process = subprocess.Popen(
+            [executable, "-B", "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            started_filetime = status._windows_process_created_filetime(process.pid)
+        finally:
+            process.terminate()
+            process.wait(timeout=5.0)
+        return process.pid, started_filetime
+
+    dead_owner, owner_started = stopped_process_generation()
+    dead_claimant, claimant_started = stopped_process_generation()
     lock_dir = tmp_path / "fallback.lock"
-    lock_dir.mkdir(mode=0o700)
+    lock_capability = status.ensure_private_directory(lock_dir, exclusive=True)
     for name, value in {
-        "owner.json": {"pid": dead_owner, "ts": 0, "token": "old"},
-        ".reclaim": {"pid": dead_claimant, "ts": 0, "token": "claim"},
+        "owner.json": {
+            "pid": dead_owner,
+            "started_filetime": owner_started,
+            "token": "old",
+        },
+        ".reclaim": {
+            "pid": dead_claimant,
+            "started_filetime": claimant_started,
+            "token": "claim",
+        },
     }.items():
         path = lock_dir / name
-        path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
-        path.chmod(0o600)
-    monkeypatch.setattr(
-        status,
-        "_pid_alive",
-        lambda pid: pid not in {dead_owner, dead_claimant},
-    )
-
+        descriptor, _capability = status.open_private_file(
+            path,
+            create=True,
+            read_write=True,
+            exclusive=True,
+            expected_parent=lock_capability,
+        )
+        try:
+            os.write(descriptor, json.dumps(value, sort_keys=True).encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     replacement = status.FileLock(lock_dir)
     assert replacement.try_acquire() is True
     replacement._force_remove()
     assert not lock_dir.exists()
 
 
+@pytest.mark.windows_contract
 def test_pid_alive_self_and_dead():
-    import os  # B-1：跨平台探活（Windows 用 OpenProcess 而非杀进程的 os.kill）
-
     assert status._pid_alive(os.getpid()) is True
-    assert status._pid_alive(2_000_000_000) is False
+    executable = getattr(sys, "_base_executable", sys.executable)
+    process = subprocess.Popen(
+        [executable, "-B", "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    )
+    try:
+        assert status._pid_alive(process.pid) is True
+    finally:
+        process.terminate()
+        process.wait(timeout=5.0)
+    assert status._pid_alive(process.pid) is False
     assert status._pid_alive(None) is False
 
 

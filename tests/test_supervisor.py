@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from vibecad import mcp_transport, supervisor
+from vibecad._file_compat import ensure_private_directory, open_private_file
 from vibecad.runtime.status import _pid_alive
 
 FAKE_SERVER = str(Path(__file__).resolve().parent / "fake_server.py")
@@ -167,15 +168,42 @@ def test_pending_uninstall_runs_before_respawn(sup_factory, tmp_path):
     perform_pending_uninstall——运行中落下的卸载标记在换芯重启时被兑现，
     但只删除有所有权证据的运行时，保留模糊 legacy 内容。"""
     home = tmp_path / "home"
-    (home / "runtime").mkdir(parents=True)  # 新版固定运行时目标：可授权删除
-    (home / "runtime" / "owned.bin").write_bytes(b"runtime")
-    (home / "mamba").mkdir(parents=True)  # 只有路径名不能证明 legacy 所有权
-    (home / "status.json").write_text("{}")
+    if sys.platform == "win32":
+        home_capability = ensure_private_directory(home)
+        runtime_capability = ensure_private_directory(
+            home / "runtime",
+            expected_parent=home_capability,
+        )
+        owned_fd, _owned_capability = open_private_file(
+            home / "runtime" / "owned.bin",
+            expected_parent=runtime_capability,
+        )
+        os.write(owned_fd, b"runtime")
+        os.close(owned_fd)
+        ensure_private_directory(home / "mamba", expected_parent=home_capability)
+        status_fd, _status_capability = open_private_file(
+            home / "status.json",
+            expected_parent=home_capability,
+        )
+        os.write(status_fd, b"{}")
+        os.close(status_fd)
+    else:
+        (home / "runtime").mkdir(parents=True)  # 新版固定运行时目标：可授权删除
+        (home / "runtime" / "owned.bin").write_bytes(b"runtime")
+        (home / "mamba").mkdir(parents=True)  # 只有路径名不能证明 legacy 所有权
+        (home / "status.json").write_text("{}")
     sup = sup_factory({"VIBECAD_FAKE_SWAP_TOOL": "get_runtime_status"})
     _handshake(sup)
     assert home.exists()  # 启动清理不背锅：此时尚无标记
 
-    (home / ".uninstall_requested").touch()  # 模拟运行中 request_uninstall 落标记
+    if sys.platform == "win32":
+        marker_fd, _marker_capability = open_private_file(
+            home / ".uninstall_requested",
+            expected_parent=home_capability,
+        )
+        os.close(marker_fd)
+    else:
+        (home / ".uninstall_requested").touch()  # 模拟运行中 request_uninstall 落标记
     response = _rpc(
         sup,
         1,
@@ -663,11 +691,40 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
     home = tmp_path / "home"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     py = paths.active_runtime_python()
-    py.parent.mkdir(parents=True)
-    py.touch()
+    if sys.platform == "win32":
+        home_capability = ensure_private_directory(home)
+        current = home
+        current_capability = home_capability
+        for part in py.parent.relative_to(home).parts:
+            current /= part
+            current_capability = ensure_private_directory(
+                current,
+                expected_parent=current_capability,
+            )
+        python_fd, _python_capability = open_private_file(
+            py,
+            expected_parent=current_capability,
+        )
+        os.close(python_fd)
+    else:
+        py.parent.mkdir(parents=True)
+        py.touch()
     status.write_runtime_receipt()
-    (home / "status.json").write_text("{}")  # 强哨兵：护栏认定是我们的目录
-    (home / ".uninstall_requested").touch()  # 待删标记
+    if sys.platform == "win32":
+        status_fd, _status_capability = open_private_file(
+            home / "status.json",
+            expected_parent=home_capability,
+        )
+        os.write(status_fd, b"{}")
+        os.close(status_fd)
+        marker_fd, _marker_capability = open_private_file(
+            home / ".uninstall_requested",
+            expected_parent=home_capability,
+        )
+        os.close(marker_fd)
+    else:
+        (home / "status.json").write_text("{}")  # 强哨兵：护栏认定是我们的目录
+        (home / ".uninstall_requested").touch()  # 待删标记
     captured: dict = {}
     seam_calls: list[dict[str, str]] = []
     monkeypatch.setattr(
@@ -1069,7 +1126,8 @@ def test_replay_handshake_deadline_includes_blocked_child_stdin(monkeypatch, cap
             os.write(write_fd, b"x" * 65_536)
     except BlockingIOError:
         pass
-    os.set_blocking(write_fd, True)
+    if sys.platform != "win32":
+        os.set_blocking(write_fd, True)
     blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
     child = types.SimpleNamespace(
         stdin=blocked_stdin,
@@ -1123,7 +1181,8 @@ def test_normal_ingress_full_production_pipe_has_deadline_and_releases_generatio
             os.write(write_fd, b"x" * 65_536)
     except BlockingIOError:
         pass
-    os.set_blocking(write_fd, True)
+    if sys.platform != "win32":
+        os.set_blocking(write_fd, True)
     blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
     killed = threading.Event()
     child = types.SimpleNamespace(
@@ -1352,7 +1411,8 @@ def test_swap_replay_write_has_bounded_deadline(
             os.write(write_fd, b"x" * 65_536)
     except BlockingIOError:
         pass
-    os.set_blocking(write_fd, True)
+    if sys.platform != "win32":
+        os.set_blocking(write_fd, True)
     blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
     killed = threading.Event()
 

@@ -13,7 +13,7 @@ import errno
 import hashlib
 import hmac
 import json
-import os
+import os as _native_os
 import re
 import secrets
 import stat
@@ -23,6 +23,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from vibecad._file_compat import (
+    WindowsExternalFileCapability,
+    capture_windows_external_fd,
+    capture_windows_fd,
+    delete_windows_file,
+    open_private_file,
+    open_windows_external_file,
+    validate_windows_external_file,
+    validate_windows_path,
+    windows_extended_path,
+)
 from vibecad.application.project import (
     _current_directory_matches,
     _darwin_thread_fchdir,
@@ -46,9 +57,41 @@ from vibecad.execution.revisions import (
 )
 from vibecad.interaction.cad import CadExecutionPort, ValidatedImportEvidence
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
 from vibecad.workflow.lease import LeaseError, LeaseErrorCode
 
 __all__ = ("DurableProjectService",)
+
+# Keep the mature descriptor-relative state machine unchanged on POSIX while
+# routing the same operations through identity-pinned Win32 capabilities on
+# Windows.  The adapter delegates to the native module everywhere else.
+os = _storage_os if sys.platform == "win32" else _native_os
+
+
+class _WindowsScandirEntry:
+    """Minimal DirEntry facade backed by the capability-aware dir-fd adapter."""
+
+    __slots__ = ("_directory_fd", "name")
+
+    def __init__(self, directory_fd: int, name: str) -> None:
+        self._directory_fd = directory_fd
+        self.name = name
+
+    def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+        return os.stat(
+            self.name,
+            dir_fd=self._directory_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+
+def _scandir_fd(directory_fd: int):
+    if sys.platform != "win32":
+        return os.scandir(directory_fd)
+    return (
+        _WindowsScandirEntry(directory_fd, name)
+        for name in os.listdir(directory_fd)
+    )
 
 _SCHEMA_VERSION = 1
 _MAX_RECORD_BYTES = 64 * 1024
@@ -79,8 +122,9 @@ _MAX_STORE_FILES = (
     + _CATALOG_TRANSIENT_FILE_HEADROOM
 )
 _COPY_CHUNK_BYTES = 1024 * 1024
-_LEASE_WAIT_SECONDS = 1.0
+_LEASE_WAIT_SECONDS = 10.0 if sys.platform == "win32" else 1.0
 _LEASE_RETRY_SECONDS = 0.005
+_JSON_SAFE_INTEGER = 9_007_199_254_740_991
 
 _CREATE_KEY = re.compile(r"project_create_[0-9a-f]{32}\Z")
 _PROJECT_ID = re.compile(r"project_[0-9a-f]{32}\Z")
@@ -232,6 +276,7 @@ class _OpenedSource:
     final_name: str | None
     fd: int
     before: os.stat_result
+    windows_capability: WindowsExternalFileCapability | None = None
 
     def close(self) -> None:
         first = False
@@ -336,6 +381,9 @@ def _request_name(create_key: str) -> str:
 
 
 def _identity(value: os.stat_result) -> tuple[int, ...]:
+    identity_epoch = (
+        value.st_birthtime_ns if sys.platform == "win32" else value.st_ctime_ns
+    )
     return (
         value.st_dev,
         value.st_ino,
@@ -344,8 +392,32 @@ def _identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_nlink,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        identity_epoch,
     )
+
+
+def _identity_wire(value: int, *, nybbles: int) -> int | str:
+    if type(value) is not int or value < 0:
+        raise _ServiceError(ProjectServicePortErrorCode.INTEGRITY_FAILURE)
+    if sys.platform == "win32" and value > _JSON_SAFE_INTEGER:
+        if value >= 1 << (nybbles * 4):
+            raise _ServiceError(ProjectServicePortErrorCode.INTEGRITY_FAILURE)
+        return f"{value:0{nybbles}x}"
+    return value
+
+
+def _exact_identity(value: object, *, nybbles: int) -> int:
+    if type(value) is int:
+        return _exact_int(value, maximum=_JSON_SAFE_INTEGER)
+    if (
+        sys.platform == "win32"
+        and type(value) is str
+        and re.fullmatch(rf"[0-9a-f]{{{nybbles}}}", value) is not None
+    ):
+        parsed = int(value, 16)
+        if parsed > _JSON_SAFE_INTEGER:
+            return parsed
+    raise _ServiceError(ProjectServicePortErrorCode.INTEGRITY_FAILURE)
 
 
 def _binding_mapping(value: _Binding | None) -> dict[str, object] | None:
@@ -353,8 +425,8 @@ def _binding_mapping(value: _Binding | None) -> dict[str, object] | None:
         return None
     return {
         "name": value.name,
-        "dev": value.dev,
-        "ino": value.ino,
+        "dev": _identity_wire(value.dev, nybbles=16),
+        "ino": _identity_wire(value.ino, nybbles=32),
         "mode": value.mode,
         "uid": value.uid,
         "nlink": value.nlink,
@@ -370,8 +442,8 @@ def _source_identity_mapping(
     if value is None:
         return None
     return {
-        "dev": value.dev,
-        "ino": value.ino,
+        "dev": _identity_wire(value.dev, nybbles=16),
+        "ino": _identity_wire(value.ino, nybbles=32),
         "mode": value.mode,
         "uid": value.uid,
         "nlink": value.nlink,
@@ -490,8 +562,8 @@ def _binding_from_mapping(
     digest = _exact_string(mapping["sha256"], _DIGEST)
     return _Binding(
         name=name,
-        dev=_exact_int(mapping["dev"], maximum=9_007_199_254_740_991),
-        ino=_exact_int(mapping["ino"], maximum=9_007_199_254_740_991),
+        dev=_exact_identity(mapping["dev"], nybbles=16),
+        ino=_exact_identity(mapping["ino"], nybbles=32),
         mode=_exact_int(mapping["mode"], maximum=9_007_199_254_740_991),
         uid=_exact_int(mapping["uid"], maximum=9_007_199_254_740_991),
         nlink=_exact_int(mapping["nlink"], minimum=1, maximum=9_007_199_254_740_991),
@@ -510,8 +582,8 @@ def _source_identity_from_mapping(value: object) -> _SourceIdentity | None:
         return None
     mapping = _exact_mapping(value, _SOURCE_IDENTITY_KEYS)
     return _SourceIdentity(
-        dev=_exact_int(mapping["dev"], maximum=9_007_199_254_740_991),
-        ino=_exact_int(mapping["ino"], maximum=9_007_199_254_740_991),
+        dev=_exact_identity(mapping["dev"], nybbles=16),
+        ino=_exact_identity(mapping["ino"], nybbles=32),
         mode=_exact_int(mapping["mode"], maximum=9_007_199_254_740_991),
         uid=_exact_int(mapping["uid"], maximum=9_007_199_254_740_991),
         nlink=_exact_int(mapping["nlink"], minimum=1, maximum=9_007_199_254_740_991),
@@ -770,7 +842,11 @@ def _validate_record_state(value: _Record) -> None:
             or type(value.source_identity) is not _SourceIdentity
             or value.source_identity.size != value.source_size
             or not stat.S_ISREG(value.source_identity.mode)
-            or value.source_identity.uid != os.geteuid()
+            or (
+                sys.platform != "win32"
+                and value.source_identity.uid != os.geteuid()
+            )
+            or (sys.platform == "win32" and value.source_identity.uid < 0)
             or value.source_identity.nlink != 1
         ):
             raise _ServiceError(ProjectServicePortErrorCode.INTEGRITY_FAILURE)
@@ -938,18 +1014,23 @@ def _info_binding_identity(value: os.stat_result) -> tuple[object, ...]:
 
 
 def _binding_is_safe(value: object, *, minimum_size: int) -> bool:
+    dev_maximum = (1 << 64) - 1 if sys.platform == "win32" else _JSON_SAFE_INTEGER
+    ino_maximum = (1 << 128) - 1 if sys.platform == "win32" else _JSON_SAFE_INTEGER
     return (
         type(value) is _Binding
         and type(value.name) is str
         and type(value.dev) is int
-        and 0 <= value.dev <= 9_007_199_254_740_991
+        and 0 <= value.dev <= dev_maximum
         and type(value.ino) is int
-        and 0 <= value.ino <= 9_007_199_254_740_991
+        and 0 <= value.ino <= ino_maximum
         and type(value.mode) is int
         and stat.S_ISREG(value.mode)
-        and stat.S_IMODE(value.mode) == 0o600
+        and (sys.platform == "win32" or stat.S_IMODE(value.mode) == 0o600)
         and type(value.uid) is int
-        and value.uid == os.geteuid()
+        and (
+            (sys.platform == "win32" and value.uid >= 0)
+            or (sys.platform != "win32" and value.uid == os.geteuid())
+        )
         and type(value.nlink) is int
         and value.nlink == 1
         and type(value.size) is int
@@ -1096,6 +1177,17 @@ def _rename_noreplace(
         or "\0" in destination
     ):
         return False
+    if sys.platform == "win32":
+        try:
+            os.rename(
+                source,
+                destination,
+                src_dir_fd=root_fd,
+                dst_dir_fd=destination_fd,
+            )
+            return True
+        except (FileExistsError, IsADirectoryError, NotADirectoryError):
+            return False
     try:
         library = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":
@@ -1543,6 +1635,8 @@ def _quarantine_unlink(
     receipt_required: bool,
     quota_admit: Callable[..., tuple[int, int]],
 ) -> bool:
+    if sys.platform == "win32":
+        return _windows_unlink_bound(root, name, expected=expected)
     if (
         _owned_file_parts(name) is None
         or (expected is not None and expected.name != name)
@@ -1832,6 +1926,63 @@ def _quarantine_unlink(
     return result
 
 
+def _windows_unlink_bound(
+    root: SafeRoot,
+    name: str,
+    *,
+    expected: _Binding | None,
+) -> bool:
+    """Delete one exact private file without the POSIX tombstone protocol.
+
+    Windows exposes delete-by-handle with a pinned File ID, so cleanup can be
+    both replay-safe and final: an absent name already satisfies the durable
+    deletion goal, while a replacement at the same name is rejected.
+    """
+
+    if _owned_file_parts(name) is None or (
+        expected is not None and expected.name != name
+    ):
+        return False
+    root_fd = -1
+    opened_fd = -1
+    try:
+        root_fd = _open_owned(root)
+        parent = capture_windows_fd(root_fd, directory=True)
+        opened = _open_hashed_owned_file(root, root_fd, name)
+        if opened is None:
+            validate_windows_path(parent, directory=True)
+            return True
+        opened_fd, current, _current_info = opened
+        if expected is not None and current != expected:
+            return False
+        file_capability = capture_windows_fd(opened_fd, directory=False)
+        if (file_capability.volume, file_capability.file_id) != (
+            current.dev,
+            current.ino,
+        ):
+            return False
+        _native_os.close(opened_fd)
+        opened_fd = -1
+        delete_windows_file(
+            root.path / name,
+            parent=parent,
+            expected=file_capability,
+        )
+        current_parent = capture_windows_fd(
+            root_fd,
+            directory=True,
+            generation_token=parent.generation_token,
+        )
+        return current_parent == parent and _name_absent_at(root_fd, name)
+    except (OSError, StorageFailure, _ServiceError):
+        return False
+    finally:
+        for descriptor in (opened_fd, root_fd):
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    _native_os.close(descriptor)
+
+
 def _quarantine_recovery_present(root: SafeRoot, name: str) -> bool:
     parts = _owned_file_parts(name)
     if parts is None:
@@ -1870,7 +2021,9 @@ def _source_identity(value: os.stat_result) -> _SourceIdentity:
         nlink=value.st_nlink,
         size=value.st_size,
         mtime_ns=str(value.st_mtime_ns),
-        ctime_ns=str(value.st_ctime_ns),
+        ctime_ns=str(
+            value.st_birthtime_ns if sys.platform == "win32" else value.st_ctime_ns
+        ),
     )
 
 
@@ -1903,6 +2056,62 @@ def _close_owned(
 
 
 def _call_cad_from_pinned_root(root: SafeRoot, name: str, action):
+    if sys.platform == "win32":
+        if type(name) is not str or not (
+            _WORK_NAME.fullmatch(name) or _NORMALIZED_NAME.fullmatch(name)
+        ):
+            raise _ServiceError(ProjectServicePortErrorCode.STORE_FAILURE)
+        root_fd = _open_owned(root)
+        file_fd = -1
+        primary = None
+        result = None
+        try:
+            root_capability = capture_windows_fd(root_fd, directory=True)
+            validate_windows_path(root_capability, directory=True)
+            path = Path(root_capability.path) / name
+            file_fd, file_capability = open_private_file(
+                path,
+                create=False,
+                read_write=False,
+                expected_parent=root_capability,
+            )
+            if file_capability.volume != root_capability.volume:
+                raise OSError
+            try:
+                result = action(Path(windows_extended_path(path)))
+            except BaseException as error:
+                primary = error
+            current_file = capture_windows_fd(
+                file_fd,
+                directory=False,
+                generation_token=file_capability.generation_token,
+            )
+            current_root = capture_windows_fd(
+                root_fd,
+                directory=True,
+                generation_token=root_capability.generation_token,
+            )
+            if current_file != file_capability or current_root != root_capability:
+                if primary is None:
+                    primary = _ServiceError(ProjectServicePortErrorCode.STORE_FAILURE)
+        except BaseException as error:
+            if primary is None:
+                primary = error
+        finally:
+            close_failed = False
+            for descriptor in (file_fd, root_fd):
+                if descriptor >= 0:
+                    try:
+                        _native_os.close(descriptor)
+                    except OSError:
+                        close_failed = True
+            if close_failed and primary is None:
+                primary = _ServiceError(ProjectServicePortErrorCode.STORE_FAILURE)
+        if primary is not None:
+            if isinstance(primary, _ServiceError):
+                raise primary
+            raise primary.with_traceback(primary.__traceback__)
+        return result
     if (
         sys.platform != "darwin"
         or type(name) is not str
@@ -2233,7 +2442,7 @@ class DurableProjectService:
         def scan(directory_fd: int, relative: tuple[str, ...]) -> None:
             nonlocal files, records, saw_legacy, saw_record_temp, total
             try:
-                entries = os.scandir(directory_fd)
+                entries = _scandir_fd(directory_fd)
             except OSError:
                 raise _ServiceError(ProjectServicePortErrorCode.STORE_FAILURE) from None
             try:
@@ -2245,7 +2454,7 @@ class DurableProjectService:
                     is_directory = stat.S_ISDIR(info.st_mode)
                     if not self._allowed_entry(relative, entry.name, is_directory):
                         raise _ServiceError(ProjectServicePortErrorCode.INTEGRITY_FAILURE)
-                    if (
+                    if sys.platform != "win32" and (
                         info.st_uid != self._bootstrap.uid
                         or info.st_dev != self._bootstrap.identity[0]
                     ):
@@ -2254,7 +2463,10 @@ class DurableProjectService:
                     if files > _MAX_STORE_FILES:
                         raise _ServiceError(ProjectServicePortErrorCode.RESOURCE_EXHAUSTED)
                     if is_directory:
-                        if stat.S_IMODE(info.st_mode) != 0o700:
+                        if (
+                            sys.platform != "win32"
+                            and stat.S_IMODE(info.st_mode) != 0o700
+                        ):
                             raise _ServiceError(ProjectServicePortErrorCode.STORE_FAILURE)
                         try:
                             child_fd = os.open(
@@ -2271,7 +2483,10 @@ class DurableProjectService:
                         continue
                     if (
                         not stat.S_ISREG(info.st_mode)
-                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or (
+                            sys.platform != "win32"
+                            and stat.S_IMODE(info.st_mode) != 0o600
+                        )
                         or info.st_nlink != 1
                         or info.st_size < 0
                     ):
@@ -2709,13 +2924,32 @@ class DurableProjectService:
         if expected is None:
             raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
         descriptor = -1
+        pinned_descriptor = -1
         succeeded = False
         try:
-            descriptor = os.dup(source_fd)
-            os.set_inheritable(descriptor, False)
-            before = os.fstat(descriptor)
+            descriptor = _native_os.dup(source_fd)
+            _native_os.set_inheritable(descriptor, False)
+            before = _native_os.fstat(descriptor)
             if not self._safe_source(before) or _source_identity(before) != expected:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            windows_capability = None
+            if sys.platform == "win32":
+                observed = capture_windows_external_fd(descriptor)
+                pinned_descriptor, windows_capability = open_windows_external_file(
+                    Path(observed.path)
+                )
+                pinned_before = _native_os.fstat(pinned_descriptor)
+                if (
+                    observed.volume != windows_capability.volume
+                    or observed.file_id != windows_capability.file_id
+                    or _identity(pinned_before) != _identity(before)
+                    or not self._windows_source_outside_data(windows_capability)
+                ):
+                    raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+                _native_os.close(descriptor)
+                descriptor = pinned_descriptor
+                pinned_descriptor = -1
+                before = pinned_before
             opened = _OpenedSource(
                 ancestor_fds=(),
                 ancestor_identities=(),
@@ -2723,6 +2957,7 @@ class DurableProjectService:
                 final_name=None,
                 fd=descriptor,
                 before=before,
+                windows_capability=windows_capability,
             )
             succeeded = True
             return opened
@@ -2733,9 +2968,14 @@ class DurableProjectService:
         finally:
             if descriptor >= 0 and not succeeded:
                 with contextlib.suppress(OSError):
-                    os.close(descriptor)
+                    _native_os.close(descriptor)
+            if pinned_descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    _native_os.close(pinned_descriptor)
 
     def _open_source(self, source_path: str | None) -> _OpenedSource:
+        if sys.platform == "win32":
+            return self._open_windows_source(source_path)
         if type(source_path) is not str or not source_path.startswith("/"):
             raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
         try:
@@ -2801,11 +3041,76 @@ class DurableProjectService:
                     with contextlib.suppress(OSError):
                         os.close(ancestor_fd)
 
+    def _windows_source_outside_data(
+        self,
+        capability: WindowsExternalFileCapability,
+    ) -> bool:
+        source = _native_os.path.normcase(_native_os.path.abspath(capability.path))
+        data = _native_os.path.normcase(_native_os.path.abspath(self._data_root.path))
+        try:
+            return _native_os.path.commonpath((source, data)) != data
+        except ValueError:
+            return True
+
+    def _open_windows_source(self, source_path: str | None) -> _OpenedSource:
+        if type(source_path) is not str:
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+        try:
+            encoded = source_path.encode("utf-8")
+            candidate = Path(source_path)
+            normalized = Path(_native_os.path.abspath(candidate))
+        except (OSError, UnicodeError, ValueError):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
+        if (
+            not encoded
+            or len(encoded) > 32768
+            or b"\0" in encoded
+            or not candidate.is_absolute()
+            or normalized != candidate
+            or ".." in candidate.parts
+        ):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+        descriptor = -1
+        succeeded = False
+        try:
+            descriptor, capability = open_windows_external_file(normalized)
+            before = _native_os.fstat(descriptor)
+            current = capture_windows_external_fd(
+                descriptor,
+                generation_token=capability.generation_token,
+            )
+            if (
+                _native_os.get_inheritable(descriptor)
+                or current != capability
+                or not self._safe_source(before)
+                or not self._windows_source_outside_data(capability)
+            ):
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            validate_windows_external_file(capability)
+            succeeded = True
+            return _OpenedSource(
+                ancestor_fds=(),
+                ancestor_identities=(),
+                ancestor_names=(),
+                final_name=None,
+                fd=descriptor,
+                before=before,
+                windows_capability=capability,
+            )
+        except _ServiceError:
+            raise
+        except (OSError, TypeError, ValueError):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
+        finally:
+            if descriptor >= 0 and not succeeded:
+                with contextlib.suppress(OSError):
+                    _native_os.close(descriptor)
+
     @staticmethod
     def _safe_source(value: os.stat_result) -> bool:
         return (
             stat.S_ISREG(value.st_mode)
-            and value.st_uid == os.geteuid()
+            and (sys.platform == "win32" or value.st_uid == os.geteuid())
             and value.st_nlink == 1
             and 0 < value.st_size <= _MAX_SOURCE_BYTES
         )
@@ -2892,7 +3197,7 @@ class DurableProjectService:
                     view = view[written:]
                 remaining -= len(chunk)
                 offset += len(chunk)
-            after_source = os.fstat(opened.fd)
+            after_source = _native_os.fstat(opened.fd)
             if _identity(after_source) != _identity(opened.before):
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
             self._verify_source_chain(opened)
@@ -2930,10 +3235,29 @@ class DurableProjectService:
             if opened.ancestor_identities or opened.ancestor_names or opened.final_name is not None:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
             try:
-                current = os.fstat(opened.fd)
+                current = _native_os.fstat(opened.fd)
             except OSError:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
             if not self._safe_source(current) or _identity(current) != _identity(opened.before):
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            if sys.platform == "win32":
+                capability = opened.windows_capability
+                if type(capability) is not WindowsExternalFileCapability:
+                    raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+                try:
+                    current_capability = capture_windows_external_fd(
+                        opened.fd,
+                        generation_token=capability.generation_token,
+                    )
+                    validate_windows_external_file(capability)
+                except (OSError, TypeError, ValueError):
+                    raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
+                if (
+                    current_capability != capability
+                    or not self._windows_source_outside_data(capability)
+                ):
+                    raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            elif opened.windows_capability is not None:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
             self._ensure_live()
             return
@@ -3478,7 +3802,11 @@ class DurableProjectService:
                     nlink=source_info.st_nlink,
                     size=source_info.st_size,
                     mtime_ns=source_info.st_mtime_ns,
-                    ctime_ns=source_info.st_ctime_ns,
+                    ctime_ns=(
+                        source_info.st_birthtime_ns
+                        if sys.platform == "win32"
+                        else source_info.st_ctime_ns
+                    ),
                 )
             except BaseException as error:
                 try:

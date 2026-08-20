@@ -711,8 +711,7 @@ def test_structural_kind_and_expression_source_envelopes_expand_by_terms() -> No
 
     restored_boolean = _find(restored.to_mapping()["nodes"], "node_id", "node.boolean")
     assert (
-        restored_boolean["intent"]["structural_kind_term_ref_id"]
-        == "structure.assembly-occurrence"
+        restored_boolean["intent"]["structural_kind_term_ref_id"] == "structure.assembly-occurrence"
     )
     assert restored.executable is False
     assert restored.adapter_binding_required is True
@@ -724,9 +723,9 @@ def test_expression_result_source_participates_in_cross_domain_cycle_detection()
     extrusion = _find(cyclic["nodes"], "node_id", "node.extrusion")
     extrusion["intent"]["parameter_bindings"][0]["parameter_id"] = "parameter.double-length"
     parameter = _find(cyclic["parameters"], "parameter_id", "parameter.double-length")
-    expression_input = _find(
-        parameter["expression"]["nodes"], "expression_node_id", "expr.sin"
-    )["inputs"][0]
+    expression_input = _find(parameter["expression"]["nodes"], "expression_node_id", "expr.sin")[
+        "inputs"
+    ][0]
     expression_input["source_kind_term_ref_id"] = "expression-source.feature-result"
     expression_input["source_id"] = "result.boolean.solid"
     expression_input["value_type_term_ref_id"] = "type.solid"

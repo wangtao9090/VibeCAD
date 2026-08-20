@@ -6,9 +6,10 @@
 
 import hashlib
 import json
+import os
 import stat
+import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ def _fingerprint(root: Path) -> dict[str, tuple[int, int, int, str | None]]:
         digest = None
         if stat.S_ISREG(info.st_mode):
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        found[str(path.relative_to(root))] = (
+        found[path.relative_to(root).as_posix()] = (
             info.st_ino,
             stat.S_IFMT(info.st_mode),
             info.st_size,
@@ -120,6 +121,117 @@ def test_uninstall_now_reports_size(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     info = uninstall.uninstall_now()
     assert info["ok"] and not (home / "runtime").exists() and info["freed_mb"] >= 0
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 verbatim path contract")
+def test_windows_uninstall_removes_deep_runtime_without_long_path_policy(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    durable = home / "data" / "projects"
+    # Match the product-created home without depending on Python 3.13's
+    # Windows-specific mode=0700 behavior (the project also supports 3.12).
+    status.ensure_private_directory(home, exclusive=True)
+    runtime.mkdir()
+    durable.mkdir(parents=True)
+    keep = durable / "keep.bin"
+    keep.write_bytes(b"durable")
+    deep = runtime / ("a" * 90) / ("b" * 90) / ("c" * 90)
+    os.makedirs(uninstall._extended_path(deep))
+    payload = deep / "payload.bin"
+    with open(uninstall._extended_path(payload), "wb") as stream:
+        stream.write(b"runtime")
+    assert len(str(payload)) > 260
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setattr(uninstall, "_retire_kernel_before_runtime_removal", lambda: True)
+
+    result = uninstall.uninstall_now()
+
+    assert result["ok"] is True
+    assert not runtime.exists()
+    assert keep.read_bytes() == b"durable"
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows daemon-absence contract")
+def test_windows_direct_uninstall_accepts_proven_absent_kernel(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    durable = home / "data" / "projects"
+    status.ensure_private_directory(home, exclusive=True)
+    runtime.mkdir()
+    durable.mkdir(parents=True)
+    keep = durable / "keep.bin"
+    keep.write_bytes(b"durable")
+    (runtime / "engine.bin").write_bytes(b"runtime")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    result = uninstall.uninstall_now()
+
+    assert result["ok"] is True
+    assert not runtime.exists()
+    assert keep.read_bytes() == b"durable"
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows delete contract")
+def test_windows_recursive_uninstall_removes_names_without_following_durable_aliases(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True)
+    durable = tmp_path / "durable.bin"
+    durable.write_bytes(b"durable")
+    os.link(durable, runtime / "package-hardlink.bin")
+    (runtime / "durable-alias.bin").symlink_to(durable)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    result = uninstall.uninstall_now()
+
+    assert result["ok"] is True
+    assert not runtime.exists()
+    assert durable.read_bytes() == b"durable"
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows authority contract")
+def test_windows_uninstall_marker_and_journal_bind_private_file_ids(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "engine.bin").write_bytes(b"runtime")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    uninstall._write_marker()
+    marker_identity = uninstall._read_marker_identity(uninstall.uninstall_marker())
+    assert isinstance(marker_identity, status.WindowsPathCapability)
+    assert marker_identity.owner_sid.startswith("S-1-")
+
+    target = next(item for item in uninstall._build_plan().targets if item.path == runtime)
+    assert target.windows_capability is not None
+    uninstall._write_removal_record(target)
+    record_capability = status.capture_windows_path(
+        uninstall.paths.removal_record(),
+        directory=False,
+    )
+    recovered = uninstall._read_removal_record()
+    assert recovered is not None
+    assert recovered.windows_capability == target.windows_capability
+    payload = json.loads(uninstall.paths.removal_record().read_text(encoding="utf-8"))
+    assert payload["schema"] == 2
+    assert payload["windows_capability"]["file_id"] == (f"{target.windows_capability.file_id:032x}")
+    assert record_capability.owner_sid == marker_identity.owner_sid
+
+    uninstall._clear_removal_record()
+    assert uninstall._clear_matching_marker(
+        uninstall.uninstall_marker(),
+        marker_identity,
+    )
 
 
 def test_uninstall_now_message_scales_units(monkeypatch, tmp_path):
@@ -429,8 +541,9 @@ def test_data_symlink_into_managed_legacy_blocks_every_uninstall_entrypoint(monk
 def test_external_override_tree_is_untouched_by_direct_and_pending_uninstall(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     override = tmp_path / "external"
-    (override / "bin").mkdir(parents=True)
-    (override / "bin" / "python").write_bytes(b"python")
+    override_python = status.paths.env_python_for(override)
+    override_python.parent.mkdir(parents=True)
+    override_python.write_bytes(b"python")
     (override / "engine.bin").write_bytes(b"external")
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(override))
@@ -471,8 +584,9 @@ def test_explicit_legacy_override_survives_direct_and_pending_uninstall(monkeypa
 def test_managed_legacy_cannot_acquire_conflicting_external_binding(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     legacy = home / "mamba" / "envs" / "vibecad"
-    (legacy / "bin").mkdir(parents=True)
-    (legacy / "bin" / "python").write_bytes(b"python")
+    legacy_python = status.paths.env_python_for(legacy)
+    legacy_python.parent.mkdir(parents=True)
+    legacy_python.write_bytes(b"python")
     (legacy / ".vibecad_ready").write_text(
         json.dumps(spec.expected_receipt(), sort_keys=True), encoding="utf-8"
     )
@@ -492,8 +606,9 @@ def test_identity_bound_external_kind_legacy_survives_after_override_is_unset(
 ):
     home = tmp_path / "VibeCAD"
     legacy = home / "mamba" / "envs" / "vibecad"
-    (legacy / "bin").mkdir(parents=True)
-    (legacy / "bin" / "python").write_bytes(b"python")
+    legacy_python = status.paths.env_python_for(legacy)
+    legacy_python.parent.mkdir(parents=True)
+    legacy_python.write_bytes(b"python")
     (legacy / ".vibecad_ready").write_text(
         json.dumps(spec.expected_receipt(external=True), sort_keys=True), encoding="utf-8"
     )
@@ -620,7 +735,25 @@ def test_runtime_replacement_in_exact_check_to_park_window_is_restored(
             dst_dir_fd=dst_dir_fd,
         )
 
-    monkeypatch.setattr(uninstall.os, "rename", publish_replacement_before_park)
+    if sys.platform == "win32":
+        real_native_rename = uninstall.rename_windows_directory
+
+        def publish_replacement_before_native_park(source, destination, **kwargs):
+            nonlocal published
+            if not published:
+                published = True
+                real_rename(runtime, old_generation)
+                runtime.mkdir()
+                (runtime / "new.bin").write_bytes(b"new generation")
+            return real_native_rename(source, destination, **kwargs)
+
+        monkeypatch.setattr(
+            uninstall,
+            "rename_windows_directory",
+            publish_replacement_before_native_park,
+        )
+    else:
+        monkeypatch.setattr(uninstall.os, "rename", publish_replacement_before_park)
 
     with pytest.raises(ValueError, match="identity"):
         uninstall._remove_target(target)
@@ -629,7 +762,12 @@ def test_runtime_replacement_in_exact_check_to_park_window_is_restored(
     assert (runtime / "new.bin").read_bytes() == b"new generation"
     assert (old_generation / "old.bin").read_bytes() == b"old generation"
     assert not parked.exists()
-    assert not uninstall.paths.removal_record().exists()
+    if sys.platform == "win32":
+        # Native expected-File-ID rename rejects the replacement before moving
+        # it; retain the durable record because the old generation moved away.
+        assert uninstall.paths.removal_record().exists()
+    else:
+        assert not uninstall.paths.removal_record().exists()
 
 
 @pytest.mark.parametrize("kind", ["directory", "file"])
@@ -798,28 +936,30 @@ def test_pending_uninstall_holds_home_lock_until_marker_is_cleared(monkeypatch, 
     def normal_repair():
         assert rescan_complete.wait(timeout=2)
         lock = status.FileLock(maintenance_lock)
-        acquired = lock.try_acquire()
-        first_lock_attempt_complete.set()
-        deadline = time.monotonic() + 2
-        while not acquired and time.monotonic() < deadline:
-            time.sleep(0.005)
-            status._ensure_maintenance_write_root()
-            acquired = lock.try_acquire()
-        assert acquired
         try:
+            acquired = lock.try_acquire()
+        except ValueError:
+            # Windows may remove the now-empty home immediately after releasing
+            # its delete-denying maintenance HANDLE. A normal repair recreates
+            # its private maintenance root before retrying the native claim.
+            acquired = False
+        first_lock_attempt_complete.set()
+        assert acquired is False
+        with status.runtime_maintenance_lock(timeout=5.0, poll_interval=0.005):
             marker_seen_at_publish.append(uninstall.uninstall_marker().exists())
             runtime.mkdir(parents=True)
             (runtime / "new.bin").write_bytes(b"new generation")
             published.set()
-        finally:
-            lock._force_remove()
 
     repair = threading.Thread(target=normal_repair)
     repair.start()
     try:
         assert uninstall.perform_pending_uninstall() is True
     finally:
-        repair.join(timeout=3)
+        # The repair itself has a five-second bounded maintenance-lock wait.
+        # Give a loaded CI runner enough time to finish that bounded path before
+        # asserting liveness; this does not relax the product timeout.
+        repair.join(timeout=7)
 
     assert not repair.is_alive()
     assert published.is_set()
@@ -937,26 +1077,56 @@ def test_nested_target_parent_is_synced_before_removal_record_is_cleared(monkeyp
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     info = fixed.lstat()
     target = uninstall._Target(fixed, info.st_dev, info.st_ino, info.st_mode)
-    parent_identity = (fixed.parent.stat().st_dev, fixed.parent.stat().st_ino)
-    home_identity = (home.stat().st_dev, home.stat().st_ino)
-    real_fsync = uninstall.os.fsync
-    directory_syncs = []
+    if sys.platform == "win32":
+        native_events = []
+        real_rename = uninstall.rename_windows_directory
+        real_delete = uninstall.delete_windows_directory
+        real_clear = uninstall._clear_removal_record
 
-    def record_directory_sync(fd):
-        value = uninstall.os.fstat(fd)
-        if stat.S_ISDIR(value.st_mode):
-            identity = (value.st_dev, value.st_ino)
-            if identity == parent_identity:
-                directory_syncs.append("target-parent")
-            elif identity == home_identity:
-                directory_syncs.append("home")
-        return real_fsync(fd)
+        def record_rename(*args, **kwargs):
+            native_events.append("write-through-rename")
+            return real_rename(*args, **kwargs)
 
-    monkeypatch.setattr(uninstall.os, "fsync", record_directory_sync)
+        def record_delete(*args, **kwargs):
+            native_events.append("handle-delete")
+            return real_delete(*args, **kwargs)
+
+        def record_clear():
+            native_events.append("journal-clear")
+            return real_clear()
+
+        monkeypatch.setattr(uninstall, "rename_windows_directory", record_rename)
+        monkeypatch.setattr(uninstall, "delete_windows_directory", record_delete)
+        monkeypatch.setattr(uninstall, "_clear_removal_record", record_clear)
+    else:
+        parent_identity = (fixed.parent.stat().st_dev, fixed.parent.stat().st_ino)
+        home_identity = (home.stat().st_dev, home.stat().st_ino)
+        real_fsync = uninstall.os.fsync
+        directory_syncs = []
+
+        def record_directory_sync(fd):
+            value = uninstall.os.fstat(fd)
+            if stat.S_ISDIR(value.st_mode):
+                identity = (value.st_dev, value.st_ino)
+                if identity == parent_identity:
+                    directory_syncs.append("target-parent")
+                elif identity == home_identity:
+                    directory_syncs.append("home")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(uninstall.os, "fsync", record_directory_sync)
 
     uninstall._remove_target(target)
 
-    assert directory_syncs[-2:] == ["target-parent", "home"]
+    if sys.platform == "win32":
+        assert native_events == [
+            "write-through-rename",
+            "write-through-rename",
+            "handle-delete",
+            "journal-clear",
+        ]
+    else:
+        assert directory_syncs[-2:] == ["target-parent", "home"]
     assert not fixed.exists()
 
 

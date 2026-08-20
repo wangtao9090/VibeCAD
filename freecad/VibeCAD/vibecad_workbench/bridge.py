@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -12,6 +13,8 @@ import subprocess
 import time
 from enum import Enum
 from pathlib import Path
+
+_windows_files = None
 
 __all__ = ("ExternalBridgeClient", "external_client_factory")
 
@@ -55,10 +58,32 @@ _ENVIRONMENT_ALLOWLIST = frozenset(
         "LC_ALL",
         "LC_CTYPE",
         "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "TEMP",
+        "TMP",
         "TMPDIR",
+        "USERPROFILE",
         "VIBECAD_HOME",
+        "WINDIR",
+        "windir",
     }
 )
+
+
+def _windows_file_api() -> object:
+    """Load the managed Windows authority only when the bridge is opened."""
+
+    global _windows_files
+    if os.name != "nt":
+        raise OSError
+    if _windows_files is None:
+        try:
+            _windows_files = importlib.import_module("vibecad._file_compat")
+        except ImportError as exc:  # pragma: no cover - fail-closed package boundary
+            raise OSError from exc
+    return _windows_files
 
 
 class _BridgeProtocolError(ValueError):
@@ -191,7 +216,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _posix_uid() -> int:
+    """Return the POSIX owner only after the Windows authority has branched."""
+
+    if os.name == "nt":
+        raise OSError
+    getuid = getattr(os, "getuid", None)
+    if not callable(getuid):
+        raise OSError
+    uid = getuid()
+    if type(uid) is not int or uid < 0:
+        raise OSError
+    return uid
+
+
 def _has_private_user_ancestor(path: Path) -> bool:
+    uid = _posix_uid()
     for ancestor in path.parents:
         try:
             info = ancestor.lstat()
@@ -199,22 +239,98 @@ def _has_private_user_ancestor(path: Path) -> bool:
                 return False
         except OSError:
             return False
-        if info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077 == 0:
+        if info.st_uid == uid and stat.S_IMODE(info.st_mode) & 0o077 == 0:
             return True
     return False
 
 
+def _windows_executable_evidence(
+    path: Path,
+    *,
+    keep_open: bool,
+) -> tuple[tuple[object, ...], str, int]:
+    windows_files = _windows_file_api()
+    descriptor = -1
+    handed_off = False
+    try:
+        descriptor, capability = windows_files.open_windows_external_file(path)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0:
+            raise OSError
+        remaining = before.st_size
+        offset = 0
+        digest = hashlib.sha256()
+        while remaining:
+            chunk = windows_files.pread(
+                descriptor,
+                min(remaining, 1 << 20),
+                offset,
+            )
+            if not chunk:
+                raise OSError
+            digest.update(chunk)
+            offset += len(chunk)
+            remaining -= len(chunk)
+        if windows_files.pread(descriptor, 1, offset):
+            raise OSError
+        after = os.fstat(descriptor)
+        recaptured = windows_files.capture_windows_external_fd(
+            descriptor,
+            generation_token=capability.generation_token,
+        )
+        birthtime = int(getattr(after, "st_birthtime_ns", after.st_ctime_ns))
+        before_birthtime = int(getattr(before, "st_birthtime_ns", before.st_ctime_ns))
+        if (
+            recaptured != capability
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before_birthtime != birthtime
+        ):
+            raise OSError
+        identity = (
+            os.path.normcase(capability.path),
+            capability.volume,
+            capability.file_id,
+            int(after.st_size),
+            int(after.st_mtime_ns),
+            birthtime,
+        )
+        result_fd = descriptor if keep_open else -1
+        if not keep_open:
+            os.close(descriptor)
+            descriptor = -1
+        else:
+            handed_off = True
+        return identity, digest.hexdigest(), result_fd
+    finally:
+        if descriptor >= 0 and not handed_off:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def _configuration(path: Path) -> dict[str, object]:
+    windows_configuration = None
+    windows_files = None
     try:
         if path != path.resolve(strict=True):
             raise OSError
         info = path.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid not in {0, os.getuid()}
-            or stat.S_IMODE(info.st_mode) & 0o022
-        ):
-            raise OSError
+        if os.name == "nt":
+            windows_files = _windows_file_api()
+            windows_configuration = windows_files.capture_windows_path(
+                path,
+                directory=False,
+            )
+        else:
+            uid = _posix_uid()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid not in {0, uid}
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise OSError
         value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_json_object)
         copied = _plain(value)
         if type(copied) is not dict or set(copied) != _CONFIG_KEYS:
@@ -247,15 +363,34 @@ def _configuration(path: Path) -> dict[str, object]:
             raise OSError
         entry = python.lstat()
         executable = python_target.lstat()
-        if (
-            entry.st_uid not in {0, os.getuid()}
+        if os.name == "nt":
+            if (
+                python != python_target
+                or not stat.S_ISREG(entry.st_mode)
+                or not stat.S_ISREG(executable.st_mode)
+                or not os.access(python_target, os.X_OK)
+            ):
+                raise OSError
+            identity, actual_sha256, _descriptor = _windows_executable_evidence(
+                python_target,
+                keep_open=False,
+            )
+            if actual_sha256 != python_sha256:
+                raise OSError
+            copied["_windows_python_identity"] = identity
+            windows_files.validate_windows_path(
+                windows_configuration,
+                directory=False,
+            )
+        elif (
+            entry.st_uid not in {0, uid}
             or not (stat.S_ISREG(entry.st_mode) or stat.S_ISLNK(entry.st_mode))
             or (
                 python != python_target
                 and (not stat.S_ISLNK(entry.st_mode) or python.parent != python_target.parent)
             )
             or not stat.S_ISREG(executable.st_mode)
-            or executable.st_uid not in {0, os.getuid()}
+            or executable.st_uid not in {0, uid}
             or stat.S_IMODE(executable.st_mode) & 0o002
             or (
                 stat.S_IMODE(executable.st_mode) & 0o020
@@ -300,21 +435,60 @@ class ExternalBridgeClient:
         python_target = Path(config["python_target"])
         before = (python.lstat(), python_target.lstat())
         process = None
+        windows_executable_fd = -1
         try:
+            if os.name == "nt":
+                identity, digest, windows_executable_fd = _windows_executable_evidence(
+                    python_target,
+                    keep_open=True,
+                )
+                if (
+                    identity != config.get("_windows_python_identity")
+                    or digest != config["python_sha256"]
+                ):
+                    raise _BridgeProtocolError
+            process_options = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.DEVNULL,
+                "env": _environment(),
+                "bufsize": 0,
+            }
+            if os.name == "nt":
+                process_options["creationflags"] = getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                )
+            else:
+                process_options["start_new_session"] = True
             process = subprocess.Popen(
                 [str(python), "-I", "-m", "vibecad.freecad_bridge"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=_environment(),
-                bufsize=0,
-                start_new_session=True,
+                **process_options,
             )
             if process.stdin is None or process.stdout is None:
                 raise _BridgeProtocolError
             after = (python.lstat(), python_target.lstat())
-            if before != after or _sha256(python_target) != config["python_sha256"]:
+            if os.name == "nt":
+                recaptured = _windows_file_api().capture_windows_external_fd(
+                    windows_executable_fd,
+                )
+                current = os.fstat(windows_executable_fd)
+                current_identity = (
+                    os.path.normcase(recaptured.path),
+                    recaptured.volume,
+                    recaptured.file_id,
+                    int(current.st_size),
+                    int(current.st_mtime_ns),
+                    int(getattr(current, "st_birthtime_ns", current.st_ctime_ns)),
+                )
+                if current_identity != identity:
+                    raise _BridgeProtocolError
+            elif before != after or _sha256(python_target) != config["python_sha256"]:
                 raise _BridgeProtocolError
+            if windows_executable_fd >= 0:
+                os.close(windows_executable_fd)
+                windows_executable_fd = -1
             hello = _read_frame(process.stdout, timeout=_HANDSHAKE_TIMEOUT_SECONDS)
             if set(hello) != {
                 "schema_version",
@@ -363,6 +537,11 @@ class ExternalBridgeClient:
                 raise _BridgeProtocolError
             return cls(process, daemon_id=daemon_id)
         except BaseException:
+            if windows_executable_fd >= 0:
+                try:
+                    os.close(windows_executable_fd)
+                except OSError:
+                    pass
             if process is not None:
                 _retire_process(process)
             raise BridgeClientError(BridgeClientErrorCode.UNAVAILABLE) from None

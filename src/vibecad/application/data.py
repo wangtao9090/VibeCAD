@@ -5,9 +5,16 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_path,
+    ensure_private_directory,
+    validate_windows_path,
+)
 
 __all__ = (
     "ApplicationDataError",
@@ -166,6 +173,51 @@ def _open_private_child(
         raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT) from None
 
 
+def _windows_entry_is_alias(path: Path) -> bool:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        return True
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    return stat.S_ISLNK(value.st_mode) or bool(attributes & 0x00000400)
+
+
+def _ensure_windows_data_root(path: Path) -> WindowsPathCapability:
+    """Create a missing private tail while refusing reparse ancestors."""
+
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current):
+        if current == Path(current.anchor):
+            raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
+        missing.append(current)
+        current = current.parent
+    try:
+        probe = Path(path.anchor)
+        for part in current.parts[1:]:
+            probe /= part
+            value = os.lstat(probe)
+            if not stat.S_ISDIR(value.st_mode) or _windows_entry_is_alias(probe):
+                raise OSError("Windows data ancestor is unsafe")
+        parent_capability: WindowsPathCapability | None = None
+        for candidate in reversed(missing):
+            parent_capability = ensure_private_directory(
+                candidate,
+                expected_parent=parent_capability,
+            )
+        capability = (
+            parent_capability
+            if missing
+            else capture_windows_path(path, directory=True)
+        )
+        if capability is None or Path(capability.path) != path:
+            raise OSError("Windows data root identity is unavailable")
+        validate_windows_path(capability, directory=True)
+        return capability
+    except (OSError, TypeError, ValueError):
+        raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT) from None
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationDataLayout:
     root: Path
@@ -180,13 +232,14 @@ class ApplicationDataLayout:
     reconstruction_drafts: Path
     visual_reviews: Path
     _identities: tuple[tuple[int, int], ...]
+    _windows_capabilities: tuple[WindowsPathCapability, ...] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
-    def identity_for(self, path: object) -> tuple[int, int]:
-        """Return the directory identity captured by the descriptor-backed opener."""
-
-        if type(path) is not type(Path("/")):
-            raise ApplicationDataError(ApplicationDataErrorCode.INVALID_ROOT)
-        paths = (
+    def _fixed_paths(self) -> tuple[Path, ...]:
+        return (
             self.root,
             self.locks,
             self.tasks,
@@ -199,6 +252,13 @@ class ApplicationDataLayout:
             self.reconstruction_drafts,
             self.visual_reviews,
         )
+
+    def identity_for(self, path: object) -> tuple[int, int]:
+        """Return the directory identity captured by the descriptor-backed opener."""
+
+        if type(path) is not type(Path("/")):
+            raise ApplicationDataError(ApplicationDataErrorCode.INVALID_ROOT)
+        paths = self._fixed_paths()
         if (
             type(self._identities) is not tuple
             or len(self._identities) != len(paths)
@@ -219,6 +279,23 @@ class ApplicationDataLayout:
         """Fail unless a fixed layout path still names its captured directory."""
 
         expected = self.identity_for(path)
+        if os.name == "nt" and sys.platform == "win32":
+            capabilities = self._windows_capabilities
+            fixed_paths = self._fixed_paths()
+            if (
+                type(capabilities) is not tuple
+                or len(capabilities) != len(fixed_paths)
+            ):
+                raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
+            try:
+                index = fixed_paths.index(path)
+                current = validate_windows_path(capabilities[index], directory=True)
+            except (OSError, TypeError, ValueError):
+                raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT) from None
+            capability = capabilities[index]
+            if current != path or (capability.volume, capability.file_id) != expected:
+                raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
+            return
         descriptor = None
         try:
             descriptor, value = _open_absolute_directory(
@@ -237,6 +314,8 @@ class ApplicationDataLayout:
 
     @classmethod
     def open(cls, root: object) -> ApplicationDataLayout:
+        if sys.platform == "win32" and os.name == "nt":
+            return cls._open_windows(root)
         if sys.platform != "darwin":
             raise ApplicationDataError(ApplicationDataErrorCode.UNSUPPORTED_PLATFORM)
         data_root = _path(root)
@@ -296,3 +375,44 @@ class ApplicationDataLayout:
         children = tuple(data_root / name for name in names)
         identities = ((root_stat.st_dev, root_stat.st_ino), *child_identities)
         return cls(data_root, *children, identities)
+
+    @classmethod
+    def _open_windows(cls, root: object) -> ApplicationDataLayout:
+        data_root = _path(root)
+        root_capability = _ensure_windows_data_root(data_root)
+        names = (
+            "locks",
+            "tasks",
+            "projects",
+            "bootstrap",
+            "checkouts",
+            "artifacts",
+            "releases",
+            "visual_inputs",
+            "reconstruction_drafts",
+            "visual_reviews",
+        )
+        capabilities: list[WindowsPathCapability] = [root_capability]
+        try:
+            for name in names:
+                capabilities.append(
+                    ensure_private_directory(
+                        data_root / name,
+                        expected_parent=root_capability,
+                    )
+                )
+            for capability in capabilities:
+                validate_windows_path(capability, directory=True)
+            validate_windows_path(root_capability, directory=True)
+        except (OSError, TypeError, ValueError):
+            raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT) from None
+        children = tuple(data_root / name for name in names)
+        identities = tuple(
+            (capability.volume, capability.file_id) for capability in capabilities
+        )
+        return cls(
+            data_root,
+            *children,
+            identities,
+            tuple(capabilities),
+        )

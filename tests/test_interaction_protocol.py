@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 
 import pytest
 
@@ -28,6 +29,15 @@ from vibecad.interaction.protocol import (
 REQUEST_ID = "request_" + "1" * 32
 KERNEL_ID = "kernel_" + "2" * 32
 SESSION_ID = "session_" + "3" * 32
+
+
+def _open_test_import_source(path: os.PathLike[str]) -> int:
+    if os.name == "nt":
+        from vibecad._file_compat import open_windows_external_file
+
+        descriptor, _capability = open_windows_external_file(path)
+        return descriptor
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
 
 
 def _request(method: str = "initialize", params: object | None = None) -> bytes:
@@ -407,12 +417,17 @@ def _v2_file_grant_descriptor(
 def _v2_file_grant_result(
     **changes: object,
 ) -> dict[str, object]:
+    local_path = (
+        f"C:\\private\\checkouts\\{V2_CHECKOUT_ID}\\model.FCStd"
+        if sys.platform == "win32"
+        else f"/private/checkouts/{V2_CHECKOUT_ID}/model.FCStd"
+    )
     value: dict[str, object] = {
         "schema_version": 1,
         "grant_id": V2_FILE_GRANT_ID,
         "checkout_id": V2_CHECKOUT_ID,
         "purpose": "open_managed_checkout",
-        "local_path": f"/private/checkouts/{V2_CHECKOUT_ID}/model.FCStd",
+        "local_path": local_path,
         "current_model_sha256": "d" * 64,
         "current_size_bytes": 4096,
     }
@@ -1079,7 +1094,7 @@ def test_v2_project_import_binds_one_descriptor_to_a_path_free_static_request(
         project_import=lambda params, descriptor: calls.append((params, descriptor)) or {"ok": True}
     )
     server, client = _ready_v2_pair()
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = _open_test_import_source(source)
     try:
         raw = client.encode_request(
             "project.import",
@@ -1146,7 +1161,7 @@ def test_v2_project_import_rejects_non_exact_integer_identity_fields(
 
     dispatcher = protocol_v2.StaticV2Dispatcher(project_import=imported)
     server, client = _ready_v2_pair()
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = _open_test_import_source(source)
     try:
         raw = client.encode_request(
             "project.import",
@@ -1198,7 +1213,7 @@ def test_v2_project_import_rejects_missing_unexpected_and_tampered_descriptors(
     response = client.decode_response(server.dispatch_and_encode(missing, dispatcher))
     assert response.error["code"] == "invalid_request"
 
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = _open_test_import_source(source)
     try:
         unexpected = client.encode_request(
             "kernel.ping",
@@ -1274,7 +1289,7 @@ def test_v2_kernel_retire_has_exact_reason_and_never_accepts_a_descriptor(
 
     source = tmp_path / "unexpected.bin"
     source.write_bytes(b"x")
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = _open_test_import_source(source)
     try:
         unexpected = client.encode_request(
             "kernel.retire",

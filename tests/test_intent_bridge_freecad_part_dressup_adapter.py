@@ -139,16 +139,12 @@ def _graph(
         results=(
             FeatureResultV2(
                 result_id="result_source_solid",
-                semantic_role_term_ref_id=(
-                    PART_DRESSUP_SOURCE_SOLID_RESULT_ROLE_TERM.term_ref_id
-                ),
+                semantic_role_term_ref_id=(PART_DRESSUP_SOURCE_SOLID_RESULT_ROLE_TERM.term_ref_id),
                 value_type_term_ref_id=PART_DRESSUP_SOLID_TYPE_TERM.term_ref_id,
             ),
             FeatureResultV2(
                 result_id="result_source_selection",
-                semantic_role_term_ref_id=(
-                    operation_terms.selection_result_role.term_ref_id
-                ),
+                semantic_role_term_ref_id=(operation_terms.selection_result_role.term_ref_id),
                 value_type_term_ref_id=operation_terms.selection_value_type.term_ref_id,
             ),
         ),
@@ -181,9 +177,7 @@ def _graph(
                 ),
                 FeatureInputPortV2(
                     port_id="port_selection",
-                    semantic_role_term_ref_id=(
-                        PART_DRESSUP_SELECTION_PORT_ROLE_TERM.term_ref_id
-                    ),
+                    semantic_role_term_ref_id=(PART_DRESSUP_SELECTION_PORT_ROLE_TERM.term_ref_id),
                     value_type_term_ref_id=operation_terms.selection_value_type.term_ref_id,
                     minimum_cardinality=1,
                     maximum_cardinality=1,
@@ -268,15 +262,9 @@ def _proof_term(term_ref_id: str, term_id: str) -> BridgeTermRef:
 
 
 RULE = _proof_term("rule_part_dressup_target", "rule.part-dressup-target-reviewed")
-PREDICATE = _proof_term(
-    "predicate_part_dressup_target", "predicate.part-dressup-target-reviewed"
-)
-ROLE_PREMISE = _proof_term(
-    "role_part_dressup_candidate", "proof-role.dressup-candidate"
-)
-ROLE_CONCLUSION = _proof_term(
-    "role_part_dressup_validated", "proof-role.dressup-validated"
-)
+PREDICATE = _proof_term("predicate_part_dressup_target", "predicate.part-dressup-target-reviewed")
+ROLE_PREMISE = _proof_term("role_part_dressup_candidate", "proof-role.dressup-candidate")
+ROLE_CONCLUSION = _proof_term("role_part_dressup_validated", "proof-role.dressup-validated")
 PART_DRESSUP_STRUCTURE_BRIDGE = _bridge_from_pfg(PART_DRESSUP_TARGET_STRUCTURE_TERM)
 
 
@@ -427,9 +415,7 @@ def _request(
     policy = TrustedRulePolicy(evaluators=(_DressupEvaluator(),))
     request = BackendLoweringRequest(
         adapter=FREECAD_PART_DRESSUP_ADAPTER_DESCRIPTOR,
-        terms=tuple(
-            (*PART_DRESSUP_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)
-        ),
+        terms=tuple((*PART_DRESSUP_REQUEST_TERMS, RULE, PREDICATE, ROLE_PREMISE, ROLE_CONCLUSION)),
         documents=(intent_document, capability_document),
         intent_artifact_ids=(intent_document.artifact_id,),
         capability_artifact_ids=(capability_document.artifact_id,),
@@ -582,9 +568,10 @@ def test_selection_value_type_is_bound_to_operation_family() -> None:
     assert face_terms.selection_value_type is PART_DRESSUP_FACE_REFERENCE_TYPE_TERM
     assert face_terms.locator_term is PART_DRESSUP_FACE_LOCATOR_TERM
     assert PART_DRESSUP_FILLET_OPERATION_TERM is edge_terms.operation_term
-    assert PART_DRESSUP_CHAMFER_OPERATION_TERM is _operation_terms(
-        PartDressupOperation.EDGE_CHAMFER
-    ).operation_term
+    assert (
+        PART_DRESSUP_CHAMFER_OPERATION_TERM
+        is _operation_terms(PartDressupOperation.EDGE_CHAMFER).operation_term
+    )
     assert PART_DRESSUP_THICKNESS_OPERATION_TERM is face_terms.operation_term
 
 
@@ -627,8 +614,9 @@ def test_real_freecad_part_dressup_batch_create_edit_reopen_and_rollback(
     output_root.mkdir()
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part
 from vibecad.parametric.freecad_part_dressup_rules import (

@@ -921,6 +921,14 @@ class Supervisor:
                 try:
                     written = os.write(fd, view[offset:])
                 except BlockingIOError:
+                    if sys.platform == "win32":
+                        # ``select`` on Windows accepts sockets only, while a
+                        # supervised child's stdin is an anonymous pipe.  The
+                        # descriptor is already non-blocking, so retrying it in
+                        # short bounded intervals preserves the same absolute
+                        # deadline without leaving a writer thread behind.
+                        time.sleep(min(0.005, remaining))
+                        continue
                     try:
                         _readable, writable, _exceptional = select.select(
                             [],
@@ -943,8 +951,13 @@ class Supervisor:
                 offset += written
             return _ChildWriteResult.SUCCESS
         finally:
-            with contextlib.suppress(OSError, TypeError, ValueError):
-                os.set_blocking(fd, was_blocking)
+            if sys.platform != "win32":
+                with contextlib.suppress(OSError, TypeError, ValueError):
+                    os.set_blocking(fd, was_blocking)
+            # Windows cannot reliably switch an already-full anonymous pipe
+            # from blocking back to PIPE_NOWAIT (ERROR_PIPE_BUSY).  The first
+            # handshake converts the initially-empty Popen pipe, and every
+            # subsequent supervised write intentionally leaves it non-blocking.
 
     @staticmethod
     def _report_child_write_timeout() -> None:

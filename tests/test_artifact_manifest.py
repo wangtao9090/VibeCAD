@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import vibecad.application.artifacts as artifacts_module
+from vibecad import _file_compat
 from vibecad.application.artifact_manifest import (
     ArtifactManifestError,
     ArtifactManifestErrorCode,
@@ -79,6 +81,8 @@ class _Cad(CadExecutionPort):
 def _mkdir(path: Path) -> None:
     path.mkdir(mode=0o700)
     path.chmod(0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
 
 
 def _tree(root: Path) -> tuple[tuple[str, int, int, int, str], ...]:
@@ -627,6 +631,8 @@ def test_request_remnant_requires_recovery_without_cleanup(
     remnant = request.with_name(f".{request.name}.{'f' * 32}.tmp")
     remnant.write_bytes(request.read_bytes())
     remnant.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(remnant)
     before = _tree(parts["artifacts"])
 
     with pytest.raises(ArtifactManifestError) as captured:

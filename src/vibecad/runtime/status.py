@@ -16,6 +16,23 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_fd,
+    capture_windows_path,
+    close_windows_handle,
+    delete_windows_directory,
+    delete_windows_file,
+    ensure_private_directory,
+    open_private_file,
+    open_windows_directory_handle,
+    protect_windows_path,
+    rename_windows_directory,
+    replace_windows_file,
+    set_windows_handle_inheritable,
+    validate_windows_handle_path,
+    validate_windows_path,
+)
 from vibecad.runtime import paths, spec
 
 # import FreeCAD 前的跨平台兜底（Windows 把 conda Library/bin 注入 PATH；macOS/Linux 无操作）
@@ -527,6 +544,8 @@ def _atomic_write(
 
 
 def _atomic_write_fallback(path: Path, raw: bytes) -> tuple[int, int]:
+    if sys.platform == "win32":
+        return _atomic_write_windows(path, raw)
     parent = _fallback_directory(path.parent, create_missing=False)
     temp = parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     fd = -1
@@ -560,6 +579,107 @@ def _atomic_write_fallback(path: Path, raw: bytes) -> tuple[int, int]:
                 os.close(fd)
         with contextlib.suppress(OSError):
             temp.unlink()
+
+
+def _same_windows_file_generation(
+    left: WindowsPathCapability,
+    right: WindowsPathCapability,
+) -> bool:
+    return (
+        left.volume,
+        left.file_id,
+        left.owner_sid,
+        left.security_sha256,
+        left.generation_token,
+    ) == (
+        right.volume,
+        right.file_id,
+        right.owner_sid,
+        right.security_sha256,
+        right.generation_token,
+    )
+
+
+def _atomic_write_windows(path: Path, raw: bytes) -> tuple[int, int]:
+    """Publish one private Windows file and bind the move to its native File ID."""
+
+    parent = _fallback_directory(path.parent, create_missing=False)
+    temp = parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    parent_capability: WindowsPathCapability | None = None
+    temporary_capability: WindowsPathCapability | None = None
+    descriptor = -1
+    try:
+        # A protected parent permits the strongest parent-pinned MoveFileExW
+        # protocol.  Managed environment directories created by older releases
+        # may not yet have a protected DACL; the fixed private runtime root still
+        # excludes other accounts, and the random file generation remains bound
+        # by owner, protected DACL, volume and 128-bit File ID.
+        with contextlib.suppress(OSError, TypeError, ValueError):
+            parent_capability = capture_windows_path(parent, directory=True)
+        descriptor, temporary_capability = open_private_file(
+            temp,
+            create=True,
+            read_write=True,
+            exclusive=True,
+            expected_parent=parent_capability,
+        )
+        _write_all(descriptor, raw)
+        os.fsync(descriptor)
+        recaptured = capture_windows_fd(
+            descriptor,
+            directory=False,
+            generation_token=temporary_capability.generation_token,
+        )
+        if recaptured != temporary_capability:
+            raise ValueError("temporary Windows runtime file identity changed")
+        os.close(descriptor)
+        descriptor = -1
+
+        if parent_capability is not None:
+            published_capability = replace_windows_file(
+                temp,
+                path,
+                source_parent=parent_capability,
+                expected_source=temporary_capability,
+            )
+        else:
+            validate_windows_path(temporary_capability, directory=False)
+            os.replace(temp, path)
+            published_capability = capture_windows_path(
+                path,
+                directory=False,
+                generation_token=temporary_capability.generation_token,
+            )
+        if not _same_windows_file_generation(published_capability, temporary_capability):
+            raise ValueError("published Windows runtime file identity changed")
+        if parent_capability is not None:
+            validate_windows_path(parent_capability, directory=True)
+        published = path.lstat()
+        if not stat.S_ISREG(published.st_mode) or published.st_nlink != 1:
+            raise ValueError("published runtime file is unsafe")
+        return published.st_dev, published.st_ino
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if temporary_capability is not None and os.path.lexists(temp):
+            try:
+                live = capture_windows_path(
+                    temp,
+                    directory=False,
+                    generation_token=temporary_capability.generation_token,
+                )
+                if _same_windows_file_generation(live, temporary_capability):
+                    if parent_capability is not None:
+                        delete_windows_file(
+                            temp,
+                            parent=parent_capability,
+                            expected=live,
+                        )
+                    else:
+                        temp.unlink()
+            except (OSError, TypeError, ValueError):
+                pass
 
 
 def _revoke_exact_publication(
@@ -832,6 +952,61 @@ def _pinned_runtime_write_root():
     if root.parent != home or root.name != "runtime":
         raise ValueError("runtime root escaped VibeCAD home")
     if not _secure_dir_fd_available():
+        if sys.platform == "win32":
+            _ensure_maintenance_write_root()
+            home_capability = protect_windows_path(home, directory=True)
+            root = _fallback_directory(root, create_missing=True)
+            root_capability = protect_windows_path(root, directory=True)
+            home_handle = open_windows_directory_handle(
+                home,
+                inheritable=False,
+                deny_delete=True,
+            )
+            root_handle = -1
+            try:
+                validate_windows_handle_path(
+                    home_handle,
+                    home,
+                    directory=True,
+                    expected=home_capability,
+                )
+                root_handle = open_windows_directory_handle(
+                    root,
+                    inheritable=False,
+                    deny_delete=True,
+                )
+                validate_windows_handle_path(
+                    root_handle,
+                    root,
+                    directory=True,
+                    expected=root_capability,
+                )
+                _validate_runtime_data_boundary(home)
+                yield None
+                validate_windows_handle_path(
+                    root_handle,
+                    root,
+                    directory=True,
+                    expected=root_capability,
+                )
+                validate_windows_handle_path(
+                    home_handle,
+                    home,
+                    directory=True,
+                    expected=home_capability,
+                )
+                _validate_runtime_data_boundary(home)
+            except ValueError:
+                raise
+            except OSError as exc:
+                raise ValueError("runtime write directory identity changed") from exc
+            finally:
+                if root_handle >= 0:
+                    with contextlib.suppress(OSError):
+                        close_windows_handle(root_handle)
+                with contextlib.suppress(OSError):
+                    close_windows_handle(home_handle)
+            return
         home = _fallback_directory(home, create_missing=True)
         root = _fallback_directory(root, create_missing=True)
         _validate_runtime_data_boundary(home)
@@ -1053,9 +1228,27 @@ def freecad_process_environment(
 def _ensure_maintenance_write_root() -> Path:
     """Create only the stable home container used by runtime maintenance locking."""
     home = paths.vibecad_home().expanduser()
-    if not home.is_absolute():
+    if (
+        not home.is_absolute()
+        or home == Path(home.anchor)
+        or any(part in {".", ".."} for part in home.parts[1:])
+    ):
         raise ValueError("VibeCAD home must be absolute")
     if not _secure_dir_fd_available():
+        if sys.platform == "win32":
+            parent = home.parent
+            if parent != Path(parent.anchor):
+                _fallback_directory(parent, create_missing=True)
+            try:
+                try:
+                    capability = ensure_private_directory(home)
+                except OSError:
+                    capability = protect_windows_path(home, directory=True)
+                if validate_windows_path(capability, directory=True) != home:
+                    raise OSError("Windows VibeCAD home binding changed")
+            except (OSError, TypeError, ValueError):
+                raise ValueError("Windows VibeCAD home is unsafe") from None
+            return home
         return _fallback_directory(home, create_missing=True)
     pinned = _ensure_pinned_directory(home)
     try:
@@ -1363,10 +1556,23 @@ def revoke_current_managed_runtime_receipt(
     def revoke_at(parent_fd: int | None) -> None:
         selected = sentinel if parent_fd is None else sentinel.name
         descriptor = -1
+        windows_parent: WindowsPathCapability | None = None
+        windows_receipt: WindowsPathCapability | None = None
         try:
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
             flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            descriptor = os.open(selected, flags, dir_fd=parent_fd)
+            if sys.platform == "win32" and parent_fd is None:
+                windows_parent = protect_windows_path(sentinel.parent, directory=True)
+                protect_windows_path(sentinel, directory=False)
+                descriptor, windows_receipt = open_private_file(
+                    sentinel,
+                    create=False,
+                    read_write=False,
+                    share_delete=True,
+                    expected_parent=windows_parent,
+                )
+            else:
+                descriptor = os.open(selected, flags, dir_fd=parent_fd)
             before = os.fstat(descriptor)
             live = os.stat(selected, dir_fd=parent_fd, follow_symlinks=False)
             getuid = getattr(os, "geteuid", None)
@@ -1404,7 +1610,21 @@ def revoke_current_managed_runtime_receipt(
                 or identity(after) != identity(live_after)
             ):
                 raise ValueError("current managed receipt changed before revocation")
-            if parent_fd is None:
+            if windows_receipt is not None and windows_parent is not None:
+                recaptured = capture_windows_fd(
+                    descriptor,
+                    directory=False,
+                    generation_token=windows_receipt.generation_token,
+                )
+                if recaptured != windows_receipt:
+                    raise ValueError("current managed receipt identity changed")
+                delete_windows_file(
+                    sentinel,
+                    parent=windows_parent,
+                    expected=windows_receipt,
+                )
+                validate_windows_path(windows_parent, directory=True)
+            elif parent_fd is None:
                 sentinel.unlink()
                 parent = _fallback_directory(sentinel.parent, create_missing=False)
                 directory_fd = -1
@@ -1625,7 +1845,7 @@ def _probe(python: Path | None, snippet: str) -> bool:
         return False
     try:
         environment = freecad_process_environment({**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-        result = subprocess.run(
+        result = _spawn_probe_process(
             [str(py), "-I", "-B", "-c", snippet],
             capture_output=True,
             timeout=120,
@@ -1755,19 +1975,108 @@ def verify_runtime_generation(evidence: RuntimeGenerationEvidence) -> bool:
     return _probe_runtime_generation(evidence, _VERIFY_SNIPPET)
 
 
+_WINDOWS_PROCESS_CREATED_RE = re.compile(r"[0-9a-f]{16}\Z")
+
+
+def _windows_process_created_filetime(pid: int) -> str:
+    """Return one exact Win32 process-generation FILETIME as fixed hex."""
+
+    if sys.platform != "win32" or type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
+        raise OSError("invalid Win32 process id")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    get_process_times.restype = wintypes.BOOL
+    wait_for_single_object = kernel32.WaitForSingleObject
+    wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait_for_single_object.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    # SYNCHRONIZE makes the process HANDLE itself the liveness oracle; querying
+    # creation time alone can still succeed for an exited object retained by a
+    # Popen HANDLE in another process.
+    handle = open_process(
+        0x1000 | 0x00100000,  # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        False,
+        pid,
+    )
+    if not handle:
+        error = ctypes.get_last_error() or 1
+        if error == 87:  # ERROR_INVALID_PARAMETER: no process currently has this PID.
+            raise ProcessLookupError(error, "Win32 process is absent")
+        raise OSError(error, "OpenProcess failed")
+    try:
+        wait_result = int(wait_for_single_object(handle, 0))
+        if wait_result == 0:  # WAIT_OBJECT_0: the process generation exited.
+            raise ProcessLookupError(pid, "Win32 process generation exited")
+        if wait_result != 258:  # WAIT_TIMEOUT is the only live result.
+            raise OSError("WaitForSingleObject failed for Win32 process")
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if not get_process_times(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            error = ctypes.get_last_error() or 1
+            raise OSError(error, "GetProcessTimes failed")
+        raw = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+        if raw <= 0 or raw > 0xFFFFFFFFFFFFFFFF:
+            raise OSError("invalid Win32 process creation FILETIME")
+        return f"{raw:016x}"
+    finally:
+        close_handle(handle)
+
+
+def _windows_process_generation_alive(owner: dict) -> bool:
+    """Fail closed unless a recorded Windows PID generation is proven dead."""
+
+    pid = owner.get("pid")
+    expected = owner.get("started_filetime")
+    if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
+        return True
+    try:
+        observed = _windows_process_created_filetime(pid)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    if type(expected) is not str or _WINDOWS_PROCESS_CREATED_RE.fullmatch(expected) is None:
+        # Legacy/malformed live owner: PID reuse cannot be ruled out, so never steal.
+        return True
+    return secrets.compare_digest(observed, expected)
+
+
 def _pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
     if sys.platform == "win32":
-        # B-1：Windows 上 os.kill(pid,0) 会 TerminateProcess 杀掉目标！改用 OpenProcess 探活
-        import ctypes
-
-        # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
-        if h:
-            ctypes.windll.kernel32.CloseHandle(h)
+        try:
+            _windows_process_created_filetime(pid)
             return True
-        return False
+        except ProcessLookupError:
+            return False
+        except OSError:
+            # Access denial or an indeterminate native query is not evidence of death.
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1801,6 +2110,9 @@ class FileLock:
         self._identity: tuple[int, int] | None = None
         self._parent_pin: _PinnedDirectory | None = None
         self._lock_fd: int = -1
+        self._windows_claim_handle: int | None = None
+        self._windows_claim_capability: WindowsPathCapability | None = None
+        self._windows_owner_capability: WindowsPathCapability | None = None
 
     def try_acquire(self) -> bool:
         if self._token is not None:
@@ -2041,7 +2353,11 @@ class FileLock:
             return False
         for _attempt in range(2):
             try:
-                os.mkdir(self.path, 0o700)
+                if os.name == "nt":
+                    if not self._create_private_windows_lock_directory():
+                        raise FileExistsError(self.path)
+                else:
+                    os.mkdir(self.path, 0o700)
             except FileExistsError:
                 if not self._reclaim_if_stale_fallback():
                     return False
@@ -2051,7 +2367,214 @@ class FileLock:
             return self._initialize_fallback_owner()
         return False
 
+    def _create_private_windows_lock_directory(self) -> bool:
+        """Publish one private fixed-name lock generation without an ACL window."""
+
+        candidate = self.path.with_name(
+            f".{self.path.name}.claim.{os.getpid()}.{secrets.token_hex(16)}"
+        )
+        parent: WindowsPathCapability | None = None
+        capability: WindowsPathCapability | None = None
+        try:
+            parent = capture_windows_path(self.path.parent, directory=True)
+            capability = ensure_private_directory(
+                candidate,
+                expected_parent=parent,
+                exclusive=True,
+            )
+            current = rename_windows_directory(
+                candidate,
+                self.path,
+                source_parent=parent,
+                expected_source=capability,
+            )
+            validate_windows_path(current, directory=True)
+            return self._same_windows_object(current, capability)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            # A fixed-name winner is ordinary contention.  Failure to pin or
+            # validate the parent (notably an inherited/unprotected Windows
+            # DACL) is a safety failure and can never improve by polling for
+            # 300 seconds as though another process held the lock.
+            raise ValueError("Windows runtime maintenance root is unsafe") from exc
+        finally:
+            if parent is not None and capability is not None:
+                with contextlib.suppress(OSError):
+                    delete_windows_directory(
+                        candidate,
+                        parent=parent,
+                        expected=capability,
+                    )
+
+    @staticmethod
+    def _same_windows_object(
+        left: WindowsPathCapability,
+        right: WindowsPathCapability,
+    ) -> bool:
+        return (
+            left.volume,
+            left.file_id,
+            left.owner_sid,
+            left.security_sha256,
+        ) == (
+            right.volume,
+            right.file_id,
+            right.owner_sid,
+            right.security_sha256,
+        )
+
+    def _read_windows_record(
+        self,
+        path: Path,
+        parent: WindowsPathCapability,
+    ) -> tuple[dict | None, WindowsPathCapability | None]:
+        descriptor = -1
+        try:
+            descriptor, capability = open_private_file(
+                path,
+                create=False,
+                read_write=False,
+                expected_parent=parent,
+            )
+            os.set_inheritable(descriptor, False)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or not 0 < before.st_size <= _MAX_RECEIPT_BYTES
+            ):
+                return None, None
+            raw = os.read(descriptor, _MAX_RECEIPT_BYTES + 1)
+            if len(raw) != before.st_size or os.read(descriptor, 1):
+                return None, None
+            after = os.fstat(descriptor)
+            recaptured = capture_windows_fd(
+                descriptor,
+                directory=False,
+                generation_token=capability.generation_token,
+            )
+            if (
+                _exact_identity(before) != _exact_identity(after)
+                or recaptured != capability
+                or validate_windows_path(capability, directory=False) != path
+            ):
+                return None, None
+            value = json.loads(raw)
+            return (value, capability) if isinstance(value, dict) else (None, None)
+        except (OSError, TypeError, ValueError):
+            return None, None
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    def _read_windows_owner(
+        self,
+        parent: WindowsPathCapability,
+    ) -> tuple[dict | None, WindowsPathCapability | None]:
+        return self._read_windows_record(self._meta, parent)
+
+    def _initialize_windows_owner(self) -> bool:
+        token = secrets.token_hex(16)
+        started_filetime: str | None = None
+        handle: int | None = None
+        descriptor = -1
+        parent: WindowsPathCapability | None = None
+        capability: WindowsPathCapability | None = None
+        owner_capability: WindowsPathCapability | None = None
+        initialized = False
+        try:
+            parent = capture_windows_path(self.path.parent, directory=True)
+            handle = open_windows_directory_handle(
+                self.path,
+                inheritable=False,
+                deny_delete=True,
+            )
+            capability = validate_windows_handle_path(
+                handle,
+                self.path,
+                directory=True,
+            )
+            started_filetime = _windows_process_created_filetime(os.getpid())
+            raw = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_filetime": started_filetime,
+                    "token": token,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            descriptor, owner_capability = open_private_file(
+                self._meta,
+                create=True,
+                read_write=True,
+                exclusive=True,
+                expected_parent=capability,
+            )
+            _write_all(descriptor, raw)
+            os.fsync(descriptor)
+            current_owner = capture_windows_fd(
+                descriptor,
+                directory=False,
+                generation_token=owner_capability.generation_token,
+            )
+            if current_owner != owner_capability:
+                raise OSError("lock owner identity changed")
+            os.close(descriptor)
+            descriptor = -1
+            owner, observed_owner = self._read_windows_owner(capability)
+            if (
+                owner is None
+                or owner.get("pid") != os.getpid()
+                or owner.get("started_filetime") != started_filetime
+                or owner.get("token") != token
+                or observed_owner is None
+                or not self._same_windows_object(observed_owner, owner_capability)
+                or validate_windows_handle_path(
+                    handle,
+                    self.path,
+                    directory=True,
+                    expected=capability,
+                )
+                != capability
+            ):
+                raise OSError("lock owner publication changed")
+            self._token = token
+            self._identity = (capability.volume, capability.file_id)
+            self._windows_claim_handle = handle
+            self._windows_claim_capability = capability
+            self._windows_owner_capability = owner_capability
+            handle = None
+            initialized = True
+            return True
+        except OSError:
+            return False
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(handle)
+            if not initialized and capability is not None and owner_capability is not None:
+                with contextlib.suppress(OSError):
+                    delete_windows_file(
+                        self._meta,
+                        parent=capability,
+                        expected=owner_capability,
+                    )
+            if not initialized and parent is not None and capability is not None:
+                with contextlib.suppress(OSError):
+                    delete_windows_directory(
+                        self.path,
+                        parent=parent,
+                        expected=capability,
+                    )
+
     def _initialize_fallback_owner(self) -> bool:
+        if os.name == "nt":
+            return self._initialize_windows_owner()
         token = secrets.token_hex(16)
         identity: tuple[int, int] | None = None
         owner_written = False
@@ -2076,10 +2599,33 @@ class FileLock:
             live = self.path.lstat()
             if identity != (live.st_dev, live.st_ino):
                 raise OSError("lock directory identity changed")
+            if os.name == "nt":
+                handle = open_windows_directory_handle(
+                    self.path,
+                    inheritable=False,
+                    deny_delete=True,
+                )
+                try:
+                    capability = validate_windows_handle_path(
+                        handle,
+                        self.path,
+                        directory=True,
+                    )
+                except BaseException:
+                    close_windows_handle(handle)
+                    raise
+                self._windows_claim_handle = handle
+                self._windows_claim_capability = capability
             self._token = token
             self._identity = identity
             return True
         except OSError:
+            handle = self._windows_claim_handle
+            self._windows_claim_handle = None
+            self._windows_claim_capability = None
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(handle)
             if owner_written:
                 self._remove_fallback_if_identity(identity, token)
             elif identity is not None:
@@ -2090,6 +2636,16 @@ class FileLock:
             return False
 
     def _read_fallback_owner(self) -> dict | None:
+        if os.name == "nt":
+            try:
+                parent = self._windows_claim_capability or capture_windows_path(
+                    self.path,
+                    directory=True,
+                )
+                owner, _capability = self._read_windows_owner(parent)
+                return owner
+            except (OSError, TypeError, ValueError):
+                return None
         raw = _read_bounded_text(self._meta)
         if raw is None:
             return None
@@ -2122,7 +2678,159 @@ class FileLock:
         except OSError:
             return False
 
+    def _reclaim_if_stale_windows(self) -> bool:
+        """Reclaim one protected dead generation using exact native objects."""
+
+        claim_path = self.path / ".reclaim"
+        parent: WindowsPathCapability | None = None
+        lock_capability: WindowsPathCapability | None = None
+        claim_capability: WindowsPathCapability | None = None
+        descriptor = -1
+        moved = False
+        try:
+            parent = capture_windows_path(self.path.parent, directory=True)
+            lock_capability = capture_windows_path(self.path, directory=True)
+            names = set(os.listdir(self.path))
+            if not names.issubset({"owner.json", ".reclaim"}):
+                return False
+            owner, owner_capability = self._read_windows_owner(lock_capability)
+            if "owner.json" in names and (
+                owner is None or owner_capability is None or type(owner.get("pid")) is not int
+            ):
+                return False
+            if owner is not None and _windows_process_generation_alive(owner):
+                return False
+
+            for attempt in range(2):
+                try:
+                    descriptor, claim_capability = open_private_file(
+                        claim_path,
+                        create=True,
+                        read_write=True,
+                        exclusive=True,
+                        expected_parent=lock_capability,
+                    )
+                    break
+                except FileExistsError:
+                    existing, existing_capability = self._read_windows_record(
+                        claim_path,
+                        lock_capability,
+                    )
+                    if (
+                        attempt
+                        or existing is None
+                        or existing_capability is None
+                        or type(existing.get("pid")) is not int
+                        or _windows_process_generation_alive(existing)
+                    ):
+                        return False
+                    delete_windows_file(
+                        claim_path,
+                        parent=lock_capability,
+                        expected=existing_capability,
+                    )
+            else:  # pragma: no cover - loop either returns or opens
+                return False
+
+            claim_raw = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_filetime": _windows_process_created_filetime(os.getpid()),
+                    "token": secrets.token_hex(16),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            _write_all(descriptor, claim_raw)
+            os.fsync(descriptor)
+            observed_claim = capture_windows_fd(
+                descriptor,
+                directory=False,
+                generation_token=claim_capability.generation_token,
+            )
+            if observed_claim != claim_capability:
+                return False
+            os.close(descriptor)
+            descriptor = -1
+            if validate_windows_path(claim_capability, directory=False) != claim_path:
+                return False
+
+            if validate_windows_path(lock_capability, directory=True) != self.path:
+                return False
+            final_names = set(os.listdir(self.path))
+            if not final_names.issubset({"owner.json", ".reclaim"}):
+                return False
+            final_owner, final_owner_capability = self._read_windows_owner(lock_capability)
+            if owner_capability is None:
+                if final_owner is not None or "owner.json" in final_names:
+                    return False
+            elif (
+                final_owner is None
+                or final_owner_capability is None
+                or not self._same_windows_object(
+                    final_owner_capability,
+                    owner_capability,
+                )
+                or type(final_owner.get("pid")) is not int
+                or _windows_process_generation_alive(final_owner)
+            ):
+                return False
+
+            parked = self.path.with_name(f"{self.path.name}.stale.{os.getpid()}.{time.time_ns()}")
+            parked_capability = rename_windows_directory(
+                self.path,
+                parked,
+                source_parent=parent,
+                expected_source=lock_capability,
+            )
+            moved = True
+            moved_claim = capture_windows_path(
+                parked / ".reclaim",
+                directory=False,
+                generation_token=claim_capability.generation_token,
+            )
+            if not self._same_windows_object(moved_claim, claim_capability):
+                return False
+            if owner_capability is not None:
+                moved_owner = capture_windows_path(
+                    parked / "owner.json",
+                    directory=False,
+                    generation_token=owner_capability.generation_token,
+                )
+                if not self._same_windows_object(moved_owner, owner_capability):
+                    return False
+                delete_windows_file(
+                    parked / "owner.json",
+                    parent=parked_capability,
+                    expected=moved_owner,
+                )
+            delete_windows_file(
+                parked / ".reclaim",
+                parent=parked_capability,
+                expected=moved_claim,
+            )
+            delete_windows_directory(
+                parked,
+                parent=parent,
+                expected=parked_capability,
+            )
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            if not moved and lock_capability is not None and claim_capability is not None:
+                with contextlib.suppress(OSError):
+                    delete_windows_file(
+                        claim_path,
+                        parent=lock_capability,
+                        expected=claim_capability,
+                    )
+
     def _reclaim_if_stale_fallback(self) -> bool:
+        if os.name == "nt":
+            return self._reclaim_if_stale_windows()
         claim = self.path / ".reclaim"
         claim_info: os.stat_result | None = None
         try:
@@ -2226,9 +2934,70 @@ class FileLock:
         self._identity = None
         self._parent_pin = None
         self._lock_fd = -1
+        windows_handle = self._windows_claim_handle
+        windows_capability = self._windows_claim_capability
+        windows_owner = self._windows_owner_capability
+        self._windows_claim_handle = None
+        self._windows_claim_capability = None
+        self._windows_owner_capability = None
+        if os.name == "nt":
+            if (
+                token is None
+                or identity is None
+                or windows_handle is None
+                or type(windows_capability) is not WindowsPathCapability
+                or type(windows_owner) is not WindowsPathCapability
+            ):
+                if windows_handle is not None:
+                    with contextlib.suppress(OSError):
+                        close_windows_handle(windows_handle)
+                return
+            closed = False
+            try:
+                validated = validate_windows_handle_path(
+                    windows_handle,
+                    self.path,
+                    directory=True,
+                    expected=windows_capability,
+                )
+                owner, observed_owner = self._read_windows_owner(windows_capability)
+                parent = capture_windows_path(self.path.parent, directory=True)
+                if (
+                    (validated.volume, validated.file_id) != identity
+                    or owner is None
+                    or owner.get("token") != token
+                    or observed_owner is None
+                    or not self._same_windows_object(observed_owner, windows_owner)
+                ):
+                    return
+                delete_windows_file(
+                    self._meta,
+                    parent=windows_capability,
+                    expected=windows_owner,
+                )
+                close_windows_handle(windows_handle)
+                closed = True
+                delete_windows_directory(
+                    self.path,
+                    parent=parent,
+                    expected=windows_capability,
+                )
+            except (OSError, TypeError, ValueError):
+                return
+            finally:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        close_windows_handle(windows_handle)
+            return
         if token is None or identity is None:
+            if windows_handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(windows_handle)
             return
         if parent is None or lock_fd < 0:
+            if windows_handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(windows_handle)
             self._remove_fallback_if_identity(identity, token)
             return
         try:
@@ -2313,25 +3082,73 @@ class FileLock:
             raise RuntimeError("运行时维护锁 claim 身份不匹配")
         return descriptor
 
+    def inheritable_claim_handle(self) -> int:
+        """Return the exact delete-denying Windows directory HANDLE generation."""
+
+        if os.name != "nt":
+            raise RuntimeError("当前平台没有可继承的运行时维护锁 HANDLE")
+        token = self._token
+        identity = self._identity
+        handle = self._windows_claim_handle
+        capability = self._windows_claim_capability
+        if (
+            token is None
+            or identity is None
+            or handle is None
+            or type(capability) is not WindowsPathCapability
+        ):
+            raise RuntimeError("当前平台没有可继承的运行时维护锁 HANDLE")
+        try:
+            validated = validate_windows_handle_path(
+                handle,
+                self.path,
+                directory=True,
+                expected=capability,
+            )
+            owner, observed_owner = self._read_windows_owner(capability)
+        except (OSError, ValueError):
+            raise RuntimeError("运行时维护锁 HANDLE 已失效") from None
+        if (
+            (validated.volume, validated.file_id) != identity
+            or owner is None
+            or owner.get("token") != token
+            or observed_owner is None
+            or type(self._windows_owner_capability) is not WindowsPathCapability
+            or not self._same_windows_object(
+                observed_owner,
+                self._windows_owner_capability,
+            )
+        ):
+            raise RuntimeError("运行时维护锁 HANDLE 身份不匹配")
+        return handle
+
     def defer_release(self):
         """Transfer this exact claim to a later, single release callback."""
 
-        if (
-            self._token is None
-            or self._identity is None
-            or self._parent_pin is None
-            or self._lock_fd < 0
-        ):
+        posix_claim = self._parent_pin is not None and self._lock_fd >= 0
+        windows_claim = (
+            os.name == "nt"
+            and self._windows_claim_handle is not None
+            and type(self._windows_claim_capability) is WindowsPathCapability
+            and type(self._windows_owner_capability) is WindowsPathCapability
+        )
+        if self._token is None or self._identity is None or not (posix_claim or windows_claim):
             raise RuntimeError("运行时维护锁 claim 无法延迟释放")
         deferred = FileLock(self.path)
         deferred._token = self._token
         deferred._identity = self._identity
         deferred._parent_pin = self._parent_pin
         deferred._lock_fd = self._lock_fd
+        deferred._windows_claim_handle = self._windows_claim_handle
+        deferred._windows_claim_capability = self._windows_claim_capability
+        deferred._windows_owner_capability = self._windows_owner_capability
         self._token = None
         self._identity = None
         self._parent_pin = None
         self._lock_fd = -1
+        self._windows_claim_handle = None
+        self._windows_claim_capability = None
+        self._windows_owner_capability = None
         release_lock = None
 
         def release() -> None:
@@ -2350,12 +3167,30 @@ def runtime_maintenance_lock(
     poll_interval: float = 0.05,
 ):
     """Serialize install, repair and uninstall across replacement generations."""
-    _ensure_maintenance_write_root()
-    with FileLock(paths.maintenance_lock()).acquire_wait(
-        timeout=timeout,
-        poll_interval=poll_interval,
-    ) as claim:
+    # An uninstall may remove the now-empty home immediately after releasing
+    # its claim. Close that ensure/create race on every platform by rebuilding
+    # and validating the private root before each claim retry. Unsafe existing
+    # roots still fail immediately; only a concurrently removed root is retried.
+    deadline = time.monotonic() + timeout
+    claim = FileLock(paths.maintenance_lock())
+    home = paths.vibecad_home().expanduser()
+    while True:
+        try:
+            _ensure_maintenance_write_root()
+            acquired = claim.try_acquire()
+        except ValueError as exc:
+            if str(exc) != "runtime write directory is unavailable" or os.path.lexists(home):
+                raise
+            acquired = False
+        if acquired:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"等待运行时维护锁超时：{claim.path}")
+        time.sleep(poll_interval)
+    try:
         yield claim
+    finally:
+        claim._release_owned()
 
 
 @contextlib.contextmanager
@@ -2388,3 +3223,45 @@ def inherited_runtime_maintenance_claim(descriptor: object):
     finally:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+
+
+@contextlib.contextmanager
+def inherited_runtime_maintenance_claim_handle(handle: object):
+    """Adopt one inherited Windows directory HANDLE until daemon publication."""
+
+    if os.name != "nt" or type(handle) is not int or handle <= 0:
+        raise RuntimeError("继承的运行时维护锁 HANDLE 无效")
+    try:
+        set_windows_handle_inheritable(handle, False)
+        capability = validate_windows_handle_path(
+            handle,
+            paths.maintenance_lock(),
+            directory=True,
+        )
+        lock = FileLock(paths.maintenance_lock())
+        owner, owner_capability = lock._read_windows_owner(capability)
+        if (
+            owner is None
+            or type(owner.get("token")) is not str
+            or type(owner.get("pid")) is not int
+            or type(owner.get("started_filetime")) is not str
+            or _WINDOWS_PROCESS_CREATED_RE.fullmatch(owner["started_filetime"]) is None
+            or type(owner_capability) is not WindowsPathCapability
+            or validate_windows_handle_path(
+                handle,
+                paths.maintenance_lock(),
+                directory=True,
+                expected=capability,
+            )
+            != capability
+        ):
+            raise OSError("inherited Windows maintenance claim is unsafe")
+    except (OSError, ValueError):
+        with contextlib.suppress(OSError):
+            close_windows_handle(handle)
+        raise RuntimeError("无法验证继承的运行时维护锁 HANDLE") from None
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            close_windows_handle(handle)

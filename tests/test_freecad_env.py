@@ -1,5 +1,7 @@
 import sys
 
+import pytest
+
 from vibecad import freecad_env as fe
 
 
@@ -14,6 +16,7 @@ def test_prepare_adds_lib_to_syspath_unix(monkeypatch, tmp_path):
         sys.path[:] = saved
 
 
+@pytest.mark.windows_contract
 def test_prepare_adds_library_dirs_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(fe.sys, "platform", "win32")
     monkeypatch.setattr(fe.sys, "prefix", str(tmp_path))

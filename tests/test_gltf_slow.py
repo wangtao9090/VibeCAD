@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -28,6 +29,15 @@ def test_export_gltf_real_box(runtime_env, tmp_path):
         + "assert len(g.meshes[0].primitives) == 6, len(g.meshes[0].primitives)\n"
         + "print('GLTF_OK')\n"
     )
-    pr = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    environment = (
+        status.freecad_process_environment(os.environ) if sys.platform == "win32" else None
+    )
+    pr = subprocess.run(
+        [runtime_env, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=environment,
+    )
     assert pr.returncode == 0, pr.stderr
     assert "GLTF_OK" in pr.stdout

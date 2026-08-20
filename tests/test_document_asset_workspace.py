@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vibecad._file_compat import capture_windows_path, set_private_dacl
 from vibecad.engine.document_assets import (
     DocumentAssetWorkspace,
     DocumentAssetWorkspaceError,
@@ -63,6 +64,8 @@ def _private_root(tmp_path: Path) -> Path:
     root = tmp_path / "document-assets"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    if sys.platform == "win32":
+        set_private_dacl(root)
     return root
 
 
@@ -81,7 +84,10 @@ def test_workspace_attaches_exact_private_directory_and_cleans_only_owned_tree(
     assert directory.parent == root
     assert document.TransientDir == str(directory)
     assert stat.S_ISDIR(info.st_mode)
-    assert stat.S_IMODE(info.st_mode) == 0o700
+    if sys.platform == "win32":
+        capture_windows_path(directory, directory=True)
+    else:
+        assert stat.S_IMODE(info.st_mode) == 0o700
     assert workspace.require_attached(document) == directory
     retained = directory / "included.bin"
     retained.write_bytes(b"included bytes")
@@ -96,6 +102,8 @@ def test_workspace_attaches_exact_private_directory_and_cleans_only_owned_tree(
 
 @pytest.mark.parametrize("mode", (0o750, 0o770, 0o777))
 def test_workspace_rejects_non_private_configured_root(tmp_path: Path, mode: int) -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX mode-bit contract")
     root = _private_root(tmp_path)
     os.chmod(root, mode)
 
@@ -132,6 +140,8 @@ def test_fresh_document_borrows_exact_empty_native_directory_until_close(
     root = _private_root(tmp_path)
     native_root = tmp_path / "freecad-native-root"
     native_root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        set_private_dacl(native_root)
     native = native_root / "freecad-native-transient"
     native.mkdir(mode=0o755)
     monkeypatch.setenv("FREECAD_USER_TEMP", str(native_root))
@@ -143,7 +153,10 @@ def test_fresh_document_borrows_exact_empty_native_directory_until_close(
     assert directory == native
     assert native.is_dir()
     assert document.TransientDir == str(native)
-    assert stat.S_IMODE(native.stat().st_mode) == 0o755
+    if sys.platform == "win32":
+        capture_windows_path(native, directory=True)
+    else:
+        assert stat.S_IMODE(native.stat().st_mode) == 0o755
     renamed = native.with_name("freecad-native-after-save")
     native.rename(renamed)
     document.TransientDir = str(renamed)
@@ -166,6 +179,8 @@ def test_fresh_document_handoff_rejects_nonempty_or_nonfresh_native_state(
     root = _private_root(tmp_path)
     native_root = tmp_path / "freecad-native-root"
     native_root.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        set_private_dacl(native_root)
     native = native_root / f"freecad-native-{not_fresh}"
     native.mkdir(mode=0o755)
     monkeypatch.setenv("FREECAD_USER_TEMP", str(native_root))
@@ -221,11 +236,23 @@ def test_workspace_attach_failure_and_drift_are_bounded_and_recoverable(
 
     document = _AssetDocument()
     directory = workspace.attach(document)
-    os.chmod(directory, 0o755)
+    parked: Path | None = None
+    if sys.platform == "win32":
+        parked = directory.with_name(directory.name + ".parked")
+        directory.rename(parked)
+        directory.mkdir()
+        set_private_dacl(directory)
+    else:
+        os.chmod(directory, 0o755)
     with pytest.raises(DocumentAssetWorkspaceError) as caught:
         workspace.require_attached(document)
     assert caught.value.code is DocumentAssetWorkspaceErrorCode.PRECONDITION_FAILED
-    os.chmod(directory, 0o700)
+    if sys.platform == "win32":
+        directory.rmdir()
+        assert parked is not None
+        parked.rename(directory)
+    else:
+        os.chmod(directory, 0o700)
     workspace.release_after_close(document)
     assert tuple(root.iterdir()) == ()
 
@@ -359,11 +386,23 @@ def test_real_freecad_included_asset_roundtrip_abort_and_candidate_cleanup(
         + "    native_root = Path(os.environ['FREECAD_USER_TEMP'])\n"
         + "    assert transient.is_dir()\n"
         + "    if transient.parent == root:\n"
-        + "        assert oct(transient.stat().st_mode & 0o777) == '0o700'\n"
+        + "        if os.name != 'nt':\n"
+        + "            assert oct(transient.stat().st_mode & 0o777) == '0o700'\n"
         + "    else:\n"
         + "        assert transient.parent == native_root\n"
-        + "        assert transient.stat().st_uid == os.geteuid()\n"
-        + "        assert transient.stat().st_mode & 0o022 == 0\n"
+        + "        if os.name != 'nt':\n"
+        + "            assert transient.stat().st_uid == os.geteuid()\n"
+        + "            assert transient.stat().st_mode & 0o022 == 0\n"
+        + "    if os.name == 'nt':\n"
+        + "        from vibecad import _file_compat\n"
+        + "        capability = _file_compat.capture_windows_path(\n"
+        + "            transient, directory=True\n"
+        + "        )\n"
+        + "        assert capability.owner_sid == _file_compat.current_user_sid()\n"
+        + "        assert capability.file_id >= 0\n"
+        + "        assert _file_compat.validate_windows_path(\n"
+        + "            capability, directory=True\n"
+        + "        ) == transient\n"
         + "    with session._transaction('include exact asset'):\n"
         + "        item = session.doc.addObject('App::DocumentObjectFileIncluded', 'Asset')\n"
         + "        item.File = (str(source), alias)\n"

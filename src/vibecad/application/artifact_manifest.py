@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
 import re
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 import vibecad.application.artifacts as _delivery
+from vibecad import _file_compat as fcntl
 from vibecad.application.artifacts import (
     ArtifactEligibility,
     ArtifactExportRequest,
@@ -44,6 +44,11 @@ from vibecad.workflow.store import (
     TaskStoreError,
     TaskStoreErrorCode,
 )
+
+# Reuse the delivery store's module-local Win32 dir-handle adapter.  On POSIX
+# it delegates each call directly to the native os module, preserving the
+# existing descriptor-relative contract.
+os = _delivery.os
 
 __all__ = (
     "ArtifactManifestError",
@@ -337,11 +342,13 @@ def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int,
         value.st_nlink,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        (int(value.st_birthtime_ns) if sys.platform == "win32" else value.st_ctime_ns),
     )
 
 
 def _private_directory(value: os.stat_result) -> bool:
+    if sys.platform == "win32":
+        return stat.S_ISDIR(value.st_mode) and value.st_nlink >= 1
     return bool(
         stat.S_ISDIR(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -350,6 +357,12 @@ def _private_directory(value: os.stat_result) -> bool:
 
 
 def _private_file(value: os.stat_result, *, nonempty: bool = False) -> bool:
+    if sys.platform == "win32":
+        return bool(
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and (not nonempty or value.st_size > 0)
+        )
     return bool(
         stat.S_ISREG(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -656,6 +669,12 @@ def _published_record_matches(record, eligibility: ArtifactEligibility) -> bool:
 def _catalog_entries(root_fd: int) -> tuple[str, ...]:
     try:
         return tuple(sorted(entry.name for entry in os.scandir(root_fd)))
+    except PermissionError:
+        _raise(
+            ArtifactManifestErrorCode.INTEGRITY_FAILURE
+            if sys.platform == "win32"
+            else ArtifactManifestErrorCode.STORE_FAILURE
+        )
     except OSError:
         _raise(ArtifactManifestErrorCode.STORE_FAILURE)
 
@@ -683,6 +702,12 @@ def _scan_requests(
     total_bytes = 0
     try:
         entries = tuple(sorted(os.scandir(requests_fd), key=lambda entry: entry.name))
+    except PermissionError:
+        _raise(
+            ArtifactManifestErrorCode.INTEGRITY_FAILURE
+            if sys.platform == "win32"
+            else ArtifactManifestErrorCode.STORE_FAILURE
+        )
     except OSError:
         _raise(ArtifactManifestErrorCode.STORE_FAILURE)
     for entry in entries:
@@ -721,6 +746,12 @@ def _validate_materialization_structure(
     try:
         try:
             entries = tuple(sorted(os.scandir(directory_fd), key=lambda entry: entry.name))
+        except PermissionError:
+            _raise(
+                ArtifactManifestErrorCode.INTEGRITY_FAILURE
+                if sys.platform == "win32"
+                else ArtifactManifestErrorCode.STORE_FAILURE
+            )
         except OSError:
             _raise(ArtifactManifestErrorCode.STORE_FAILURE)
         for entry in entries:
@@ -764,6 +795,12 @@ def _scan_materialization_names(
     total_bytes = 0
     try:
         entries = tuple(sorted(os.scandir(materializations_fd), key=lambda entry: entry.name))
+    except PermissionError:
+        _raise(
+            ArtifactManifestErrorCode.INTEGRITY_FAILURE
+            if sys.platform == "win32"
+            else ArtifactManifestErrorCode.STORE_FAILURE
+        )
     except OSError:
         _raise(ArtifactManifestErrorCode.STORE_FAILURE)
     for entry in entries:

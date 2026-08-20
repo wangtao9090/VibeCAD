@@ -26,6 +26,13 @@ from types import SimpleNamespace
 import pytest
 
 import vibecad.execution.revisions as revisions_module
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_path,
+    set_private_dacl,
+    validate_windows_path,
+    windows_extended_path,
+)
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import (
     LocalRevisionStore,
@@ -48,7 +55,12 @@ from vibecad.worker.codec import (
     encode_worker_request,
     encode_worker_response,
 )
-from vibecad.worker.generation import _minimal_environment, _SpawnedProcess, _WorkerProcess
+from vibecad.worker.generation import (
+    _minimal_environment,
+    _minimal_windows_environment,
+    _SpawnedProcess,
+    _WorkerProcess,
+)
 from vibecad.worker.service import WorkerService, _recv_header_with_descriptors, serve_worker
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
@@ -373,7 +385,53 @@ def _validation_directory_at(directory: Path) -> tuple[Path, str]:
         path = directory / name
         path.write_bytes(value)
         path.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(directory)
+        for child in directory.iterdir():
+            set_private_dacl(child)
     return directory, stage_name
+
+
+def _validation_authority(
+    directory: Path,
+) -> tuple[int, WindowsPathCapability | None]:
+    if sys.platform == "win32":
+        return -1, capture_windows_path(directory, directory=True)
+    return (
+        os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        ),
+        None,
+    )
+
+
+def _validation_kwargs(
+    descriptor: int,
+    capability: WindowsPathCapability | None,
+) -> dict[str, object]:
+    if capability is not None:
+        return {"directory_capability": capability}
+    return {"directory_fd": descriptor}
+
+
+def _configure_windows_worker_home(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> Path | None:
+    if sys.platform != "win32":
+        return None
+    home = root / "worker-home"
+    home.mkdir(mode=0o700)
+    set_private_dacl(home)
+    monkeypatch.setenv("HOME", os.fspath(home))
+    return home
+
+
+def _expected_engine_path(directory: Path, name: str) -> Path:
+    if sys.platform == "win32":
+        return Path(windows_extended_path(directory / name))
+    return Path(name)
 
 
 @dataclass(slots=True)
@@ -441,10 +499,25 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
             import subprocess
             import sys
             import time
+            from pathlib import Path
 
+            IS_WINDOWS = sys.platform == "win32"
             fd = int(sys.argv[sys.argv.index("--protocol-fd") + 1])
             generation = sys.argv[sys.argv.index("--generation-id") + 1]
             sock = socket.socket(fileno=fd)
+            sock.set_inheritable(False)
+
+            def native_path(value):
+                value = os.path.abspath(os.fspath(value))
+                if not IS_WINDOWS:
+                    return value
+                separator = chr(92)
+                prefix = separator * 2 + "?" + separator
+                if value.startswith(prefix):
+                    return value
+                if value.startswith(separator * 2):
+                    return prefix + "UNC" + separator + value[2:]
+                return prefix + value
 
             def read_exact(size):
                 chunks = []
@@ -456,6 +529,9 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 return b"".join(chunks)
 
             def read_frame():
+                if IS_WINDOWS:
+                    size = struct.unpack(">I", read_exact(4))[0]
+                    return json.loads(read_exact(size)), []
                 header = bytearray()
                 descriptors = []
                 ancillary_size = socket.CMSG_SPACE(array.array("i", range(4)).itemsize * 4)
@@ -476,6 +552,10 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 return json.loads(read_exact(size)), descriptors
 
             def write_candidate(name, value, candidate_fd):
+                if IS_WINDOWS:
+                    target = Path(native_path(candidate_fd)) / name
+                    target.write_bytes(value)
+                    return hashlib.sha256(value).hexdigest()
                 target = os.open(
                     name,
                     os.O_WRONLY | os.O_TRUNC,
@@ -488,6 +568,12 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 return hashlib.sha256(value).hexdigest()
 
             def replace_candidate(name, value, candidate_fd):
+                if IS_WINDOWS:
+                    target = Path(native_path(candidate_fd)) / name
+                    temporary = target.with_name(".worker-replacement")
+                    temporary.write_bytes(value)
+                    os.replace(temporary, target)
+                    return hashlib.sha256(value).hexdigest()
                 temporary = ".worker-replacement"
                 target = os.open(
                     temporary,
@@ -508,6 +594,9 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 return hashlib.sha256(value).hexdigest()
 
             def hash_candidate(name, candidate_fd):
+                if IS_WINDOWS:
+                    value = (Path(native_path(candidate_fd)) / name).read_bytes()
+                    return hashlib.sha256(value).hexdigest(), len(value)
                 target = os.open(name, os.O_RDONLY, dir_fd=candidate_fd)
                 try:
                     chunks = []
@@ -555,16 +644,32 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
             home = os.environ.get("HOME", "")
             temp = os.environ.get("TMPDIR", "")
             home_real = os.path.realpath(home)
-            clean = (
-                "VIBECAD_TEST_SECRET" not in os.environ
-                and not leaked_fds
-                and os.getpid() == os.getsid(0) == os.getpgrp()
-                and home
-                and temp
-                and os.path.samefile(os.getcwd(), home)
-                and os.path.samefile(home, temp)
-                and open_fds == {{0, 1, 2, fd}}
-                and all(
+            process_isolated = (
+                os.getpid() > 1
+                if IS_WINDOWS
+                else os.getpid() == os.getsid(0) == os.getpgrp()
+            )
+            descriptor_set_isolated = (
+                True if IS_WINDOWS else open_fds == {{0, 1, 2, fd}}
+            )
+            if IS_WINDOWS:
+                try:
+                    from vibecad._file_compat import capture_windows_path
+
+                    private_freecad_directories = all(
+                        value
+                        and os.path.isdir(value)
+                        and capture_windows_path(Path(value), directory=True)
+                        and os.path.commonpath(
+                            (os.path.realpath(value), home_real)
+                        )
+                        == home_real
+                        for value in freecad_directories
+                    )
+                except (OSError, TypeError, ValueError):
+                    private_freecad_directories = False
+            else:
+                private_freecad_directories = all(
                     value
                     and os.path.isdir(value)
                     and stat.S_IMODE(os.stat(value).st_mode) == 0o700
@@ -574,6 +679,16 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                     == home_real
                     for value in freecad_directories
                 )
+            clean = (
+                "VIBECAD_TEST_SECRET" not in os.environ
+                and not leaked_fds
+                and process_isolated
+                and home
+                and temp
+                and os.path.samefile(os.getcwd(), home)
+                and os.path.samefile(home, temp)
+                and descriptor_set_isolated
+                and private_freecad_directories
             )
             mode = {mode!r}
             if mode.startswith("startup_"):
@@ -624,23 +739,55 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 while True:
                     method = request["method"]
                     if method == "candidate.bind":
-                        if len(descriptors) != 1 or candidate_fd >= 0:
-                            raise SystemExit(2)
-                        candidate_fd = descriptors[0]
+                        if IS_WINDOWS:
+                            capability = request["params"].get("path_capability")
+                            if (
+                                descriptors
+                                or candidate_fd != -1
+                                or not isinstance(capability, dict)
+                                or not isinstance(capability.get("path"), str)
+                            ):
+                                raise SystemExit(2)
+                            candidate_fd = capability["path"]
+                        else:
+                            if len(descriptors) != 1 or candidate_fd >= 0:
+                                raise SystemExit(2)
+                            candidate_fd = descriptors[0]
                         result = {{"candidate_id": request["params"]["candidate_id"]}}
                     elif method == "revision.bind":
-                        if len(descriptors) != 1 or revision_fd >= 0:
-                            raise SystemExit(2)
-                        revision_fd = descriptors[0]
+                        if IS_WINDOWS:
+                            capability = request["params"].get("path_capability")
+                            if (
+                                descriptors
+                                or revision_fd != -1
+                                or not isinstance(capability, dict)
+                                or not isinstance(capability.get("path"), str)
+                            ):
+                                raise SystemExit(2)
+                            revision_fd = capability["path"]
+                        else:
+                            if len(descriptors) != 1 or revision_fd >= 0:
+                                raise SystemExit(2)
+                            revision_fd = descriptors[0]
                         result = {{"revision_id": request["params"]["revision_id"]}}
                     elif method in {{
                         "validation.validate_import",
                         "validation.revalidate_import",
                         "validation.validate_materialization",
                     }}:
-                        if len(descriptors) != 1:
-                            raise SystemExit(2)
-                        validation_fd = descriptors[0]
+                        if IS_WINDOWS:
+                            capability = request["params"].get("path_capability")
+                            if (
+                                descriptors
+                                or not isinstance(capability, dict)
+                                or not isinstance(capability.get("path"), str)
+                            ):
+                                raise SystemExit(2)
+                            validation_fd = capability["path"]
+                        else:
+                            if len(descriptors) != 1:
+                                raise SystemExit(2)
+                            validation_fd = descriptors[0]
                         try:
                             if method == "validation.validate_materialization":
                                 fcstd_digest, fcstd_size = hash_candidate(
@@ -667,15 +814,18 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                                     digest = "0" * 64
                                 result = {{"sha256": digest, "size_bytes": size}}
                         finally:
-                            os.close(validation_fd)
+                            if not IS_WINDOWS:
+                                os.close(validation_fd)
                     elif descriptors and method != "program.begin":
                         raise SystemExit(2)
                     elif method == "candidate.release":
-                        os.close(candidate_fd)
+                        if not IS_WINDOWS:
+                            os.close(candidate_fd)
                         candidate_fd = -1
                         result = {{"candidate_id": request["params"]["candidate_id"]}}
                     elif method == "revision.release":
-                        os.close(revision_fd)
+                        if not IS_WINDOWS:
+                            os.close(revision_fd)
                         revision_fd = -1
                         result = {{"revision_id": request["params"]["revision_id"]}}
                     elif method == "session.create_empty":
@@ -758,7 +908,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                         }}
                     elif method == "program.begin":
                         has_snapshot = "artifact_snapshot" in request["params"]
-                        if has_snapshot != (len(descriptors) == 1):
+                        if not IS_WINDOWS and has_snapshot != (len(descriptors) == 1):
                             raise SystemExit(2)
                         for descriptor in descriptors:
                             os.close(descriptor)
@@ -815,11 +965,13 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                     elif method == "session.close":
                         result = {{"session_id": request["params"]["session_id"]}}
                     elif method == "worker.shutdown":
-                        if candidate_fd >= 0:
-                            os.close(candidate_fd)
+                        if candidate_fd != -1:
+                            if not IS_WINDOWS:
+                                os.close(candidate_fd)
                             candidate_fd = -1
-                        if revision_fd >= 0:
-                            os.close(revision_fd)
+                        if revision_fd != -1:
+                            if not IS_WINDOWS:
+                                os.close(revision_fd)
                             revision_fd = -1
                         result = {{"closed": True}}
                     else:
@@ -980,6 +1132,35 @@ def _process(tmp_path: Path, mode: str) -> tuple[_WorkerProcess, Path]:
 
 
 def _wait_gone(pid: int, timeout: float = 2.0) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+        )
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+        def active() -> bool:
+            handle = kernel32.OpenProcess(0x1000, 0, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                return bool(
+                    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                ) and exit_code.value == 259
+            finally:
+                kernel32.CloseHandle(handle)
+
+        deadline = time.monotonic() + timeout
+        while active() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return not active()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -999,16 +1180,33 @@ def test_worker_environment_canonicalizes_private_freecad_roots(tmp_path: Path) 
     home.mkdir(mode=0o700)
     home.chmod(0o700)
 
-    environment = _minimal_environment(
-        source_root=Path(__file__).parents[1] / "src",
-        home=home,
-        python=Path(sys.executable).resolve(),
-    )
+    if sys.platform == "win32":
+        with pytest.raises(OSError):
+            _minimal_windows_environment(
+                source_root=Path(__file__).parents[1] / "src",
+                home=home,
+                python=Path(sys.executable).resolve(),
+            )
+        home = home.resolve(strict=True)
+        set_private_dacl(home)
+        environment = _minimal_windows_environment(
+            source_root=Path(__file__).parents[1] / "src",
+            home=home,
+            python=Path(sys.executable).resolve(),
+        )
+    else:
+        environment = _minimal_environment(
+            source_root=Path(__file__).parents[1] / "src",
+            home=home,
+            python=Path(sys.executable).resolve(),
+        )
 
     for name in ("FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP"):
         path = Path(environment[name])
         assert path == path.resolve(strict=True)
         assert path.is_relative_to(real_root.resolve(strict=True))
+        if sys.platform == "win32":
+            capture_windows_path(path, directory=True)
 
 
 def test_worker_codec_is_canonical_bounded_and_exact() -> None:
@@ -1122,6 +1320,7 @@ def test_worker_response_codec_rejects_wrong_generation_and_oversize() -> None:
         )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX spawn/session contract")
 def test_worker_launch_uses_fresh_posix_spawn_without_parent_fork(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1224,7 +1423,19 @@ def test_startup_cleanup_is_retained_until_observation_recovers(
         return original_group_exists(process)
 
     monkeypatch.setattr(generation_module.tempfile, "mkdtemp", recording_mkdtemp)
-    monkeypatch.setattr(_WorkerProcess, "_group_exists", controlled_group_exists)
+    if sys.platform == "win32":
+        from vibecad.runtime.windows_job_runner import WindowsJobProcess
+
+        original_tree_exists = WindowsJobProcess.tree_exists
+
+        def controlled_tree_exists(process: WindowsJobProcess) -> bool:
+            if not observation_available.is_set():
+                raise OSError("Job Object observation unavailable")
+            return original_tree_exists(process)
+
+        monkeypatch.setattr(WindowsJobProcess, "tree_exists", controlled_tree_exists)
+    else:
+        monkeypatch.setattr(_WorkerProcess, "_group_exists", controlled_group_exists)
     with _spawn_boundary_probe():
         with pytest.raises(WorkerError) as caught:
             _WorkerProcess.spawn_for_test(
@@ -1261,6 +1472,7 @@ def test_startup_cleanup_is_retained_until_observation_recovers(
     assert not homes[0].exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX spawn supervision contract")
 def test_cleanup_sweeper_is_ready_before_posix_spawn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1327,6 +1539,7 @@ def test_cleanup_sweeper_start_failure_aborts_before_spawn_or_home(
     assert caught.value.code is WorkerErrorCode.START_FAILED
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX child identity contract")
 def test_startup_cleanup_retries_a_transient_leader_identity_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1418,7 +1631,19 @@ def test_managed_start_recheck_failure_retains_uncertain_cleanup(
         assert source_root == Path(__file__).parents[1] / "src"
         return worker
 
-    monkeypatch.setattr(_WorkerProcess, "_group_exists", controlled_group_exists)
+    if sys.platform == "win32":
+        from vibecad.runtime.windows_job_runner import WindowsJobProcess
+
+        original_tree_exists = WindowsJobProcess.tree_exists
+
+        def controlled_tree_exists(value: WindowsJobProcess) -> bool:
+            if not observation_available.is_set():
+                raise OSError("Job Object observation unavailable")
+            return original_tree_exists(value)
+
+        monkeypatch.setattr(WindowsJobProcess, "tree_exists", controlled_tree_exists)
+    else:
+        monkeypatch.setattr(_WorkerProcess, "_group_exists", controlled_group_exists)
     monkeypatch.setattr(
         runtime_paths,
         "active_runtime_prefix",
@@ -1502,6 +1727,7 @@ def test_fake_worker_hang_kills_process_group_including_grandchild(
     assert _wait_gone(grandchild)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX child probe contract")
 def test_second_identity_probe_failure_still_kills_anchored_process_group(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1537,6 +1763,7 @@ def test_second_identity_probe_failure_still_kills_anchored_process_group(
     assert _wait_gone(int(grandchild_file.read_text(encoding="ascii")))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX child probe contract")
 def test_first_identity_probe_failure_does_not_reap_an_exited_group_leader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1658,6 +1885,7 @@ def test_lost_generation_cleanup_cannot_kill_a_replacement(tmp_path: Path) -> No
         replacement.terminate()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group retry contract")
 def test_cleanup_required_can_be_retried_to_dead(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1690,6 +1918,7 @@ def test_cleanup_required_can_be_retried_to_dead(
     assert set(observed_signals) == {0}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group identity contract")
 def test_missing_leader_identity_never_signals_the_process_group(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1733,6 +1962,7 @@ def test_missing_leader_identity_never_signals_the_process_group(
     assert process.state is WorkerGenerationState.DEAD
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX child identity contract")
 def test_unreleased_leader_identity_prevents_a_false_dead_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1852,15 +2082,24 @@ def test_group_observation_control_flow_retains_recovery_responsibility(
     process, _grandchild = _process(tmp_path, "proxy_idle")
     home = process._home
 
-    def interrupted_observation(_process: _WorkerProcess) -> bool:
+    def interrupted_observation(_process: object) -> bool:
         raise KeyboardInterrupt
 
     with monkeypatch.context() as observation_patch:
-        observation_patch.setattr(
-            _WorkerProcess,
-            "_group_exists",
-            interrupted_observation,
-        )
+        if sys.platform == "win32":
+            from vibecad.runtime.windows_job_runner import WindowsJobProcess
+
+            observation_patch.setattr(
+                WindowsJobProcess,
+                "tree_exists",
+                interrupted_observation,
+            )
+        else:
+            observation_patch.setattr(
+                _WorkerProcess,
+                "_group_exists",
+                interrupted_observation,
+            )
         with pytest.raises(KeyboardInterrupt):
             process.terminate()
         assert process.state is WorkerGenerationState.CLEANUP_REQUIRED
@@ -2013,6 +2252,7 @@ def test_candidate_release_reclaims_worker_capacity(tmp_path: Path) -> None:
             worker.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptor ownership contract")
 def test_production_service_release_closes_child_owned_descriptor(
     tmp_path: Path,
 ) -> None:
@@ -2085,7 +2325,7 @@ def test_candidate_response_cannot_publish_after_worker_termination(
     original_request = _WorkerProcess.request
     original_open = proxy_module._open_worker_candidate_staging
     outcome: dict[str, object] = {}
-    opened: list[int] = []
+    opened: list[object] = []
 
     def recording_open(*args: object, **kwargs: object) -> object:
         staging = original_open(*args, **kwargs)
@@ -2141,9 +2381,15 @@ def test_candidate_response_cannot_publish_after_worker_termination(
         assert "candidate" not in outcome
         assert worker._candidates == {}
         assert len(opened) == 2
-        for descriptor in opened:
-            with pytest.raises(OSError):
-                os.fstat(descriptor)
+        if sys.platform == "win32":
+            for capability in opened:
+                assert type(capability) is WindowsPathCapability
+                validate_windows_path(capability, directory=True)
+        else:
+            for descriptor in opened:
+                assert type(descriptor) is int
+                with pytest.raises(OSError):
+                    os.fstat(descriptor)
 
 
 def test_candidate_response_cannot_publish_after_lease_revocation(
@@ -2159,7 +2405,7 @@ def test_candidate_response_cannot_publish_after_lease_revocation(
     original_request = _WorkerProcess.request
     original_open = proxy_module._open_worker_candidate_staging
     outcome: dict[str, object] = {}
-    opened: list[int] = []
+    opened: list[object] = []
 
     def recording_open(*args: object, **kwargs: object) -> object:
         staging = original_open(*args, **kwargs)
@@ -2216,9 +2462,15 @@ def test_candidate_response_cannot_publish_after_lease_revocation(
         assert worker._candidates == {}
         assert worker.state is WorkerGenerationState.DEAD
         assert len(opened) == 2
-        for descriptor in opened:
-            with pytest.raises(OSError):
-                os.fstat(descriptor)
+        if sys.platform == "win32":
+            for capability in opened:
+                assert type(capability) is WindowsPathCapability
+                validate_windows_path(capability, directory=True)
+        else:
+            for descriptor in opened:
+                assert type(descriptor) is int
+                with pytest.raises(OSError):
+                    os.fstat(descriptor)
 
 
 def test_proxy_handles_are_nonserializable_and_generation_loss_invalidates_all(
@@ -2785,12 +3037,16 @@ def test_cross_artifact_mutation_is_generation_loss(
             assert step.stat().st_ino != step_before.st_ino
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="SCM_RIGHTS is POSIX-only; strict Windows capability wire tests cover this boundary",
+)
 def test_multiple_scm_rights_descriptors_are_rejected_and_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vibecad.worker.service as service_module
 
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    left, right = socket.socketpair()
     first = os.open(__file__, os.O_RDONLY)
     second = os.open(__file__, os.O_RDONLY)
     real_close = os.close
@@ -2826,7 +3082,7 @@ def test_multiple_scm_rights_descriptors_are_rejected_and_closed(
 def test_internal_executor_failure_returns_one_error_then_retires_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    left, right = socket.socketpair()
 
     def fail_dispatch(
         service: WorkerService,
@@ -2987,7 +3243,7 @@ def test_worker_revision_is_an_opaque_generation_capability() -> None:
         pickle.dumps(handle)
 
 
-def test_descriptor_bound_validation_never_sends_an_absolute_path(
+def test_validation_engine_receives_only_bound_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2996,6 +3252,7 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
         ValidatedMaterializationEvidence,
     )
 
+    worker_home = _configure_windows_worker_home(monkeypatch, tmp_path)
     directory = tmp_path / "private-validation"
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)
@@ -3007,6 +3264,8 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
     work = directory / work_name
     work.write_bytes(b"work")
     work.chmod(0o600)
+    if sys.platform == "win32":
+        set_private_dacl(work)
     normalized_name = ".normalized." + "9" * 32 + ".FCStd"
     normalized = directory / normalized_name
     normalized.write_bytes(b"normalized")
@@ -3051,41 +3310,79 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
             )
 
     monkeypatch.setattr(service, "_engine", Engine())
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor = -1
+    capability: WindowsPathCapability | None = None
+    if sys.platform == "win32":
+        for private_path in (directory, stage, work, normalized, model, step):
+            set_private_dacl(private_path)
+        capability = capture_windows_path(directory, directory=True)
+    else:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+
+    def request(fields: dict[str, object]) -> tuple[dict[str, object], tuple[int, ...]]:
+        if capability is None:
+            return fields, (descriptor,)
+        return {**fields, "path_capability": capability.to_mapping()}, ()
+
     try:
+        params, descriptors = request({"name": stage_name})
         assert service.dispatch(
             "validation.validate_import",
-            {"name": stage_name},
-            (descriptor,),
+            params,
+            descriptors,
         )["size_bytes"] == len(b"normalized")
+        params, descriptors = request({"name": work_name})
         assert service.dispatch(
             "validation.validate_import",
-            {"name": work_name},
-            (descriptor,),
+            params,
+            descriptors,
         )["size_bytes"] == len(b"work")
+        params, descriptors = request({"name": normalized_name})
         assert service.dispatch(
             "validation.revalidate_import",
-            {"name": normalized_name},
-            (descriptor,),
+            params,
+            descriptors,
         )["size_bytes"] == len(b"normalized")
+        params, descriptors = request({})
         assert service.dispatch(
             "validation.validate_materialization",
-            {},
-            (descriptor,),
+            params,
+            descriptors,
         )["step_size_bytes"] == len(b"step")
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         service.close()
 
-    assert calls == [
-        ("validate_import", Path(stage_name)),
-        ("validate_import", Path(work_name)),
-        ("revalidate", Path(normalized_name)),
-        ("materialization", (Path("model.FCStd"), Path("model.step"))),
-    ]
+    if worker_home is not None:
+        assert [kind for kind, _value in calls] == [
+            "validate_import",
+            "validate_import",
+            "revalidate",
+            "materialization",
+        ]
+        assert calls[2][1] == Path(normalized_name)
+        paths = [calls[0][1], calls[1][1], *calls[3][1]]
+        assert all(type(path) is type(Path()) and path.is_absolute() for path in paths)
+        assert [path.name for path in paths] == [
+            stage_name,
+            work_name,
+            "model.FCStd",
+            "model.step",
+        ]
+        assert all(worker_home in path.parents and directory not in path.parents for path in paths)
+        assert paths[-2].parent == paths[-1].parent
+        assert tuple(worker_home.iterdir()) == ()
+    else:
+        assert calls == [
+            ("validate_import", Path(stage_name)),
+            ("validate_import", Path(work_name)),
+            ("revalidate", Path(normalized_name)),
+            ("materialization", (Path("model.FCStd"), Path("model.step"))),
+        ]
 
 
 def test_parent_descriptor_bound_validation_returns_exact_evidence(
@@ -3099,26 +3396,24 @@ def test_parent_descriptor_bound_validation_returns_exact_evidence(
     work.write_bytes(b"work")
     work.chmod(0o600)
     normalized_name = ".normalized." + "d" * 32 + ".FCStd"
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    if sys.platform == "win32":
+        set_private_dacl(work)
+    descriptor, capability = _validation_authority(directory)
+    authority = _validation_kwargs(descriptor, capability)
     try:
         imported = worker.validate_import(
-            directory_fd=descriptor,
+            **authority,
             name=stage_name,
         )
         work_imported = worker.validate_import(
-            directory_fd=descriptor,
+            **authority,
             name=work_name,
         )
         revalidated = worker.revalidate_normalized_import(
-            directory_fd=descriptor,
+            **authority,
             name=normalized_name,
         )
-        materialized = worker.validate_materialization(
-            directory_fd=descriptor,
-        )
+        materialized = worker.validate_materialization(**authority)
         assert imported == revalidated
         assert imported.sha256 == hashlib.sha256(b"normalized").hexdigest()
         assert imported.size_bytes == len(b"normalized")
@@ -3126,10 +3421,14 @@ def test_parent_descriptor_bound_validation_returns_exact_evidence(
         assert work_imported.size_bytes == len(b"work")
         assert materialized.fcstd_sha256 == hashlib.sha256(b"model").hexdigest()
         assert materialized.step_sha256 == hashlib.sha256(b"step").hexdigest()
-        assert os.fstat(descriptor).st_ino == directory.stat().st_ino
+        if capability is not None:
+            validate_windows_path(capability, directory=True)
+        else:
+            assert os.fstat(descriptor).st_ino == directory.stat().st_ino
         assert worker.state is WorkerGenerationState.READY
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         worker.close()
 
 
@@ -3141,23 +3440,25 @@ def test_validation_claim_or_cross_file_mutation_fences_generation(
     process, _grandchild = _process(tmp_path, mode)
     worker = FreeCadWorker(process)
     directory, stage_name = _validation_directory_at(tmp_path / mode)
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor, capability = _validation_authority(directory)
+    authority = _validation_kwargs(descriptor, capability)
     try:
         with pytest.raises(WorkerError) as caught:
             worker.validate_import(
-                directory_fd=descriptor,
+                **authority,
                 name=stage_name,
             )
         assert caught.value.code is WorkerErrorCode.GENERATION_LOST
         assert worker.state is WorkerGenerationState.DEAD
-        assert os.fstat(descriptor).st_ino == directory.stat().st_ino
+        if capability is not None:
+            validate_windows_path(capability, directory=True)
+        else:
+            assert os.fstat(descriptor).st_ino == directory.stat().st_ino
         if mode == "validation_cross":
             assert (directory / "model.step").read_bytes() == b"cross-mutation"
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 @pytest.mark.parametrize(
@@ -3176,20 +3477,19 @@ def test_validation_name_capability_is_a_closed_relative_allowlist(
     process, _grandchild = _process(tmp_path, "validation_idle")
     worker = FreeCadWorker(process)
     directory, _stage_name = _validation_directory_at(tmp_path / "closed-name")
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor, capability = _validation_authority(directory)
+    authority = _validation_kwargs(descriptor, capability)
     try:
         with pytest.raises(WorkerError) as caught:
             worker.revalidate_normalized_import(
-                directory_fd=descriptor,
+                **authority,
                 name=name,
             )
         assert caught.value.code is WorkerErrorCode.INVALID_INPUT
         assert worker.state is WorkerGenerationState.READY
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         worker.close()
 
 
@@ -3202,6 +3502,7 @@ def test_production_service_revision_sessions_are_read_only_and_exactly_bound(
     import vibecad.worker.service as service_module
     from vibecad.validation import ShapeObservation
 
+    worker_home = _configure_windows_worker_home(monkeypatch, tmp_path)
     directory = tmp_path / f"revision-{has_model}"
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)
@@ -3255,22 +3556,33 @@ def test_production_service_revision_sessions_are_read_only_and_exactly_bound(
     monkeypatch.setattr(service_module, "_entity_observations", lambda _session: ())
     service = WorkerService(_GENERATION)
     monkeypatch.setattr(service, "_engine", Engine())
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor = -1
+    capability: WindowsPathCapability | None = None
+    if sys.platform == "win32":
+        set_private_dacl(directory)
+        for child in directory.iterdir():
+            set_private_dacl(child)
+        capability = capture_windows_path(directory, directory=True)
+    else:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
     revision_id = "worker_revision_" + "a" * 32
+    bind_params = {
+        "revision_id": revision_id,
+        "project_id": _PROJECT_ID,
+        "store_revision_id": _BASE_REVISION,
+        "model_name": "model.FCStd" if has_model else None,
+        "files": files,
+    }
+    if capability is not None:
+        bind_params["path_capability"] = capability.to_mapping()
     try:
         assert service.dispatch(
             "revision.bind",
-            {
-                "revision_id": revision_id,
-                "project_id": _PROJECT_ID,
-                "store_revision_id": _BASE_REVISION,
-                "model_name": "model.FCStd" if has_model else None,
-                "files": files,
-            },
-            (descriptor,),
+            bind_params,
+            () if capability is not None else (descriptor,),
         ) == {"revision_id": revision_id}
         session_id = service.dispatch(
             "session.load_revision",
@@ -3299,18 +3611,30 @@ def test_production_service_revision_sessions_are_read_only_and_exactly_bound(
             {"revision_id": revision_id},
             (),
         ) == {"revision_id": revision_id}
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
-        descriptor = -1
+        if capability is not None:
+            validate_windows_path(capability, directory=True)
+        else:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+            descriptor = -1
     finally:
         if descriptor >= 0:
             with contextlib.suppress(OSError):
                 os.close(descriptor)
         service.close()
 
-    assert calls[0] == (
-        ("load_fcstd", Path("model.FCStd")) if has_model else ("create_empty", _BASE_REVISION)
-    )
+    if not has_model:
+        assert calls[0] == ("create_empty", _BASE_REVISION)
+    elif worker_home is None:
+        assert calls[0] == ("load_fcstd", Path("model.FCStd"))
+    else:
+        assert calls[0][0] == "load_fcstd"
+        loaded_path = calls[0][1]
+        assert type(loaded_path) is type(Path())
+        assert loaded_path.name == "model.FCStd"
+        assert worker_home in loaded_path.parents
+        assert directory not in loaded_path.parents
+        assert tuple(worker_home.iterdir()) == ()
     assert calls[-1][0] == "close"
 
 
@@ -3329,6 +3653,7 @@ def test_revision_drift_after_load_requires_confirmed_session_cleanup(
 ) -> None:
     import vibecad.worker.service as service_module
 
+    worker_home = _configure_windows_worker_home(monkeypatch, tmp_path)
     directory = tmp_path / f"revision-load-drift-{close_fails}"
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)
@@ -3353,7 +3678,12 @@ def test_revision_drift_after_load_requires_confirmed_session_cleanup(
 
     class Engine:
         def load_fcstd(self, path: Path) -> object:
-            assert path == Path("model.FCStd")
+            if worker_home is None:
+                assert path == Path("model.FCStd")
+            else:
+                assert path.name == "model.FCStd"
+                assert worker_home in path.parents
+                assert directory not in path.parents
             model = directory / "model.FCStd"
             model.write_bytes(b"drifted-after-load")
             model.chmod(0o600)
@@ -3368,24 +3698,36 @@ def test_revision_drift_after_load_requires_confirmed_session_cleanup(
 
     service = WorkerService(_GENERATION)
     monkeypatch.setattr(service, "_engine", Engine())
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor = -1
+    capability: WindowsPathCapability | None = None
+    if sys.platform == "win32":
+        set_private_dacl(directory)
+        for child in directory.iterdir():
+            set_private_dacl(child)
+        capability = capture_windows_path(directory, directory=True)
+    else:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
     revision_id = "worker_revision_" + "b" * 32
+    bind_params = {
+        "revision_id": revision_id,
+        "project_id": _PROJECT_ID,
+        "store_revision_id": _BASE_REVISION,
+        "model_name": "model.FCStd",
+        "files": files,
+    }
+    if capability is not None:
+        bind_params["path_capability"] = capability.to_mapping()
     try:
         assert service.dispatch(
             "revision.bind",
-            {
-                "revision_id": revision_id,
-                "project_id": _PROJECT_ID,
-                "store_revision_id": _BASE_REVISION,
-                "model_name": "model.FCStd",
-                "files": files,
-            },
-            (descriptor,),
+            bind_params,
+            () if capability is not None else (descriptor,),
         ) == {"revision_id": revision_id}
-        descriptor = -1
+        if capability is None:
+            descriptor = -1
         with pytest.raises(service_module._ServiceError) as caught:  # noqa: SLF001
             service.dispatch(
                 "session.load_revision",
@@ -3534,11 +3876,18 @@ def test_revision_store_drift_revokes_operations_without_losing_cleanup(
         handle = worker.bind_revision(store=rig.store, revision=revision)
         state = worker._revisions[handle]
         descriptor = state.directory_fd
-        target_fd = os.open(
-            "model.FCStd",
-            os.O_WRONLY | os.O_TRUNC,
-            dir_fd=descriptor,
-        )
+        if state.directory_capability is not None:
+            directory = validate_windows_path(state.directory_capability, directory=True)
+            target_fd = os.open(
+                windows_extended_path(directory / "model.FCStd"),
+                os.O_WRONLY | os.O_TRUNC,
+            )
+        else:
+            target_fd = os.open(
+                "model.FCStd",
+                os.O_WRONLY | os.O_TRUNC,
+                dir_fd=descriptor,
+            )
         try:
             os.write(target_fd, b"drift")
         finally:
@@ -4555,6 +4904,7 @@ def test_real_managed_task_accepts_parametric_create_and_modify_as_immutable_rev
     python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
     if not python_raw or not Path(python_raw).is_file():
         pytest.skip("managed FreeCAD Python was not requested")
+    python = Path(python_raw)
 
     from vibecad.application.agent import AgentApplication
     from vibecad.execution.worker_port import WorkerCadExecutionPort
@@ -4732,16 +5082,58 @@ def test_real_managed_task_accepts_parametric_create_and_modify_as_immutable_rev
             head_two.revision_id,
         ).parent
         step_path = revision_two_root / step_two.name
-        from vibecad.freecad_env import prepare_freecad_import
+        if sys.platform == "win32":
+            source_root = Path(__file__).parents[1] / "src"
+            with tempfile.TemporaryDirectory(prefix="vibecad-step-check-") as short_raw:
+                short_step = Path(short_raw) / "model.step"
+                shutil.copyfile(windows_extended_path(step_path), short_step)
+                script = "\n".join(
+                    (
+                        "import json, sys",
+                        "sys.path.insert(0, sys.argv[1])",
+                        "from vibecad.freecad_env import prepare_freecad_import",
+                        "prepare_freecad_import()",
+                        "import FreeCAD, Part",
+                        "shape = Part.read(sys.argv[2])",
+                        "payload = [float(shape.Volume), len(shape.Solids), bool(shape.isValid())]",
+                        "print('VIBECAD_STEP=' + json.dumps(payload))",
+                    )
+                )
+                checked = subprocess.run(
+                    [
+                        os.fspath(python),
+                        "-I",
+                        "-c",
+                        script,
+                        os.fspath(source_root),
+                        os.fspath(short_step),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            assert checked.returncode == 0, checked.stderr
+            payload = next(
+                line.removeprefix("VIBECAD_STEP=")
+                for line in checked.stdout.splitlines()
+                if line.startswith("VIBECAD_STEP=")
+            )
+            volume, solid_count, valid = json.loads(payload)
+        else:
+            from vibecad.freecad_env import prepare_freecad_import
 
-        prepare_freecad_import()
-        import FreeCAD  # noqa: F401, PLC0415
-        import Part  # noqa: PLC0415
+            prepare_freecad_import()
+            import FreeCAD  # noqa: F401, PLC0415
+            import Part  # noqa: PLC0415
 
-        step_shape = Part.read(str(step_path))
-        assert float(step_shape.Volume) == pytest.approx(28_800)
-        assert len(step_shape.Solids) == 1
-        assert bool(step_shape.isValid()) is True
+            step_shape = Part.read(str(step_path))
+            volume = float(step_shape.Volume)
+            solid_count = len(step_shape.Solids)
+            valid = bool(step_shape.isValid())
+        assert volume == pytest.approx(28_800)
+        assert solid_count == 1
+        assert valid is True
     finally:
         application.close()
 
@@ -4944,27 +5336,33 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 target = validation_directory / name
                 target.write_bytes(source.read_bytes())
                 target.chmod(0o600)
-            validation_fd = os.open(
-                validation_directory,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+                if sys.platform == "win32":
+                    set_private_dacl(target)
+            if sys.platform == "win32":
+                set_private_dacl(validation_directory)
+            validation_fd, validation_capability = _validation_authority(
+                validation_directory
+            )
+            validation_authority = _validation_kwargs(
+                validation_fd,
+                validation_capability,
             )
             try:
                 imported = worker.validate_import(
-                    directory_fd=validation_fd,
+                    **validation_authority,
                     name=stage_name,
                 )
                 normalized_path = validation_directory / normalized_name
                 normalized_path.write_bytes((validation_directory / stage_name).read_bytes())
                 normalized_path.chmod(0o600)
                 revalidated = worker.revalidate_normalized_import(
-                    directory_fd=validation_fd,
+                    **validation_authority,
                     name=normalized_name,
                 )
-                materialized = worker.validate_materialization(
-                    directory_fd=validation_fd,
-                )
+                materialized = worker.validate_materialization(**validation_authority)
             finally:
-                os.close(validation_fd)
+                if validation_fd >= 0:
+                    os.close(validation_fd)
             assert imported == revalidated
             assert materialized.fcstd_size_bytes > 0
             assert materialized.step_size_bytes > 0

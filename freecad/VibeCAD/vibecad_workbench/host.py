@@ -6,8 +6,17 @@ import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide import QtCore
+
+if os.name == "nt":
+    try:
+        from vibecad import _file_compat as _windows_files
+    except ImportError:  # pragma: no cover - fail-closed packaging boundary
+        _windows_files = None
+else:
+    _windows_files = None
 
 from .bridge import external_client_factory
 from .dock import ReviewDock
@@ -129,6 +138,42 @@ def _best_effort(action: Callable[..., object], *args: object) -> bool:
 
 def _restore_private_document_mode(local_path: object) -> None:
     """Restore the private checkout mode after FreeCAD's atomic Save rewrite."""
+
+    if os.name == "nt":
+        if type(local_path) is not str or not local_path or _windows_files is None:
+            raise PreviewError("editable HEAD file authority is unavailable")
+        path = Path(local_path)
+        descriptor = -1
+        try:
+            if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+                raise OSError
+            descriptor, original = _windows_files.open_windows_external_file(path)
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise OSError
+            _windows_files.set_private_dacl(path)
+            current = _windows_files.capture_windows_external_fd(
+                descriptor,
+                generation_token=original.generation_token,
+            )
+            private = _windows_files.capture_windows_path(path, directory=False)
+            if (
+                current != original
+                or (private.volume, private.file_id) != (original.volume, original.file_id)
+                or _windows_files.validate_windows_path(private, directory=False) != path
+            ):
+                raise OSError
+        except (OSError, TypeError, ValueError):
+            raise PreviewError("editable HEAD file privacy could not be restored") from None
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    raise PreviewError(
+                        "editable HEAD file authority could not be retired"
+                    ) from None
+        return
 
     nofollow = getattr(os, "O_NOFOLLOW", None)
     geteuid = getattr(os, "geteuid", None)

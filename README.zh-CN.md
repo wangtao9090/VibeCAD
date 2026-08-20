@@ -190,9 +190,10 @@ request，不是持久任务取消。
 
 ## 安装：MCP 服务与 Agent Skill 是两件事
 
-当前 MCPB 产品声明只覆盖经过验证的 macOS（Darwin）路径。安装 `VibeCAD.mcpb` 会安装 MCP 服务，
-但包内附带的 Skill 只是归档内容，不会自动激活。宿主必须单独复制或链接
-`skills/vibecad-agent/`，再重启或重新加载宿主。
+当前 MCPB 产品声明覆盖经过验证的 macOS（Darwin）和 Windows x86-64 路径。安装
+`VibeCAD.mcpb` 会安装 MCP 服务，但包内附带的 Skill 只是归档内容，不会自动激活。宿主必须单独
+复制或链接 `skills/vibecad-agent/`，再重启或重新加载宿主。Linux 与 Windows on ARM 不在此支持
+声明内。
 
 Skill 的发现路径如下：
 
@@ -236,11 +237,17 @@ WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开
 折叠为 `-32603` 的精确合同路径；它不是 artifact 适配或第二执行路径：ResourceLink/Blob 继续走
 原生 MCP，原 Task Kernel 仍会重新验证并执行同一个 program。
 
+Windows 宿主路径也已用 WorkBuddy 5.3.13 / CLI 2.115.0 实机验证：真实任务提交到 HEAD，
+确定性方盒验收全部通过，WorkBuddy 原生读取的 FCStd/STEP 与 VibeCAD manifest 在大小和 SHA-256
+上完全一致。该精确版本选择已提交 artifact 时使用 `"draft_id": "committed"`；VibeCAD 会把这个
+有界兼容别名立即归一化为规范的 `null` scope，不改变 draft 或权限语义。
+
 扩展首次启动需要联网获取锁定的 Python 包，并按需安装约 2–3 GB 的 FreeCAD 运行时；后续启动复用
-已验证缓存。macOS 默认数据根通常是：
+已验证缓存。默认数据根按平台分别是：
 
 ```text
-~/Library/Application Support/VibeCAD/
+macOS:  ~/Library/Application Support/VibeCAD/
+Windows: %LOCALAPPDATA%\VibeCAD\
 ```
 
 运行时与项目数据分离。`uninstall_runtime` 先预览、再显式确认，只删除受管运行时并保留项目、

@@ -72,6 +72,9 @@ def _store() -> LocalRevisionStore:
 def _fcstd(path: Path, document: str = "<Document />") -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("Document.xml", document)
+    if os.name == "nt":
+        executor_module._file_compat.set_private_dacl(path.parent)
+        executor_module._file_compat.set_private_dacl(path)
 
 
 class _StepExportShape:
@@ -139,6 +142,9 @@ def _install_step_path(
 def _step_placeholder(path: Path) -> None:
     path.touch(mode=0o600)
     path.chmod(0o600)
+    if os.name == "nt":
+        executor_module._file_compat.set_private_dacl(path.parent)
+        executor_module._file_compat.set_private_dacl(path)
 
 
 def _step_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -908,6 +914,8 @@ def test_step_export_rejects_non_placeholder_entry_before_freecad(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    if os.name == "nt" and entry_kind in {"wrong_mode", "wrong_owner"}:
+        pytest.skip("POSIX owner and mode contract")
     shape = _StepExportShape(lambda path: path.write_bytes(_VALID_STEP))
     session = _StepExportSession(shape)
     candidate = _step_export_candidate(tmp_path, session)
@@ -949,6 +957,8 @@ def test_step_export_rejects_placeholder_identity_drift_after_freecad(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    if os.name == "nt" and drift == "mode":
+        pytest.skip("POSIX mode-drift contract")
     def write_with_drift(path: Path) -> None:
         if drift == "replace":
             replacement = path.with_name("replacement.step")
@@ -1906,6 +1916,8 @@ def test_revalidate_normalized_import_detects_all_file_identity_drift(
     tmp_path: Path,
     mutation: str,
 ) -> None:
+    if os.name == "nt" and mutation == "chmod":
+        pytest.skip("POSIX mode-drift contract")
     monkeypatch.chdir(tmp_path)
     artifact = Path("normalized.FCStd")
     _fcstd(artifact)

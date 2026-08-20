@@ -164,7 +164,7 @@ def _sealed_image_set(
         same_scale=True,
         processing_authorization=processing_authorization,
     )
-    fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+    fd = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
     try:
         descriptor = DescriptorSource(
             fd=fd,
@@ -209,7 +209,7 @@ def _sealed_multi_image_set(
             source = tmp_path / f"source-{index}.png"
             Image.new("RGB", (16, 12), (20 + index, 80, 140)).save(source, format="PNG")
             os.chmod(source, 0o600)
-            fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            fd = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
             fds.append(fd)
             descriptors.append(
                 DescriptorSource(
