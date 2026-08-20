@@ -1142,9 +1142,10 @@ def _start_native_session(
             raise PackageCacheError("package-cache cleanup helper pipes are unavailable")
         handshake = _read_helper_handshake(process)
         if not handshake:
-            detail = ""
-            if process.poll() is not None and process.stderr is not None:
-                detail = process.stderr.read()[-1000:]
+            # stdout EOF can race the final process-state update.  Reap the
+            # failed generation before reading stderr so the real helper error
+            # is not replaced by an empty diagnostic on Windows launchers.
+            detail = _reap_helper(process, timeout=5.0)
             raise PackageCacheError(
                 f"package-cache cleanup helper failed to start: {detail}"
             )
