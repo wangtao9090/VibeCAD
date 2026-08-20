@@ -705,6 +705,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
         for line in _read(ROOT / ".mcpbignore").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
+    assert {".gitattributes", ".gitignore"} <= ignored
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
