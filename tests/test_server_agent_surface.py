@@ -1733,24 +1733,17 @@ def test_owned_stdio_initialization_failure_precedes_worker_and_input_start(monk
 
 
 def test_real_owned_worker_can_lazy_open_daemon_client_after_process_initialization() -> None:
-    home = Path(tempfile.mkdtemp(prefix="vc-c13-owned-"))
+    # macOS spells its temporary directory through the /var -> /private/var
+    # system alias. The production root correctly rejects alias ancestors, so
+    # exercise the same physical directory through its canonical spelling.
+    home = Path(tempfile.mkdtemp(prefix="vc-c13-owned-")).resolve(strict=True)
     if sys.platform == "win32":
         _file_compat.set_private_dacl(home)
     else:
         home.chmod(0o700)
     data_root = home / "data"
     script = """
-import traceback
 from vibecad import server
-
-original_opener = server._application_slot._opener
-def diagnosed_opener():
-    try:
-        return original_opener()
-    except BaseException:
-        traceback.print_exc()
-        raise
-server._application_slot._opener = diagnosed_opener
 server._application_runtime_guard = lambda: None
 server.main()
 """
