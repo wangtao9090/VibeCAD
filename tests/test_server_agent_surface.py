@@ -1740,7 +1740,17 @@ def test_real_owned_worker_can_lazy_open_daemon_client_after_process_initializat
         home.chmod(0o700)
     data_root = home / "data"
     script = """
+import traceback
 from vibecad import server
+
+original_opener = server._application_slot._opener
+def diagnosed_opener():
+    try:
+        return original_opener()
+    except BaseException:
+        traceback.print_exc()
+        raise
+server._application_slot._opener = diagnosed_opener
 server._application_runtime_guard = lambda: None
 server.main()
 """

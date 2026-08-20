@@ -251,10 +251,9 @@ class _CandidateFileLimit:
                     raise ValueError("invalid file-size limit")
                 resource.setrlimit(resource.RLIMIT_FSIZE, (effective, hard))
             else:
-                try:
-                    quota_lease, quota_code = _acquire_quota_lease(self._store)
-                except Exception as error:
-                    raise RuntimeError("candidate quota guard unavailable") from error
+                quota_result = _acquire_quota_lease(self._store)
+                quota_lease = quota_result[0]
+                quota_code = quota_result[1]
                 if quota_code is not None:
                     raise RuntimeError("candidate quota guard unavailable")
         except (OSError, RuntimeError, ValueError):
@@ -286,34 +285,36 @@ class _CandidateFileLimit:
         failed = False
         validation_error = None
         try:
-            if self._active and self._uses_native_limit and self._previous is not None:
-                resource.setrlimit(resource.RLIMIT_FSIZE, self._previous)
-        except (OSError, ValueError):
-            failed = True
-        if self._active and not self._uses_native_limit and exc_type is None:
             try:
-                from vibecad.execution import revisions_windows
+                if self._active and self._uses_native_limit and self._previous is not None:
+                    resource.setrlimit(resource.RLIMIT_FSIZE, self._previous)
+            except (OSError, ValueError):
+                failed = True
+            if self._active and not self._uses_native_limit and exc_type is None:
+                try:
+                    from vibecad.execution import revisions_windows
 
-                revisions_windows.validate_candidate_file_budget_under_lease(self._store)
-            except BaseException as error:
-                validation_error = error
-        if self._quota_lease is not None:
-            if _release_quota_lease(self._quota_lease) is not None:
+                    revisions_windows.validate_candidate_file_budget_under_lease(self._store)
+                except RevisionStoreError as error:
+                    validation_error = error
+        finally:
+            if self._quota_lease is not None:
+                if _release_quota_lease(self._quota_lease) is not None:
+                    failed = True
+                    _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
+                self._quota_lease = None
+            if failed:
+                _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
+            try:
+                if self._gate is not None:
+                    self._gate.release()
+            except RuntimeError:
                 failed = True
                 _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
-            self._quota_lease = None
-        if failed:
-            _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
-        try:
-            if self._gate is not None:
-                self._gate.release()
-        except RuntimeError:
-            failed = True
-            _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
-        self._active = False
-        self._uses_native_limit = False
-        if failed:
-            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+            self._active = False
+            self._uses_native_limit = False
+            if failed:
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         if validation_error is not None:
             raise validation_error
         return False
@@ -4004,7 +4005,7 @@ def _reserve_quota(
         from vibecad.execution import revisions_windows
 
         try:
-            existing, _reused = revisions_windows._reserve_quota(
+            windows_result = revisions_windows._reserve_quota(
                 store,
                 kind,
                 project_id,
@@ -4014,6 +4015,7 @@ def _reserve_quota(
                 project_temp,
                 ceiling_files,
             )
+            existing = windows_result[0]
         except RevisionStoreError as error:
             return (None, False, error.code)
         return (existing, existing["revision_id"] != revision_id, None)
@@ -8374,11 +8376,11 @@ class LocalRevisionStore:
         if sys.platform == "win32":
             from vibecad.execution import revisions_windows
 
-            root_path, parts, identity, capability = revisions_windows.initialize_store(root)
-            self._root = root_path
-            self._parts = parts
-            self._identity = identity
-            self._windows_root_capability = capability
+            windows_store = revisions_windows.initialize_store(root)
+            self._root = windows_store[0]
+            self._parts = windows_store[1]
+            self._identity = windows_store[2]
+            self._windows_root_capability = windows_store[3]
         else:
             coerced = _coerce_path(root)
             if coerced[1] is not None:

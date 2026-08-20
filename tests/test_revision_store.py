@@ -8850,6 +8850,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "O_TRUNC",
         "O_WRONLY",
         "SEEK_SET",
+        "name",
     }
     allowed_module_symbols = {
         "__future__": {"annotations"},
@@ -8864,7 +8865,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
         "sys": {"platform"},
         "threading": {"RLock", "current_thread", "main_thread"},
-        "time": {"sleep"},
+        "time": {"monotonic", "sleep"},
         "vibecad.execution": {"revisions_windows"},
         "vibecad.execution._resource_compat": {
             "RLIMIT_FSIZE",
@@ -8894,12 +8895,44 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
         "sys": set(),
         "threading": {"RLock", "current_thread", "main_thread"},
-        "time": {"sleep"},
+        "time": {"monotonic", "sleep"},
         "vibecad.execution": set(),
         "vibecad.execution._resource_compat": {"getrlimit", "setrlimit"},
         "vibecad.execution._signal_compat": {"getsignal", "signal"},
         "vibecad.workflow.errors": set(),
         "vibecad.workflow.lease": set(),
+    }
+    allowed_windows_backend_calls = {
+        "_require_lease",
+        "_reserve_quota",
+        "_validate_lease_after",
+        "candidate_path",
+        "commit_revision",
+        "copy_revision_artifacts_at",
+        "initialize_project",
+        "initialize_store",
+        "load_head",
+        "load_revision",
+        "observe_model_source",
+        "open_worker_candidate",
+        "open_worker_revision",
+        "prepare_revision",
+        "probe_candidate_reservation",
+        "reconcile",
+        "reconcile_candidate_reservation",
+        "release_reservation",
+        "replace_candidate_model_at",
+        "reserve_candidate",
+        "revision_artifact_path",
+        "revision_model_path",
+        "rollback_revision",
+        "seal_revision",
+        "seed_candidate_from_revision",
+        "set_reservation_phase",
+        "snapshot_store",
+        "validate_candidate_file_budget_under_lease",
+        "validate_candidate_payload",
+        "validate_candidate_reservation",
     }
     allowed_builtin_calls = {
         "RuntimeError",
@@ -9001,8 +9034,16 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "vibecad.workflow.errors",
         "vibecad.workflow.lease",
     } <= imports
+    lazy_windows_backend_imports = sum(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "vibecad.execution"
+        and any(alias.name == "revisions_windows" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    assert lazy_windows_backend_imports > 0
     for fixed_name in set(module_names) | imported_bound_names | local_callables:
-        assert binding_counts[fixed_name] == 1
+        expected = lazy_windows_backend_imports if fixed_name == "revisions_windows" else 1
+        assert binding_counts[fixed_name] == expected
     assert not set(binding_counts) & protected_builtin_names
 
     def is_approved_sha256_call(node: ast.AST) -> bool:
@@ -9021,6 +9062,11 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             module_name = module_names.get(function.value.id)
             if module_name is not None:
                 return module_name, function.attr
+            if imported_names.get(function.value.id) == (
+                "vibecad.execution",
+                "revisions_windows",
+            ):
+                return "vibecad.execution.revisions_windows", function.attr
         return None
 
     def is_approved_handler_type(node: ast.AST) -> bool:
@@ -9522,6 +9568,12 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
                 module_name = module_names[node.value.id]
                 assert node.attr in allowed_module_symbols[module_name]
                 assert isinstance(node.ctx, ast.Load)
+            elif isinstance(node.value, ast.Name) and imported_names.get(node.value.id) == (
+                "vibecad.execution",
+                "revisions_windows",
+            ):
+                assert node.attr in allowed_windows_backend_calls
+                assert isinstance(node.ctx, ast.Load)
             else:
                 assert node.attr not in forbidden_attributes
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -9618,6 +9670,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             elif module_call is not None and module_call[0] == "stat":
                 assert len(node.args) == 1
                 assert node.keywords == []
+            elif module_call is not None and module_call[0] == (
+                "vibecad.execution.revisions_windows"
+            ):
+                assert module_call[1] in allowed_windows_backend_calls
             elif module_call in {("os", "geteuid"), ("os", "getpid")}:
                 assert node.args == []
                 assert node.keywords == []
@@ -9625,6 +9681,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             if isinstance(node.func.value, ast.Name) and node.func.value.id in module_names:
                 module_name = module_names[node.func.value.id]
                 assert node.func.attr in allowed_module_calls[module_name]
+            elif isinstance(node.func.value, ast.Name) and imported_names.get(
+                node.func.value.id
+            ) == ("vibecad.execution", "revisions_windows"):
+                assert node.func.attr in allowed_windows_backend_calls
             else:
                 assert node.func.attr in allowed_non_module_attribute_calls
                 if node.func.attr == "update":
