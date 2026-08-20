@@ -8865,6 +8865,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "sys": {"platform"},
         "threading": {"RLock", "current_thread", "main_thread"},
         "time": {"sleep"},
+        "vibecad.execution": {"revisions_windows"},
         "vibecad.execution._resource_compat": {
             "RLIMIT_FSIZE",
             "RLIM_INFINITY",
@@ -8894,6 +8895,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "sys": set(),
         "threading": {"RLock", "current_thread", "main_thread"},
         "time": {"sleep"},
+        "vibecad.execution": set(),
         "vibecad.execution._resource_compat": {"getrlimit", "setrlimit"},
         "vibecad.execution._signal_compat": {"getsignal", "signal"},
         "vibecad.workflow.errors": set(),

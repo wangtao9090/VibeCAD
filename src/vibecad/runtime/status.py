@@ -2695,9 +2695,7 @@ class FileLock:
                 return False
             owner, owner_capability = self._read_windows_owner(lock_capability)
             if "owner.json" in names and (
-                owner is None
-                or owner_capability is None
-                or type(owner.get("pid")) is not int
+                owner is None or owner_capability is None or type(owner.get("pid")) is not int
             ):
                 return False
             if owner is not None and _windows_process_generation_alive(owner):
@@ -2777,9 +2775,7 @@ class FileLock:
             ):
                 return False
 
-            parked = self.path.with_name(
-                f"{self.path.name}.stale.{os.getpid()}.{time.time_ns()}"
-            )
+            parked = self.path.with_name(f"{self.path.name}.stale.{os.getpid()}.{time.time_ns()}")
             parked_capability = rename_windows_directory(
                 self.path,
                 parked,
@@ -3171,34 +3167,30 @@ def runtime_maintenance_lock(
     poll_interval: float = 0.05,
 ):
     """Serialize install, repair and uninstall across replacement generations."""
-    if sys.platform == "win32":
-        # An uninstall may remove the now-empty home immediately after releasing
-        # its delete-denying claim HANDLE. Close the ensure/create race by
-        # rebuilding and validating the private root on every native claim retry.
-        deadline = time.monotonic() + timeout
-        claim = FileLock(paths.maintenance_lock())
-        while True:
-            _ensure_maintenance_write_root()
-            try:
-                acquired = claim.try_acquire()
-            except ValueError:
-                acquired = False
-            if acquired:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"等待运行时维护锁超时：{claim.path}")
-            time.sleep(poll_interval)
+    # An uninstall may remove the now-empty home immediately after releasing
+    # its claim. Close that ensure/create race on every platform by rebuilding
+    # and validating the private root before each claim retry. Unsafe existing
+    # roots still fail immediately; only a concurrently removed root is retried.
+    deadline = time.monotonic() + timeout
+    claim = FileLock(paths.maintenance_lock())
+    home = paths.vibecad_home().expanduser()
+    while True:
         try:
-            yield claim
-        finally:
-            claim._release_owned()
-        return
-    _ensure_maintenance_write_root()
-    with FileLock(paths.maintenance_lock()).acquire_wait(
-        timeout=timeout,
-        poll_interval=poll_interval,
-    ) as claim:
+            _ensure_maintenance_write_root()
+            acquired = claim.try_acquire()
+        except ValueError as exc:
+            if str(exc) != "runtime write directory is unavailable" or os.path.lexists(home):
+                raise
+            acquired = False
+        if acquired:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"等待运行时维护锁超时：{claim.path}")
+        time.sleep(poll_interval)
+    try:
         yield claim
+    finally:
+        claim._release_owned()
 
 
 @contextlib.contextmanager
