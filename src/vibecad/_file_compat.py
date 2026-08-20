@@ -928,10 +928,7 @@ def set_private_dacl(path: Path) -> None:
 
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows DACL is unavailable")
-    resolved = _normalized_windows_absolute_path(
-        path,
-        error_message="Windows DACL path must be normalized and absolute",
-    )
+    resolved = Path(os.path.abspath(path))
     sid = current_user_sid()
     sddl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
     descriptor = wintypes.LPVOID()  # type: ignore[name-defined]
@@ -1132,11 +1129,16 @@ def windows_extended_path(path: os.PathLike[str] | str) -> str:
 
     if sys.platform != "win32":
         return os.path.abspath(path)
-    raw = os.fspath(
-        _normalized_windows_absolute_path(
-            path,
-            error_message="Windows verbatim path must be normalized and absolute",
+    candidate = Path(path)
+    raw = (
+        os.fspath(
+            _normalized_windows_absolute_path(
+                candidate,
+                error_message="Windows verbatim path must be normalized and absolute",
+            )
         )
+        if candidate.is_absolute()
+        else os.path.abspath(candidate)
     )
     if raw.startswith("\\\\?\\"):
         return raw
