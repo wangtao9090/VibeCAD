@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from vibecad._file_compat import _validate_windows_security
 from vibecad.runtime import paths
 from vibecad.runtime.windows_job_runner import WindowsJobError, _base_python_launcher
 
@@ -395,9 +396,12 @@ class _WindowsCacheBackend:
         )
         if result != 0:
             raise OSError(result, "GetNamedSecurityInfoW failed", os.fspath(path))
+        owner_text = ctypes.c_wchar_p()
         rendered = ctypes.c_wchar_p()
         length = ctypes.c_uint32()
         try:
+            if not self._convert_sid(owner, ctypes.byref(owner_text)):
+                raise _win_error("ConvertSidToStringSidW")
             if not self._convert_descriptor(
                 descriptor,
                 _SDDL_REVISION_1,
@@ -407,10 +411,13 @@ class _WindowsCacheBackend:
             ):
                 raise _win_error("ConvertSecurityDescriptorToStringSecurityDescriptorW")
             value = rendered.value or ""
-            if "D:P" not in value or self._sid not in value:
+            if not owner_text.value or not value:
                 raise PackageCacheError("package cache protected DACL is unavailable")
+            _validate_windows_security(owner_text.value, value)
             return hashlib.sha256(value.encode("utf-8")).hexdigest()
         finally:
+            if owner_text:
+                self._local_free(ctypes.cast(owner_text, ctypes.c_void_p))
             if rendered:
                 self._local_free(ctypes.cast(rendered, ctypes.c_void_p))
             if descriptor:
