@@ -89,12 +89,12 @@ def _root(store) -> tuple[Path, WindowsPathCapability]:
     if type(capability) is not WindowsPathCapability:
         _raise(r.RevisionStoreErrorCode.UNSAFE_STORE)
     try:
-        path = validate_windows_path(capability, directory=True)
+        validate_windows_path(capability, directory=True)
     except (OSError, TypeError, ValueError):
         _raise(r.RevisionStoreErrorCode.UNSAFE_STORE)
-    if os.path.normcase(os.fspath(path)) != os.path.normcase(os.fspath(store._root)):
+    if (capability.volume, capability.file_id) != store._identity:
         _raise(r.RevisionStoreErrorCode.UNSAFE_STORE)
-    return path, capability
+    return store._root, capability
 
 
 @contextmanager
@@ -167,10 +167,12 @@ def _capture_directory(
         missing_code = r.RevisionStoreErrorCode.NOT_FOUND
     try:
         validate_windows_path(parent, directory=True)
-        if os.path.normcase(os.fspath(path.parent)) != os.path.normcase(parent.path):
-            raise OSError
         capability = capture_windows_path(path, directory=True)
-        if capability.volume != parent.volume:
+        if (
+            capability.volume != parent.volume
+            or os.path.normcase(os.fspath(Path(capability.path).parent))
+            != os.path.normcase(parent.path)
+        ):
             raise OSError
         validate_windows_path(parent, directory=True)
         return capability

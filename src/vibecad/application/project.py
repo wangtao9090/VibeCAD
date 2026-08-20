@@ -120,7 +120,18 @@ def _borrow_root(
         owns_fd = False
     else:
         raise StorageFailure("bootstrap root binding is invalid")
-    if selected.path != root_path:
+    if sys.platform == "win32":
+        try:
+            requested = capture_windows_path(root_path, directory=True)
+            root_matches = (
+                requested.volume,
+                requested.file_id,
+            ) == selected.identity
+        except (OSError, TypeError, ValueError):
+            root_matches = False
+    else:
+        root_matches = selected.path == root_path
+    if not root_matches:
         if owns_fd:
             _close(selected_fd)
         raise StorageFailure("bootstrap root binding is invalid")
@@ -141,15 +152,19 @@ def _descriptor_root_path(root: SafeRoot, root_fd: int) -> Path:
         try:
             capability = capture_windows_fd(root_fd, directory=True)
             validate_windows_path(capability, directory=True)
+            named = capture_windows_path(
+                root.path,
+                directory=True,
+                generation_token=capability.generation_token,
+            )
         except (OSError, TypeError, ValueError):
             raise StorageFailure("bootstrap root identity changed") from None
-        current = Path(capability.path)
-        if current != root.path or (
+        if named != capability or (
             capability.volume,
             capability.file_id,
         ) != root.identity:
             raise StorageFailure("bootstrap root identity changed")
-        return current
+        return root.path
     if os.name != "posix":
         raise StorageFailure("stable descriptor paths are unavailable")
     try:
@@ -240,7 +255,6 @@ def _validate_import_from_pinned_root(port, root: SafeRoot, root_fd: int, name: 
             root_capability = capture_windows_fd(root_fd, directory=True)
             if (
                 (root_capability.volume, root_capability.file_id) != root.identity
-                or Path(root_capability.path) != root.path
             ):
                 raise OSError
             stage = root.path / name

@@ -682,14 +682,29 @@ def _without_windows_namespace_prefix(raw: str) -> str:
     return raw
 
 
+def _normalized_windows_absolute_path(
+    path: os.PathLike[str] | str,
+    *,
+    error_message: str,
+) -> Path:
+    """Validate an absolute path lexically without expanding DOS 8.3 components."""
+
+    candidate = Path(path)
+    normalized = Path(os.path.normpath(os.fspath(candidate)))
+    if not normalized.is_absolute() or normalized != candidate:
+        raise OSError(errno.EINVAL, error_message)
+    return normalized
+
+
 def _windows_long_path(path: Path) -> Path:
     """Expand DOS 8.3 components without following a reparse-point target."""
 
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows long paths are unavailable")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows path must be normalized and absolute",
+    )
     source = windows_extended_path(absolute)
     size = 512
     while size <= 32768:
@@ -814,9 +829,10 @@ def _capture_windows_handle(
 ) -> WindowsPathCapability:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows handle validation is unavailable")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows capability path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows capability path must be normalized and absolute",
+    )
     canonical = _windows_long_path(absolute)
     opened_path = _windows_handle_path(handle)
     if os.path.normcase(os.fspath(opened_path)) != os.path.normcase(os.fspath(canonical)):
@@ -828,7 +844,7 @@ def _capture_windows_handle(
     if type(token) is not str or _CAPABILITY_TOKEN.fullmatch(token) is None:
         raise ValueError("invalid Windows capability generation token")
     return WindowsPathCapability(
-        path=os.fspath(absolute),
+        path=os.fspath(canonical),
         volume=volume,
         file_id=file_id,
         owner_sid=owner,
@@ -844,9 +860,10 @@ def _open_windows_path_handle(
     deny_delete: bool,
     write_attributes: bool = False,
 ) -> int:
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows handle path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows handle path must be normalized and absolute",
+    )
     attributes = _SecurityAttributes(  # type: ignore[name-defined]
         ctypes.sizeof(_SecurityAttributes),  # type: ignore[name-defined]
         None,
@@ -879,9 +896,10 @@ def _open_windows_file_mutation_handle(
     delete_access: bool,
     directory: bool = False,
 ) -> int:
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows handle path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows handle path must be normalized and absolute",
+    )
     attributes = _SecurityAttributes(  # type: ignore[name-defined]
         ctypes.sizeof(_SecurityAttributes),  # type: ignore[name-defined]
         None,
@@ -910,7 +928,10 @@ def set_private_dacl(path: Path) -> None:
 
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows DACL is unavailable")
-    resolved = Path(os.path.abspath(path))
+    resolved = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows DACL path must be normalized and absolute",
+    )
     sid = current_user_sid()
     sddl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
     descriptor = wintypes.LPVOID()  # type: ignore[name-defined]
@@ -946,9 +967,10 @@ def protect_windows_path(path: Path, *, directory: bool) -> WindowsPathCapabilit
         raise OSError(errno.ENOTSUP, "Windows DACL protection is unavailable")
     if type(directory) is not bool:
         raise TypeError("directory must be bool")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows protection path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows protection path must be normalized and absolute",
+    )
     handle = _open_windows_path_handle(
         absolute,
         inheritable=False,
@@ -994,8 +1016,13 @@ def clear_windows_readonly(
         raise OSError(errno.ENOTSUP, "Windows file attributes are unavailable")
     if type(expected) is not WindowsPathCapability:
         raise TypeError("expected must be a WindowsPathCapability")
-    absolute = Path(os.path.abspath(path))
-    if absolute != path or os.path.normcase(os.fspath(absolute)) != os.path.normcase(expected.path):
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows attribute path must match its capability",
+    )
+    if os.path.normcase(os.fspath(_windows_long_path(absolute))) != os.path.normcase(
+        expected.path
+    ):
         raise OSError(errno.EINVAL, "Windows attribute path must match its capability")
     handle = _open_windows_path_handle(
         absolute,
@@ -1082,9 +1109,10 @@ def _validate_private_windows_path(
 ) -> tuple[os.stat_result, str, str]:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows path validation is unavailable")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows capability path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows capability path must be normalized and absolute",
+    )
     value = os.lstat(windows_extended_path(absolute))
     attributes = int(getattr(value, "st_file_attributes", 0))
     if (
@@ -1099,11 +1127,18 @@ def _validate_private_windows_path(
     return value, owner, sddl
 
 
-def windows_extended_path(path: Path) -> str:
+def windows_extended_path(path: os.PathLike[str] | str) -> str:
     """Return an absolute Win32 verbatim path without changing capability identity."""
 
-    raw = os.path.abspath(path)
-    if sys.platform != "win32" or raw.startswith("\\\\?\\"):
+    if sys.platform != "win32":
+        return os.path.abspath(path)
+    raw = os.fspath(
+        _normalized_windows_absolute_path(
+            path,
+            error_message="Windows verbatim path must be normalized and absolute",
+        )
+    )
+    if raw.startswith("\\\\?\\"):
         return raw
     if raw.startswith("\\\\"):
         return "\\\\?\\UNC\\" + raw[2:]
@@ -1314,7 +1349,8 @@ def _pin_windows_parent(
     if type(expected_parent) is not WindowsPathCapability:
         raise TypeError("expected_parent must be a WindowsPathCapability")
     parent = Path(expected_parent.path)
-    if os.path.normcase(os.fspath(path.parent)) != os.path.normcase(os.fspath(parent)):
+    canonical_parent = _windows_long_path(path.parent)
+    if os.path.normcase(os.fspath(canonical_parent)) != os.path.normcase(os.fspath(parent)):
         raise OSError(errno.EACCES, "Windows child is outside its expected parent")
     handle = open_windows_directory_handle(parent, inheritable=False, deny_delete=True)
     try:
@@ -1347,9 +1383,10 @@ def ensure_private_directory(
         raise OSError(errno.ENOTSUP, "private Windows directories are unavailable")
     if type(exclusive) is not bool:
         raise TypeError("exclusive must be bool")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows directory path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows directory path must be normalized and absolute",
+    )
     parent_handle = _pin_windows_parent(absolute, expected_parent)
     descriptor = _private_windows_security_descriptor()
     attributes = _SecurityAttributes(  # type: ignore[name-defined]
@@ -1411,9 +1448,10 @@ def open_private_file(
         raise TypeError("create, read_write, exclusive and share_delete must be bool")
     if exclusive and not create:
         raise ValueError("exclusive requires create")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows file path must be normalized and absolute")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows file path must be normalized and absolute",
+    )
     parent_handle = _pin_windows_parent(absolute, expected_parent)
     descriptor = _private_windows_security_descriptor()
     attributes = _SecurityAttributes(  # type: ignore[name-defined]
@@ -1492,10 +1530,14 @@ def replace_windows_file(
 
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "atomic Windows replacement is unavailable")
-    source_path = Path(os.path.abspath(source))
-    destination_path = Path(os.path.abspath(destination))
-    if source_path != source or destination_path != destination:
-        raise OSError(errno.EINVAL, "Windows replacement paths must be normalized")
+    source_path = _normalized_windows_absolute_path(
+        source,
+        error_message="Windows replacement paths must be normalized",
+    )
+    destination_path = _normalized_windows_absolute_path(
+        destination,
+        error_message="Windows replacement paths must be normalized",
+    )
     if type(source_parent) is not WindowsPathCapability or (
         destination_parent is not None and type(destination_parent) is not WindowsPathCapability
     ):
@@ -1621,9 +1663,10 @@ def _delete_windows_object(
 ) -> None:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "exact Windows deletion is unavailable")
-    absolute = Path(os.path.abspath(path))
-    if absolute != path:
-        raise OSError(errno.EINVAL, "Windows deletion path must be normalized")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows deletion path must be normalized",
+    )
     if type(parent) is not WindowsPathCapability or type(expected) is not WindowsPathCapability:
         raise TypeError("parent and expected must be WindowsPathCapability values")
     parent_handle = _pin_windows_parent(absolute, parent)
@@ -1726,9 +1769,10 @@ def _delete_windows_capability(
         raise OSError(errno.ENOTSUP, "exact Windows deletion is unavailable")
     if type(expected) is not WindowsPathCapability:
         raise TypeError("expected must be a WindowsPathCapability")
-    absolute = Path(os.path.abspath(expected.path))
-    if os.path.normcase(os.fspath(absolute)) != os.path.normcase(expected.path):
-        raise OSError(errno.EINVAL, "Windows deletion path must be normalized")
+    absolute = _normalized_windows_absolute_path(
+        Path(expected.path),
+        error_message="Windows deletion path must be normalized",
+    )
     handle: int | None = None
     deletion_requested = False
     try:
@@ -1808,10 +1852,14 @@ def _rename_windows_object(
 
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "atomic Windows rename is unavailable")
-    source_path = Path(os.path.abspath(source))
-    destination_path = Path(os.path.abspath(destination))
-    if source_path != source or destination_path != destination:
-        raise OSError(errno.EINVAL, "Windows rename paths must be normalized")
+    source_path = _normalized_windows_absolute_path(
+        source,
+        error_message="Windows rename paths must be normalized",
+    )
+    destination_path = _normalized_windows_absolute_path(
+        destination,
+        error_message="Windows rename paths must be normalized",
+    )
     if type(source_parent) is not WindowsPathCapability or (
         destination_parent is not None and type(destination_parent) is not WindowsPathCapability
     ):
@@ -2006,9 +2054,10 @@ class WindowsExternalFileCapability:
 def _open_windows_external_file_handle(path: Path) -> int:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows external files are unavailable")
-    absolute = Path(os.path.abspath(path))
-    if not absolute.is_absolute() or absolute != path:
-        raise OSError(errno.EINVAL, "Windows external file path must be normalized")
+    absolute = _normalized_windows_absolute_path(
+        path,
+        error_message="Windows external file path must be normalized",
+    )
     attributes = _SecurityAttributes(  # type: ignore[name-defined]
         ctypes.sizeof(_SecurityAttributes),  # type: ignore[name-defined]
         None,

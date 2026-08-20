@@ -210,7 +210,7 @@ def _ensure_windows_data_root(path: Path) -> WindowsPathCapability:
             if missing
             else capture_windows_path(path, directory=True)
         )
-        if capability is None or Path(capability.path) != path:
+        if capability is None:
             raise OSError("Windows data root identity is unavailable")
         validate_windows_path(capability, directory=True)
         return capability
@@ -289,11 +289,11 @@ class ApplicationDataLayout:
                 raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
             try:
                 index = fixed_paths.index(path)
-                current = validate_windows_path(capabilities[index], directory=True)
+                validate_windows_path(capabilities[index], directory=True)
             except (OSError, TypeError, ValueError):
                 raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT) from None
             capability = capabilities[index]
-            if current != path or (capability.volume, capability.file_id) != expected:
+            if (capability.volume, capability.file_id) != expected:
                 raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
             return
         descriptor = None
