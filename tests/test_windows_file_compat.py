@@ -34,6 +34,27 @@ def test_capability_mapping_uses_canonical_fixed_width_hex(tmp_path: Path) -> No
             _file_compat.WindowsPathCapability.from_mapping(malformed)
 
 
+def test_only_the_tokens_administrators_default_owner_is_trusted(monkeypatch) -> None:
+    user = _file_compat.current_user_sid()
+    administrators = "S-1-5-32-544"
+    protected = f"O:{administrators}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user})"
+
+    monkeypatch.setattr(
+        _file_compat,
+        "_current_default_owner_sid",
+        lambda: administrators,
+    )
+    _file_compat._validate_windows_security(administrators, protected)
+
+    monkeypatch.setattr(
+        _file_compat,
+        "_current_default_owner_sid",
+        lambda: "S-1-5-32-545",
+    )
+    with pytest.raises(OSError, match="DACL is not protected"):
+        _file_compat._validate_windows_security(administrators, protected)
+
+
 def test_read_only_check_and_binary_positional_read_use_real_handle_access(
     tmp_path: Path,
 ) -> None:
