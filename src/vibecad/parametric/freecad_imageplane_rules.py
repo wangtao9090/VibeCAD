@@ -681,8 +681,21 @@ class _StagedImageLease:
                     path,
                     directory=False,
                 )
+                canonical_root = Path(self._root_capability.path)
+                canonical_directory = Path(self._directory_capability.path)
+                canonical_path = Path(self._path_capability.path)
             except (OSError, TypeError, ValueError):
                 _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            if (
+                canonical_directory.parent != canonical_root
+                or canonical_path.parent != canonical_directory
+            ):
+                _fail(ImagePlaneRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            # Subsequent checks and native consumers must use the exact long
+            # spelling captured through the HANDLE, not a hosted runner's DOS
+            # alias for that same identity-pinned object.
+            self._directory = canonical_directory
+            self._path = canonical_path
 
     @property
     def path(self) -> Path:

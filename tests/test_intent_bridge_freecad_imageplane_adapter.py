@@ -61,6 +61,7 @@ from vibecad.intent_bridge.trusted_proof_policy import (
     TrustedRuleEvaluatorDescriptor,
     TrustedRulePolicy,
 )
+from vibecad.parametric import freecad_imageplane_rules as imageplane_rules
 from vibecad.parametric.feature_graph_v2 import (
     DesignParameterV2,
     FeatureBodyV2,
@@ -588,6 +589,48 @@ def test_host_owned_image_stager_is_exact_private_and_rejects_symlink(
             expected_content_sha256="0" * 64,
         )
     assert tuple(root.iterdir()) == ()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows capability spelling contract")
+def test_staged_image_lease_adopts_the_handle_canonical_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alias_root = Path("C:/alias-root")
+    alias_directory = alias_root / "stage"
+    alias_path = alias_directory / "artifact.png"
+    canonical_root = Path("C:/canonical-root")
+    canonical_directory = canonical_root / "stage"
+    canonical_path = canonical_directory / "artifact.png"
+    canonical_by_alias = {
+        alias_root: canonical_root,
+        alias_directory: canonical_directory,
+        alias_path: canonical_path,
+    }
+
+    def capture(path: Path, *, directory: bool):
+        del directory
+        canonical = canonical_by_alias[path]
+        return _file_compat.WindowsPathCapability(
+            path=str(canonical),
+            volume=1,
+            file_id=len(canonical.parts),
+            owner_sid="S-1-5-21-test",
+            security_sha256="0" * 64,
+            generation_token="1" * 64,
+        )
+
+    monkeypatch.setattr(_file_compat, "capture_windows_path", capture)
+    monkeypatch.setattr(
+        _file_compat,
+        "validate_windows_path",
+        lambda capability, *, directory: Path(capability.path),
+    )
+    lease = imageplane_rules._StagedImageLease(alias_directory, alias_path)  # noqa: SLF001
+
+    lease.verify()
+    assert lease.path == canonical_path
+    assert lease._directory == canonical_directory  # noqa: SLF001
+    lease._active = False  # noqa: SLF001
 
 
 @pytest.mark.slow

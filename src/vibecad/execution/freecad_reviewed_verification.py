@@ -769,15 +769,15 @@ def _require_managed_headless_empty(freecad: object) -> None:
         gui_up = freecad.GuiUp
         documents = freecad.listDocuments()
     except BaseException:
-        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime")
-    if (
-        type(gui_up) is not int
-        or gui_up != 0
-        or type(documents) is not dict
-        or documents
-        or "FreeCADGui" in sys.modules
-    ):
-        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime")
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime/inspection")
+    if type(gui_up) is not int or gui_up != 0:
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime/gui")
+    if type(documents) is not dict:
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime/documents/type")
+    if documents:
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime/documents/open")
+    if "FreeCADGui" in sys.modules:
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "host/runtime/gui_module")
 
 
 def build_managed_freecad_conformance_host(
@@ -833,7 +833,8 @@ def build_managed_freecad_conformance_host(
 def _guard(host: _ReviewedConformanceHost, path: str) -> None:
     try:
         host.guard()
-    except CapabilityCatalogError:
+    except CapabilityCatalogError as exc:
+        exc.add_note(f"reviewed host guard failed at {path}: {exc.path}")
         raise
     except BaseException:
         _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, path)
