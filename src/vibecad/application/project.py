@@ -141,15 +141,23 @@ def _descriptor_root_path(root: SafeRoot, root_fd: int) -> Path:
         try:
             capability = capture_windows_fd(root_fd, directory=True)
             validate_windows_path(capability, directory=True)
+            named = capture_windows_path(
+                root.path,
+                directory=True,
+                generation_token=capability.generation_token,
+            )
         except (OSError, TypeError, ValueError):
             raise StorageFailure("bootstrap root identity changed") from None
-        current = Path(capability.path)
-        if current != root.path or (
-            capability.volume,
-            capability.file_id,
-        ) != root.identity:
+        if (
+            named != capability
+            or (
+                capability.volume,
+                capability.file_id,
+            )
+            != root.identity
+        ):
             raise StorageFailure("bootstrap root identity changed")
-        return current
+        return root.path
     if os.name != "posix":
         raise StorageFailure("stable descriptor paths are unavailable")
     try:
@@ -238,10 +246,7 @@ def _validate_import_from_pinned_root(port, root: SafeRoot, root_fd: int, name: 
         result = None
         try:
             root_capability = capture_windows_fd(root_fd, directory=True)
-            if (
-                (root_capability.volume, root_capability.file_id) != root.identity
-                or Path(root_capability.path) != root.path
-            ):
+            if (root_capability.volume, root_capability.file_id) != root.identity:
                 raise OSError
             stage = root.path / name
             before = capture_windows_path(stage, directory=False)

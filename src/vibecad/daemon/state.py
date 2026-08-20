@@ -741,14 +741,13 @@ def _read_private(
                 directory=False,
                 generation_token=capability.generation_token,
             )
-            final = validate_windows_path(capability, directory=False)
+            validate_windows_path(capability, directory=False)
             if (
                 not chunks
                 or len(chunks) > maximum
                 or _windows_stable_file_stat(after)
                 != _windows_stable_file_stat(before)
                 or recaptured != capability
-                or final != path
             ):
                 raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
             return bytes(chunks), _file_binding(after)

@@ -4,8 +4,6 @@ on:
   pull_request: {}
 jobs:
   lint-unit:
-    # 当前产品只声明 Darwin。Linux/Windows 应在各自的原生应用数据、进程、
-    # 文件能力与真实 FreeCAD 契约完成后再恢复完整门禁，不能静默降级安全边界。
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,9 +12,18 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q            # slow 默认跳过
       - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
+  windows-quality:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen pytest -q -m "not slow"
   runtime-integration:
     needs: lint-unit
-    # AgentApplication、文件能力边界和发布 runtime 当前只在 Darwin 上受支持。
+    # This job exercises the macOS managed-runtime path; Windows product quality is
+    # covered independently by windows-quality and the release qualification matrix.
     runs-on: macos-latest
     timeout-minutes: 45
     env:

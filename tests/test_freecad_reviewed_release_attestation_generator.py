@@ -302,6 +302,7 @@ def test_windows_stage_flushes_exact_bytes_without_posix_fchmod(
         generator.os,
         "fchmod",
         lambda *_args: pytest.fail("Windows staging must not require POSIX fchmod"),
+        raising=False,
     )
 
     staged = generator._stage_file(

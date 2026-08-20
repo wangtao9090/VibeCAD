@@ -136,17 +136,17 @@ def _private_directory_identity(
 
 def _same_directory(identity: _DirectoryIdentity, path: str) -> bool:
     if _WINDOWS:
-        capability = identity.windows_capability
-        if capability is None:
+        expected = identity.windows_capability
+        if expected is None:
             return False
         try:
-            actual = Path(os.path.abspath(path))
-            expected = Path(capability.path)
-            if os.path.normcase(os.fspath(actual)) != os.path.normcase(
-                os.fspath(expected)
-            ):
-                return False
-            return validate_windows_path(capability, directory=True) == expected
+            actual = capture_windows_path(
+                Path(path),
+                directory=True,
+                generation_token=expected.generation_token,
+            )
+            validate_windows_path(expected, directory=True)
+            return actual == expected
         except (OSError, TypeError, ValueError, RuntimeError):
             return False
     try:
@@ -261,9 +261,11 @@ def _identity_exists_below_private_root(
                 if index > _MAX_CLEANUP_ENTRIES:
                     _fail(DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED, "/document/native_root")
                 info = entry.stat(follow_symlinks=False)
-                if _WINDOWS and int(
-                    getattr(info, "st_file_attributes", 0)
-                ) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                if (
+                    _WINDOWS
+                    and int(getattr(info, "st_file_attributes", 0))
+                    & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                ):
                     continue
                 if _WINDOWS:
                     expected = identity.windows_capability
@@ -277,10 +279,7 @@ def _identity_exists_below_private_root(
                         )
                     except OSError:
                         continue
-                    if (
-                        actual.volume == expected.volume
-                        and actual.file_id == expected.file_id
-                    ):
+                    if actual.volume == expected.volume and actual.file_id == expected.file_id:
                         return True
                     continue
                 if info.st_dev == identity.device and info.st_ino == identity.inode:
@@ -368,17 +367,17 @@ def _remove_private_tree(identity: _DirectoryIdentity) -> None:
             child = Path(entry.path)
             try:
                 info = child.lstat()
-                if _WINDOWS and int(
-                    getattr(info, "st_file_attributes", 0)
-                ) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                if (
+                    _WINDOWS
+                    and int(getattr(info, "st_file_attributes", 0))
+                    & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                ):
                     _fail(
                         DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED,
                         "/workspace/cleanup",
                     )
                 if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-                    if not _WINDOWS and (
-                        info.st_uid != os.geteuid() or info.st_mode & 0o077
-                    ):
+                    if not _WINDOWS and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
                         _fail(
                             DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED,
                             "/workspace/cleanup",
