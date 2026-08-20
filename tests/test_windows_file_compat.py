@@ -16,7 +16,11 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="native Win32 co
 def _private_directory(path: Path) -> _file_compat.WindowsPathCapability:
     path.mkdir()
     _file_compat.set_private_dacl(path)
-    return _file_compat.capture_windows_path(path, directory=True)
+    owner, sddl = _file_compat._windows_security(path)
+    try:
+        return _file_compat.capture_windows_path(path, directory=True)
+    except OSError as exc:
+        pytest.fail(f"private DACL round-trip failed: {exc}; owner={owner}; sddl={sddl}")
 
 
 def test_capability_mapping_uses_canonical_fixed_width_hex(tmp_path: Path) -> None:
