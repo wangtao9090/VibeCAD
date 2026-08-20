@@ -10,7 +10,10 @@ import pytest
 
 from vibecad import _file_compat
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="native Win32 contract")
+pytestmark = [
+    pytest.mark.windows_contract,
+    pytest.mark.skipif(sys.platform != "win32", reason="native Win32 contract"),
+]
 
 
 def _private_directory(path: Path) -> _file_compat.WindowsPathCapability:
