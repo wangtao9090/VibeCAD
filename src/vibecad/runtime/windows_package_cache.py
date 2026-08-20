@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Protocol
 
 from vibecad.runtime import paths
+from vibecad.runtime.windows_job_runner import WindowsJobError, _base_python_launcher
 
 _REVIEWED_MAXIMUM_RELATIVE_PATH = 198
 _DEFAULT_MAXIMUM_ROOT_LENGTH = 40
@@ -1003,12 +1004,25 @@ class PackageCacheSession:
 
 
 def _native_helper_command(record: Path, maximum_root_length: int) -> list[str]:
+    try:
+        launcher = _base_python_launcher()
+    except WindowsJobError as exc:
+        raise PackageCacheError(
+            "package-cache cleanup helper base interpreter is unavailable"
+        ) from exc
+    import_root = Path(__file__).resolve(strict=True).parents[2]
+    bootstrap = (
+        "import runpy,sys;"
+        "sys.path.insert(0,sys.argv.pop(1));"
+        "runpy.run_module('vibecad.runtime.windows_package_cache',run_name='__main__')"
+    )
     return [
-        os.fspath(sys.executable),
+        launcher,
         "-I",
         "-B",
-        "-m",
-        "vibecad.runtime.windows_package_cache",
+        "-c",
+        bootstrap,
+        os.fspath(import_root),
         "--cleanup-helper",
         os.fspath(record),
         str(maximum_root_length),

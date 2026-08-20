@@ -597,7 +597,10 @@ def test_native_helper_ignores_hostile_python_environment(monkeypatch, tmp_path)
         root = session.root
         session.validate()
 
-    assert "-I" in cache._native_helper_command(home / "record.json", 40)
+    helper_command = cache._native_helper_command(home / "record.json", 40)
+    assert "-I" in helper_command
+    assert helper_command[0] == os.fspath(sys._base_executable)
+    assert "vibecad.runtime.windows_package_cache" in " ".join(helper_command)
     assert not root.exists()
     assert not paths.package_cache_record().exists()
 
