@@ -47,6 +47,7 @@ jobs:
             tests/test_installer.py `
             tests/test_uninstall.py `
             tests/test_workflow_lease.py `
+            tests/test_windows_file_compat.py `
             tests/test_windows_package_cache.py `
             tests/test_windows_job_runner.py `
             tests/test_windows_qualification_plan.py `

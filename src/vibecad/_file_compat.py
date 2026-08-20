@@ -30,6 +30,9 @@ if sys.platform == "win32":
     _OBJECT_BASIC_INFORMATION_CLASS = 0
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER = 1
+    _TOKEN_OWNER = 4
+    _ADMINISTRATORS_SID = "S-1-5-32-544"
+    _WIN_ACCOUNT_ADMINISTRATOR_SID = 38
     _SE_FILE_OBJECT = 1
     _OWNER_SECURITY_INFORMATION = 0x00000001
     _DACL_SECURITY_INFORMATION = 0x00000004
@@ -195,6 +198,12 @@ if sys.platform == "win32":
     _convert_sid = _advapi32.ConvertSidToStringSidW
     _convert_sid.argtypes = (wintypes.LPVOID, ctypes.POINTER(ctypes.c_wchar_p))
     _convert_sid.restype = wintypes.BOOL
+    _convert_string_sid = _advapi32.ConvertStringSidToSidW
+    _convert_string_sid.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID))
+    _convert_string_sid.restype = wintypes.BOOL
+    _is_well_known_sid = _advapi32.IsWellKnownSid
+    _is_well_known_sid.argtypes = (wintypes.LPVOID, wintypes.DWORD)
+    _is_well_known_sid.restype = wintypes.BOOL
     _get_named_security = _advapi32.GetNamedSecurityInfoW
     _get_named_security.argtypes = (
         wintypes.LPCWSTR,
@@ -527,9 +536,7 @@ def pread(fd: int, length: int, offset: int) -> bytes:
                 raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[name-defined]
 
 
-def current_user_sid() -> str:
-    """Return the effective Windows token SID, never a fabricated POSIX uid."""
-
+def _current_process_token_sid(information_class: int) -> str:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows SID is unavailable")
     token = wintypes.HANDLE()  # type: ignore[name-defined]
@@ -544,7 +551,7 @@ def current_user_sid() -> str:
         ctypes.set_last_error(0)  # type: ignore[name-defined]
         _get_token_information(  # type: ignore[name-defined]
             token,
-            _TOKEN_USER,
+            information_class,
             None,
             0,
             ctypes.byref(needed),  # type: ignore[name-defined]
@@ -554,7 +561,7 @@ def current_user_sid() -> str:
         buffer = ctypes.create_string_buffer(needed.value)  # type: ignore[name-defined]
         if not _get_token_information(  # type: ignore[name-defined]
             token,
-            _TOKEN_USER,  # type: ignore[name-defined]
+            information_class,
             buffer,
             needed,
             ctypes.byref(needed),  # type: ignore[name-defined]
@@ -572,6 +579,51 @@ def current_user_sid() -> str:
             _local_free(ctypes.cast(rendered, wintypes.LPVOID))  # type: ignore[name-defined]
     finally:
         _close_handle(token)  # type: ignore[name-defined]
+
+
+def current_user_sid() -> str:
+    """Return the effective Windows token SID, never a fabricated POSIX uid."""
+
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "Windows SID is unavailable")
+    return _current_process_token_sid(_TOKEN_USER)  # type: ignore[name-defined]
+
+
+def _current_default_owner_sid() -> str:
+    """Return the owner SID Windows assigns to objects created by this token."""
+
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "Windows SID is unavailable")
+    return _current_process_token_sid(_TOKEN_OWNER)  # type: ignore[name-defined]
+
+
+def _trusted_windows_owner_sids() -> frozenset[str]:
+    """Return owners accepted for current-token private objects.
+
+    UAC-disabled Administrator tokens, including GitHub's hosted Windows
+    runner, use the built-in Administrators group as their default object
+    owner.  That group already has an explicit full-control ACE in every
+    VibeCAD private DACL.  Accept it only when it is this token's actual
+    default owner; standard-user tokens continue to require their user SID.
+    """
+
+    user = current_user_sid()
+    default_owner = _current_default_owner_sid()
+    if default_owner == _ADMINISTRATORS_SID:  # type: ignore[name-defined]
+        return frozenset((user, default_owner))
+    return frozenset((user,))
+
+
+def _sid_is_well_known(sid: str, sid_type: int) -> bool:
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "Windows SID is unavailable")
+    pointer = wintypes.LPVOID()  # type: ignore[name-defined]
+    if not _convert_string_sid(sid, ctypes.byref(pointer)):  # type: ignore[name-defined]
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[name-defined]
+    try:
+        return bool(_is_well_known_sid(pointer, sid_type))  # type: ignore[name-defined]
+    finally:
+        _local_free(pointer)  # type: ignore[name-defined]
 
 
 def _windows_security(path: Path) -> tuple[str, str]:
@@ -680,23 +732,21 @@ def _windows_handle_security(handle: int) -> tuple[str, str]:
 
 def _validate_windows_security(owner: str, sddl: str) -> None:
     sid = current_user_sid()
-    if owner != sid or "D:P" not in sddl:
+    if owner not in _trusted_windows_owner_sids() or "D:P" not in sddl:
         raise OSError(errno.EACCES, "Windows capability DACL is not protected")
     # An allow ACE for any principal other than the current user, LocalSystem,
     # or Administrators would make replacement possible across trust domains.
+    allowed_trustees = {sid, "OW", "SY", "BA"}
+    if _sid_is_well_known(
+        sid,
+        _WIN_ACCOUNT_ADMINISTRATOR_SID,  # type: ignore[name-defined]
+    ):
+        # ConvertSecurityDescriptorToStringSecurityDescriptorW renders the
+        # built-in local Administrator account as the canonical ``LA`` alias.
+        allowed_trustees.add("LA")
     for ace in re.findall(r"\(([^()]*)\)", sddl):
         fields = ace.split(";")
-        if (
-            len(fields) == 6
-            and fields[0] in {"A", "OA"}
-            and fields[5]
-            not in {
-                sid,
-                "OW",
-                "SY",
-                "BA",
-            }
-        ):
+        if len(fields) == 6 and fields[0] in {"A", "OA"} and fields[5] not in allowed_trustees:
             raise OSError(errno.EACCES, "Windows capability DACL grants foreign access")
 
 
@@ -878,7 +928,7 @@ def protect_windows_path(path: Path, *, directory: bool) -> WindowsPathCapabilit
             raise OSError(errno.EACCES, "Windows protection handle resolves elsewhere")
         volume, file_id = _windows_handle_information(handle, directory=directory)
         owner, _sddl = _windows_handle_security(handle)
-        if owner != current_user_sid():
+        if owner not in _trusted_windows_owner_sids():
             raise OSError(errno.EACCES, "Windows protection target has another owner")
         set_private_dacl(absolute)
         protected = _capture_windows_handle(
@@ -980,7 +1030,9 @@ def clear_windows_readonly(
 
 def _private_windows_security_descriptor() -> wintypes.LPVOID:
     sid = current_user_sid()
-    sddl = f"O:{sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+    default_owner = _current_default_owner_sid()
+    owner = default_owner if default_owner == _ADMINISTRATORS_SID else sid
+    sddl = f"O:{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
     descriptor = wintypes.LPVOID()  # type: ignore[name-defined]
     size = wintypes.DWORD()  # type: ignore[name-defined]
     if not _convert_sddl(  # type: ignore[name-defined]
