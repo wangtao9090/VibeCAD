@@ -828,7 +828,7 @@ def _capture_windows_handle(
     if type(token) is not str or _CAPABILITY_TOKEN.fullmatch(token) is None:
         raise ValueError("invalid Windows capability generation token")
     return WindowsPathCapability(
-        path=os.fspath(canonical),
+        path=os.fspath(absolute),
         volume=volume,
         file_id=file_id,
         owner_sid=owner,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import secrets
 import sys
@@ -43,15 +44,28 @@ def test_capability_mapping_uses_canonical_fixed_width_hex(tmp_path: Path) -> No
             _file_compat.WindowsPathCapability.from_mapping(malformed)
 
 
-def test_private_capability_expands_dos_short_components_without_following_aliases() -> None:
+def test_private_capability_accepts_dos_short_components_without_following_aliases() -> None:
     raw = Path(os.path.abspath(tempfile.gettempdir())) / f"vibecad-long-{secrets.token_hex(8)}"
     capability = _file_compat.ensure_private_directory(raw, exclusive=True)
     try:
-        assert Path(capability.path) == _file_compat._windows_long_path(raw)
-        assert Path(capability.path).samefile(raw)
-        assert _file_compat.validate_windows_path(capability, directory=True) == Path(
-            capability.path
+        assert Path(capability.path) == raw
+        get_short_path_name = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path_name.argtypes = (
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
         )
+        get_short_path_name.restype = ctypes.c_ulong
+        buffer = ctypes.create_unicode_buffer(32768)
+        assert get_short_path_name(str(raw), buffer, len(buffer))
+        short = Path(buffer.value)
+        if short == raw:
+            pytest.skip("8.3 name generation is disabled on this volume")
+
+        short_capability = _file_compat.capture_windows_path(short, directory=True)
+        assert Path(short_capability.path) == short
+        assert _file_compat._windows_long_path(short) == raw
+        assert _file_compat.validate_windows_path(short_capability, directory=True) == short
     finally:
         _file_compat.delete_windows_directory_capability(capability)
 

@@ -2194,7 +2194,8 @@ def test_retire_helper_passes_one_hard_request_response_deadline(
     elapsed = time.monotonic() - started
 
     assert raised.value.code is DaemonErrorCode.UNAVAILABLE
-    assert len(observed) == 1 and 0 < observed[0] <= 0.05
+    assert len(observed) == 1
+    assert 0 < observed[0] <= 0.05 + 1e-9
     assert elapsed < 0.2
     assert client.closed is True
 
