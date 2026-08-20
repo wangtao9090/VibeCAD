@@ -549,8 +549,10 @@ def test_host_owned_image_stager_is_exact_private_and_rejects_symlink(
     root = tmp_path / "staging"
     root.mkdir(mode=0o700)
     root.chmod(0o700)
+    root_capability = None
     if os.name == "nt":
         _file_compat.set_private_dacl(root)
+        root_capability = _file_compat.capture_windows_path(root, directory=True)
     payload = b"exact image source"
     stager = HostOwnedImageStager(root)
     lease = stager.stage_exact(
@@ -563,12 +565,13 @@ def test_host_owned_image_stager_is_exact_private_and_rejects_symlink(
         assert lease.path.parent.parent == root
         assert not lease.path.is_symlink()
         if os.name == "nt":
+            assert root_capability is not None
             assert (
                 _file_compat.capture_windows_path(
                     lease.path,
                     directory=False,
                 ).owner_sid
-                == _file_compat.current_user_sid()
+                == root_capability.owner_sid
             )
         else:
             assert stat.S_IMODE(lease.path.stat().st_mode) == 0o600

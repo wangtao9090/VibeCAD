@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,19 @@ def test_capability_mapping_uses_canonical_fixed_width_hex(tmp_path: Path) -> No
         malformed[field] = invalid
         with pytest.raises(ValueError, match="invalid Windows path capability"):
             _file_compat.WindowsPathCapability.from_mapping(malformed)
+
+
+def test_private_capability_expands_dos_short_components_without_following_aliases() -> None:
+    raw = Path(os.path.abspath(tempfile.gettempdir())) / f"vibecad-long-{secrets.token_hex(8)}"
+    capability = _file_compat.ensure_private_directory(raw, exclusive=True)
+    try:
+        assert Path(capability.path) == _file_compat._windows_long_path(raw)
+        assert Path(capability.path).samefile(raw)
+        assert _file_compat.validate_windows_path(capability, directory=True) == Path(
+            capability.path
+        )
+    finally:
+        _file_compat.delete_windows_directory_capability(capability)
 
 
 def test_only_the_tokens_administrators_default_owner_is_trusted(monkeypatch) -> None:

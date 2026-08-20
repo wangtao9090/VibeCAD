@@ -39,6 +39,7 @@ def _run_guard(root: Path, tag: str, *extra: str) -> subprocess.CompletedProcess
         [sys.executable, str(GUARD), tag, "--root", str(root), *extra],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -234,6 +235,17 @@ def test_ci_runtime_gate_binds_private_freecad_process_directories():
     assert workflow.count(binding) == 1
     assert '>> "$GITHUB_ENV"' in workflow
     assert workflow.index(binding) < workflow.index(direct_gate)
+
+
+def test_ci_runs_full_frozen_quality_gate_on_windows():
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    windows = workflow["jobs"]["windows-quality"]
+
+    assert windows["runs-on"] == "windows-2022"
+    commands = tuple(step.get("run") for step in windows["steps"] if "run" in step)
+    assert "uv sync --frozen" in commands
+    assert "uv run --frozen ruff check ." in commands
+    assert 'uv run --frozen pytest -q -m "not slow"' in commands
 
 
 def test_release_workflow_executes_the_exact_built_artifacts_before_publish():

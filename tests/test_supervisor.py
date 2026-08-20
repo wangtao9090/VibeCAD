@@ -34,6 +34,12 @@ from vibecad.runtime.status import _pid_alive
 FAKE_SERVER = str(Path(__file__).resolve().parent / "fake_server.py")
 
 
+def _direct_python_executable() -> str:
+    if sys.platform == "win32":
+        return os.fspath(getattr(sys, "_base_executable", None) or sys.executable)
+    return sys.executable
+
+
 # --- 黑盒：launcher → supervisor → fake server ---
 
 
@@ -1333,7 +1339,7 @@ def test_live_child_stdout_eof_is_fixed_transport_failure(
     )
     code = "import os, time\nos.close(1)\ntime.sleep(30)\n"
     child = subprocess.Popen(
-        [sys.executable, "-c", code],
+        [_direct_python_executable(), "-c", code],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
@@ -1374,7 +1380,7 @@ def test_stdout_eof_during_normal_exit_is_not_transport_failure(
     )
     code = "import os, time\nos.close(1)\ntime.sleep(0.02)\n"
     child = subprocess.Popen(
-        [sys.executable, "-c", code],
+        [_direct_python_executable(), "-c", code],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )

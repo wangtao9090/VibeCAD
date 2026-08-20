@@ -17,6 +17,15 @@ from pathlib import Path
 _GIT_OBJECT_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 
+def _configure_utf8_stdio() -> None:
+    """Keep release diagnostics stable when Windows inherits a legacy code page."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 class ReleaseIdentityError(ValueError):
     """The checked-out source is not the exact clean commit named by the release tag."""
 
@@ -116,6 +125,7 @@ def verify_release_identity(
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "tag",

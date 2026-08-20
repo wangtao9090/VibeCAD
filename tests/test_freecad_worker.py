@@ -85,6 +85,12 @@ _GENERATION = "worker_generation_" + "6" * 32
 _REQUEST = "worker_request_" + "7" * 32
 
 
+def _direct_python_executable() -> str:
+    if sys.platform == "win32":
+        return os.fspath(getattr(sys, "_base_executable", None) or sys.executable)
+    return sys.executable
+
+
 def _head() -> ProjectHead:
     return ProjectHead(
         project_id=_PROJECT_ID,
@@ -1123,7 +1129,7 @@ def _process(tmp_path: Path, mode: str) -> tuple[_WorkerProcess, Path]:
     script, grandchild = _fake_worker_script(tmp_path, mode)
     with _spawn_boundary_probe():
         process = _WorkerProcess.spawn_for_test(
-            command=(sys.executable, str(script)),
+            command=(_direct_python_executable(), str(script)),
             source_root=Path(__file__).parents[1] / "src",
             readiness_timeout_ms=5_000,
             shutdown_timeout_ms=250,
@@ -1385,7 +1391,7 @@ def test_startup_failure_is_typed_and_reaps_generation(
     with _spawn_boundary_probe():
         with pytest.raises(WorkerError) as caught:
             _WorkerProcess.spawn_for_test(
-                command=(sys.executable, str(script)),
+                command=(_direct_python_executable(), str(script)),
                 source_root=Path(__file__).parents[1] / "src",
                 readiness_timeout_ms=2_000,
                 shutdown_timeout_ms=250,
@@ -1439,7 +1445,7 @@ def test_startup_cleanup_is_retained_until_observation_recovers(
     with _spawn_boundary_probe():
         with pytest.raises(WorkerError) as caught:
             _WorkerProcess.spawn_for_test(
-                command=(sys.executable, str(script)),
+                command=(_direct_python_executable(), str(script)),
                 source_root=Path(__file__).parents[1] / "src",
                 readiness_timeout_ms=2_000,
                 shutdown_timeout_ms=250,
@@ -1531,7 +1537,7 @@ def test_cleanup_sweeper_start_failure_aborts_before_spawn_or_home(
         )
         with pytest.raises(WorkerError) as caught:
             _WorkerProcess.spawn_for_test(
-                command=(sys.executable, str(script)),
+                command=(_direct_python_executable(), str(script)),
                 source_root=Path(__file__).parents[1] / "src",
                 readiness_timeout_ms=250,
                 shutdown_timeout_ms=250,
@@ -1573,7 +1579,7 @@ def test_startup_cleanup_retries_a_transient_leader_identity_failure(
     with _spawn_boundary_probe():
         with pytest.raises(WorkerError) as caught:
             _WorkerProcess.spawn_for_test(
-                command=(sys.executable, str(script)),
+                command=(_direct_python_executable(), str(script)),
                 source_root=Path(__file__).parents[1] / "src",
                 readiness_timeout_ms=250,
                 shutdown_timeout_ms=250,

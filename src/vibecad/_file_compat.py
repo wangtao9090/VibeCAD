@@ -250,6 +250,13 @@ if sys.platform == "win32":
         wintypes.DWORD,
     )
     _get_final_path.restype = wintypes.DWORD
+    _get_long_path_name = _kernel32.GetLongPathNameW
+    _get_long_path_name.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    )
+    _get_long_path_name.restype = wintypes.DWORD
     _create_file = _kernel32.CreateFileW
     _create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -667,6 +674,35 @@ def _windows_security(path: Path) -> tuple[str, str]:
             _local_free(descriptor)  # type: ignore[name-defined]
 
 
+def _without_windows_namespace_prefix(raw: str) -> str:
+    if raw.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + raw[8:]
+    if raw.startswith("\\\\?\\"):
+        return raw[4:]
+    return raw
+
+
+def _windows_long_path(path: Path) -> Path:
+    """Expand DOS 8.3 components without following a reparse-point target."""
+
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "Windows long paths are unavailable")
+    absolute = Path(os.path.abspath(path))
+    if not absolute.is_absolute() or absolute != path:
+        raise OSError(errno.EINVAL, "Windows path must be normalized and absolute")
+    source = windows_extended_path(absolute)
+    size = 512
+    while size <= 32768:
+        buffer = ctypes.create_unicode_buffer(size)  # type: ignore[name-defined]
+        length = int(_get_long_path_name(source, buffer, size))  # type: ignore[name-defined]
+        if not length:
+            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[name-defined]
+        if length < size:
+            return Path(os.path.abspath(_without_windows_namespace_prefix(buffer.value)))
+        size = length + 1
+    raise OSError(errno.ENAMETOOLONG, "Windows long path is too long")
+
+
 def _windows_handle_path(handle: int) -> Path:
     if sys.platform != "win32":
         raise OSError(errno.ENOTSUP, "Windows handle paths are unavailable")
@@ -679,12 +715,7 @@ def _windows_handle_path(handle: int) -> Path:
         if not length:
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[name-defined]
         if length < size:
-            raw = buffer.value
-            if raw.startswith("\\\\?\\UNC\\"):
-                raw = "\\\\" + raw[8:]
-            elif raw.startswith("\\\\?\\"):
-                raw = raw[4:]
-            return Path(os.path.abspath(raw))
+            return Path(os.path.abspath(_without_windows_namespace_prefix(buffer.value)))
         size = length + 1
     raise OSError(errno.ENAMETOOLONG, "Windows handle path is too long")
 
@@ -786,8 +817,9 @@ def _capture_windows_handle(
     absolute = Path(os.path.abspath(path))
     if not absolute.is_absolute() or absolute != path:
         raise OSError(errno.EINVAL, "Windows capability path must be normalized and absolute")
+    canonical = _windows_long_path(absolute)
     opened_path = _windows_handle_path(handle)
-    if os.path.normcase(os.fspath(opened_path)) != os.path.normcase(os.fspath(absolute)):
+    if os.path.normcase(os.fspath(opened_path)) != os.path.normcase(os.fspath(canonical)):
         raise OSError(errno.EACCES, "Windows handle resolves to another path")
     volume, file_id = _windows_handle_information(handle, directory=directory)
     owner, sddl = _windows_handle_security(handle)
@@ -796,7 +828,7 @@ def _capture_windows_handle(
     if type(token) is not str or _CAPABILITY_TOKEN.fullmatch(token) is None:
         raise ValueError("invalid Windows capability generation token")
     return WindowsPathCapability(
-        path=os.fspath(absolute),
+        path=os.fspath(canonical),
         volume=volume,
         file_id=file_id,
         owner_sid=owner,
