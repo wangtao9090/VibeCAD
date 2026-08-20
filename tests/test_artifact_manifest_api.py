@@ -247,6 +247,25 @@ def test_manifest_success_projects_committed_draft_and_delivery_states_exactly(
     ]
 
 
+def test_manifest_committed_scope_alias_normalizes_before_port_dispatch() -> None:
+    value = _result()
+    port = _Port(value)
+
+    response = ArtifactApi(port=port).get_artifact_manifest(
+        {**_request(), "draft_id": "committed"}
+    )
+
+    assert response["ok"] is True
+    assert port.calls == [
+        ArtifactManifestRequest(
+            task_id=TASK_ID,
+            expected_generation=7,
+            revision_id=REVISION_ID,
+            draft_id=None,
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     "code",
     (

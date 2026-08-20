@@ -178,6 +178,18 @@ _WIRE_ERRORS = {
 
 def _private_child_directory(parent: Path, name: str) -> Path:
     child = parent / name
+    if os.sys.platform == "win32":
+        from vibecad._file_compat import (
+            capture_windows_path,
+            ensure_private_directory,
+        )
+
+        parent_capability = capture_windows_path(parent, directory=True)
+        capability = ensure_private_directory(
+            child,
+            expected_parent=parent_capability,
+        )
+        return Path(capability.path)
     child.mkdir(mode=0o700)
     child.chmod(0o700)
     return child.resolve(strict=True)
@@ -214,6 +226,59 @@ def _minimal_environment(*, source_root: Path, home: Path, python: Path) -> dict
         "PYTHONUNBUFFERED": "1",
         "TMPDIR": str(home),
     }
+
+
+def _minimal_windows_environment(
+    *,
+    source_root: Path,
+    home: Path,
+    python: Path,
+) -> dict[str, str]:
+    """Build the private Worker environment without changing Darwin's contract."""
+
+    if os.sys.platform != "win32":
+        raise OSError("Windows Worker environment is unavailable")
+    prefix = python.parent
+    freecad_root = _private_child_directory(home, "freecad-user")
+    freecad_home = _private_child_directory(freecad_root, "home")
+    freecad_data = _private_child_directory(freecad_root, "data")
+    freecad_temp = _private_child_directory(freecad_root, "temp")
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    if not system_root or not Path(system_root).is_absolute():
+        raise OSError("Windows system root is unavailable")
+    path_entries = (
+        prefix,
+        prefix / "Library" / "bin",
+        prefix / "Scripts",
+        Path(system_root) / "System32",
+        Path(system_root),
+    )
+    environment = {
+        "APPDATA": str(home / "appdata"),
+        "FREECAD_USER_DATA": str(freecad_data),
+        "FREECAD_USER_HOME": str(freecad_home),
+        "FREECAD_USER_TEMP": str(freecad_temp),
+        "HOME": str(home),
+        "LOCALAPPDATA": str(home / "localappdata"),
+        "PATH": os.pathsep.join(str(value) for value in path_entries),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": str(source_root),
+        "PYTHONUNBUFFERED": "1",
+        "SystemRoot": system_root,
+        "TEMP": str(home),
+        "TMP": str(home),
+        "TMPDIR": str(home),
+        "USERPROFILE": str(home),
+        "WINDIR": system_root,
+    }
+    for name in ("COMSPEC", "PATHEXT"):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    for name in ("appdata", "localappdata"):
+        _private_child_directory(home, name)
+    return environment
 
 
 class _SpawnedProcess:
@@ -620,6 +685,144 @@ class _WorkerProcess:
         self._state = WorkerGenerationState.STARTING
 
     @classmethod
+    def _spawn_windows(
+        cls,
+        *,
+        command: tuple[str, ...],
+        source_root: Path,
+        readiness_timeout_ms: int,
+        shutdown_timeout_ms: int,
+        test_timeout_cap_ms: int | None,
+    ) -> _WorkerProcess:
+        from vibecad.daemon.windows_ipc import (
+            process_is_same_or_direct_child,
+            process_start_ns,
+        )
+        from vibecad.runtime.windows_job_runner import (
+            WindowsJobProcess,
+            spawn_persistent_in_job,
+        )
+
+        _ensure_startup_cleanup_sweeper()
+        generation_id = f"worker_generation_{secrets.token_hex(16)}"
+        parent: socket.socket | None = None
+        child: socket.socket | None = None
+        process: WindowsJobProcess | None = None
+        instance: _WorkerProcess | None = None
+        home: Path | None = None
+        try:
+            home = Path(tempfile.mkdtemp(prefix="vibecad-worker-"))
+            from vibecad._file_compat import set_private_dacl
+
+            set_private_dacl(home)
+            parent, child = socket.socketpair()
+            python = Path(command[0])
+            env = _minimal_windows_environment(
+                source_root=source_root,
+                home=home,
+                python=python,
+            )
+            child_handle = child.fileno()
+            argv = (
+                *command,
+                "--protocol-fd",
+                str(child_handle),
+                "--generation-id",
+                generation_id,
+            )
+            process = spawn_persistent_in_job(
+                argv,
+                cwd=home,
+                environment=env,
+                socket_handles=(child_handle,),
+                startup_timeout=min(15.0, readiness_timeout_ms / 1000),
+            )
+            spawned_pid = process.pid
+            spawned_started_ns = process_start_ns(spawned_pid)
+            child.close()
+            child = None
+            instance = cls(
+                process=process,  # type: ignore[arg-type]
+                connection=parent,
+                generation_id=generation_id,
+                home=home,
+                shutdown_timeout_ms=shutdown_timeout_ms,
+                test_timeout_cap_ms=test_timeout_cap_ms,
+            )
+            parent = None
+            try:
+                if not process.tree_exists():
+                    raise WorkerError(WorkerErrorCode.START_FAILED)
+                ready = instance._rpc(
+                    "worker.ready",
+                    {},
+                    timeout_ms=readiness_timeout_ms,
+                    allow_starting=True,
+                )
+                worker_pid = ready.get("worker_pid")
+                if type(worker_pid) is int:
+                    try:
+                        worker_started_ns = process_start_ns(worker_pid)
+                    except OSError:
+                        worker_generation_matches = False
+                    else:
+                        worker_generation_matches = process_is_same_or_direct_child(
+                            worker_pid,
+                            started_ns=worker_started_ns,
+                            spawned_pid=spawned_pid,
+                            spawned_started_ns=spawned_started_ns,
+                        )
+                else:
+                    worker_generation_matches = False
+                if (
+                    set(ready)
+                    != {
+                        "worker_pid",
+                        "python_version",
+                        "freecad_version",
+                    }
+                    or type(ready["worker_pid"]) is not int
+                    or not worker_generation_matches
+                    or type(ready["python_version"]) is not str
+                    or _VERSION.fullmatch(ready["python_version"]) is None
+                    or type(ready["freecad_version"]) is not str
+                    or _VERSION.fullmatch(ready["freecad_version"]) is None
+                ):
+                    raise WorkerError(WorkerErrorCode.START_FAILED)
+                process.bind_runtime_pid(worker_pid)
+                with instance._lifecycle_lock:
+                    if instance._state is not WorkerGenerationState.STARTING:
+                        raise WorkerError(WorkerErrorCode.START_FAILED)
+                    instance._state = WorkerGenerationState.READY
+                return instance
+            except BaseException as error:
+                instance._terminate_group()
+                if not isinstance(error, Exception):
+                    raise
+                raise WorkerError(WorkerErrorCode.START_FAILED) from None
+        except WorkerError:
+            raise
+        except BaseException as error:
+            if instance is not None:
+                instance._terminate_group()
+            elif process is not None:
+                process.terminate_tree()
+            if home is not None and (
+                instance is None or instance.state is WorkerGenerationState.DEAD
+            ):
+                shutil.rmtree(home, ignore_errors=True)
+            if not isinstance(error, Exception):
+                raise
+            raise WorkerError(WorkerErrorCode.START_FAILED) from None
+        finally:
+            if parent is not None:
+                with contextlib.suppress(OSError):
+                    parent.close()
+            if child is not None:
+                with contextlib.suppress(OSError):
+                    child.close()
+
+    @classmethod
     def _spawn(
         cls,
         *,
@@ -644,6 +847,14 @@ class _WorkerProcess:
             or shutdown_timeout_ms > 5_000
         ):
             raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+        if os.sys.platform == "win32":
+            return cls._spawn_windows(
+                command=command,
+                source_root=source_root,
+                readiness_timeout_ms=readiness_timeout_ms,
+                shutdown_timeout_ms=shutdown_timeout_ms,
+                test_timeout_cap_ms=test_timeout_cap_ms,
+            )
         _ensure_startup_cleanup_sweeper()
         generation_id = f"worker_generation_{secrets.token_hex(16)}"
         parent = child = None
@@ -795,6 +1006,8 @@ class _WorkerProcess:
     def _group_exists(self) -> bool:
         if not self._process.started:
             return False
+        if self._process.launch_primitive == "windows_job":
+            return self._process.tree_exists()  # type: ignore[attr-defined]
         try:
             os.killpg(self._process.pid, 0)
         except ProcessLookupError:
@@ -841,6 +1054,37 @@ class _WorkerProcess:
                                 self._connection = None
                     except BaseException as error:
                         remember_control_flow(error)
+
+            if self._process.launch_primitive == "windows_job":
+                try:
+                    self._process.terminate_tree(  # type: ignore[attr-defined]
+                        timeout=_TERMINATION_LIMIT_SECONDS
+                    )
+                except BaseException as error:
+                    remember_control_flow(error)
+                group_gone = False
+                identity_released = False
+                try:
+                    group_gone = not self._process.tree_exists()  # type: ignore[attr-defined]
+                    identity_released = self._process.identity_released
+                except BaseException as error:
+                    remember_control_flow(error)
+                cleanup_complete = False
+                if group_gone and identity_released:
+                    try:
+                        cleanup_complete = _remove_private_home(self._home)
+                    except BaseException as error:
+                        remember_control_flow(error)
+                with self._lifecycle_lock:
+                    cleanup_complete = cleanup_complete and self._connection is None
+                    self._state = (
+                        WorkerGenerationState.DEAD
+                        if cleanup_complete
+                        else WorkerGenerationState.CLEANUP_REQUIRED
+                    )
+                if deferred_control_flow is not None:
+                    raise deferred_control_flow
+                return
 
             try:
                 deadline = time.monotonic() + _TERMINATION_LIMIT_SECONDS

@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+if os.name == "nt":
+    try:
+        from vibecad import _file_compat as _windows_files
+    except ImportError:  # pragma: no cover - fail-closed packaging boundary
+        _windows_files = None
+else:
+    _windows_files = None
+
 __all__ = ("PreviewBinding", "PreviewCoordinator", "PreviewError")
 
 _PROJECT_ID = re.compile(r"project_[0-9a-f]{32}")
@@ -1097,6 +1105,62 @@ class PreviewCoordinator:
         _identifier(expected_digest, _DIGEST)
         if not 0 <= expected_size <= _MAX_ATTESTED_FILE_BYTES:
             _invalid()
+        if os.name == "nt":
+            if _windows_files is None:
+                _invalid()
+            descriptor = -1
+            try:
+                path = Path(local_path)
+                if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+                    _invalid()
+                descriptor, capability = _windows_files.open_private_file(
+                    path,
+                    create=False,
+                    read_write=False,
+                )
+                before = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_nlink != 1
+                    or before.st_size != expected_size
+                ):
+                    _invalid()
+                digest = hashlib.sha256()
+                offset = 0
+                while offset < expected_size:
+                    chunk = _windows_files.pread(
+                        descriptor,
+                        min(expected_size - offset, _ATTEST_READ_BYTES),
+                        offset,
+                    )
+                    if not chunk:
+                        _invalid()
+                    digest.update(chunk)
+                    offset += len(chunk)
+                if _windows_files.pread(descriptor, 1, expected_size):
+                    _invalid()
+                current = _windows_files.capture_windows_fd(
+                    descriptor,
+                    directory=False,
+                    generation_token=capability.generation_token,
+                )
+                after = os.fstat(descriptor)
+                if (
+                    current != capability
+                    or _windows_files.validate_windows_path(capability, directory=False) != path
+                    or (after.st_size, after.st_mtime_ns, after.st_nlink)
+                    != (before.st_size, before.st_mtime_ns, before.st_nlink)
+                    or not hmac.compare_digest(digest.hexdigest(), expected_digest)
+                ):
+                    _invalid()
+            except PreviewError:
+                raise
+            except (TypeError, ValueError):
+                _invalid()
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            return
         flags = os.O_RDONLY
         for name in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
             value = getattr(os, name, 0)

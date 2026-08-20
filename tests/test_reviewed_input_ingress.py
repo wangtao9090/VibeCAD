@@ -7,6 +7,7 @@ import io
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from tests.test_intent_bridge_freecad_part_file_import_adapter import (
     _graph as import_graph,
 )
 from tests.test_intent_rules_planar_mechanical_v1 import _graph as planar_visual_graph
+from vibecad import _file_compat
 from vibecad.application.agent import AgentApplication
 from vibecad.application.reviewed_input_ingress import (
     REVIEWED_INPUT_CATALOG_DIRECTORY,
@@ -65,6 +67,8 @@ _PLANAR_VISUAL = encode_visual_feature_graph(planar_visual_graph(1))
 def _private(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True)
     path.chmod(0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
     return path
 
 
@@ -211,6 +215,7 @@ def _store(root: Path) -> ReviewedInputCatalogStore:
             "place_or_edit_image_plane",
         ),
     ),
+    ids=("brep", "iges", "step", "png", "jpeg"),
 )
 def test_closed_kind_descriptor_derives_exact_product_authority(
     tmp_path: Path,
@@ -359,7 +364,12 @@ def test_store_seals_exact_bytes_and_fd_then_cleans_run_and_catalog(tmp_path: Pa
     source = tmp_path / "source.png"
     source.write_bytes(_PNG)
     source.chmod(0o600)
-    source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(source)
+    source_fd = os.open(
+        source,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
     store = _store(root)
     try:
         receipt = store.seal(
@@ -412,13 +422,19 @@ def test_store_seals_exact_bytes_and_fd_then_cleans_run_and_catalog(tmp_path: Pa
     )
     catalog_root = root / REVIEWED_INPUT_CATALOG_DIRECTORY
     catalog = next(path for path in catalog_root.iterdir() if path.name.startswith("catalog_"))
-    assert stat.S_IMODE(catalog.lstat().st_mode) == 0o700
+    if sys.platform == "win32":
+        _file_compat.capture_windows_path(catalog, directory=True)
+    else:
+        assert stat.S_IMODE(catalog.lstat().st_mode) == 0o700
     assert set(path.name for path in catalog.iterdir()) == {
         REVIEWED_INPUT_CATALOG_MANIFEST,
         *(record.artifact_id for record in receipt.records),
     }
     for path in catalog.iterdir():
-        assert stat.S_IMODE(path.lstat().st_mode) == 0o600
+        if sys.platform == "win32":
+            _file_compat.capture_windows_path(path, directory=False)
+        else:
+            assert stat.S_IMODE(path.lstat().st_mode) == 0o600
     manifest = (catalog / REVIEWED_INPUT_CATALOG_MANIFEST).read_bytes()
     assert (
         manifest
@@ -444,14 +460,24 @@ def test_store_seals_exact_bytes_and_fd_then_cleans_run_and_catalog(tmp_path: Pa
         path for path in catalog_root.iterdir() if path.name.startswith(".run_")
     )
     assert len(run_directories) == 1
-    duplicate = lease.duplicate_directory_fd()
-    try:
-        assert set(os.listdir(duplicate)) == {
+    if sys.platform == "win32":
+        capability = _file_compat.WindowsPathCapability.from_mapping(
+            lease.windows_capability_mapping()
+        )
+        duplicate_path = _file_compat.validate_windows_path(capability, directory=True)
+        assert {path.name for path in duplicate_path.iterdir()} == {
             REVIEWED_ARTIFACT_MANIFEST_NAME,
             *(record.artifact_id for record in receipt.records),
         }
-    finally:
-        os.close(duplicate)
+    else:
+        duplicate = lease.duplicate_directory_fd()
+        try:
+            assert set(os.listdir(duplicate)) == {
+                REVIEWED_ARTIFACT_MANIFEST_NAME,
+                *(record.artifact_id for record in receipt.records),
+            }
+        finally:
+            os.close(duplicate)
     lease.close()
     assert not tuple(path for path in catalog_root.iterdir() if path.name.startswith(".run_"))
 
@@ -487,17 +513,25 @@ def test_seal_failure_removes_partial_private_stage(
 ) -> None:
     root = _private(tmp_path / "data")
     store = _store(root)
-    original = ingress_module._write_file  # noqa: SLF001
+    original = (
+        ingress_module._windows_write_file  # noqa: SLF001
+        if sys.platform == "win32"
+        else ingress_module._write_file  # noqa: SLF001
+    )
     calls = 0
 
-    def fail_second(directory_fd: int, name: str, payload: bytes) -> None:
+    def fail_second(directory_fd: object, name: str, payload: bytes) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("synthetic host write failure")
         original(directory_fd, name, payload)
 
-    monkeypatch.setattr(ingress_module, "_write_file", fail_second)
+    monkeypatch.setattr(
+        ingress_module,
+        "_windows_write_file" if sys.platform == "win32" else "_write_file",
+        fail_second,
+    )
     with pytest.raises(ReviewedInputIngressError) as caught:
         store.seal(
             task_id=_TASK_ID,
@@ -548,7 +582,10 @@ def test_ingress_rejects_digest_budget_and_nonprivate_fd(tmp_path: Path) -> None
     source = tmp_path / "public.step"
     source.write_bytes(_STEP)
     source.chmod(0o644)
-    source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    source_fd = os.open(
+        source,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         with pytest.raises(ReviewedInputIngressError) as fd_failure:
             store.seal(

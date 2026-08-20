@@ -19,19 +19,28 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / ".github/scripts/generate_freecad_reviewed_release_attestation.py"
 
 _LOCK_HOLDER = """
-import fcntl
 import os
 import sys
+from pathlib import Path
 
-flags = (
-    os.O_RDONLY
-    | getattr(os, "O_CLOEXEC", 0)
-    | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
-descriptor = os.open(sys.argv[1], flags)
-mode = {"exclusive": fcntl.LOCK_EX, "shared": fcntl.LOCK_SH}[sys.argv[2]]
-fcntl.flock(descriptor, mode)
+from vibecad._file_compat import LOCK_EX, LOCK_SH, flock, open_private_file
+
+if sys.platform == "win32":
+    descriptor, _capability = open_private_file(
+        Path(sys.argv[1]) / ".vibecad-reviewed-release-attestation.lock",
+        create=True,
+        read_write=True,
+    )
+else:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(sys.argv[1], flags)
+mode = {"exclusive": LOCK_EX, "shared": LOCK_SH}[sys.argv[2]]
+flock(descriptor, mode)
 sys.stdout.buffer.write(b"locked\\n")
 sys.stdout.buffer.flush()
 sys.stdin.buffer.read(1)
@@ -283,6 +292,31 @@ def test_check_mode_compares_exact_bytes_without_any_write(
     }
 
 
+def test_windows_stage_flushes_exact_bytes_without_posix_fchmod(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(generator.sys, "platform", "win32")
+    monkeypatch.setattr(
+        generator.os,
+        "fchmod",
+        lambda *_args: pytest.fail("Windows staging must not require POSIX fchmod"),
+    )
+
+    staged = generator._stage_file(
+        directory=tmp_path,
+        name="attestation.json",
+        raw=b'{"canonical":true}',
+    )
+
+    try:
+        assert staged.parent == tmp_path
+        assert staged.read_bytes() == b'{"canonical":true}'
+    finally:
+        staged.unlink()
+
+
 def test_pair_publication_restores_the_old_resource_if_the_pin_replace_fails(
     generator,
     monkeypatch: pytest.MonkeyPatch,
@@ -360,6 +394,36 @@ def test_arm_publication_preserves_the_x86_resource_and_sibling_pin(
     assert generator._decode_canonical_pins(pins.read_bytes()) == {
         ("0.10.0", "macos.arm64"): arm_digest,
         ("0.10.0", "macos.x86_64"): x86_digest,
+    }
+
+
+def test_windows_publication_selects_a_fixed_resource_and_preserves_macos_pins(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    directory, _x86_resource, _arm_resource, pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    mac_digest = hashlib.sha256(b"mac").hexdigest()
+    windows_digest = hashlib.sha256(b"windows").hexdigest()
+    pins.write_bytes(generator._render_pins({("0.10.0", "macos.x86_64"): mac_digest}))
+    monkeypatch.setattr(generator, "_platform_id", lambda: "windows.x86_64")
+    result = SimpleNamespace(
+        release_version="0.10.0",
+        resource_sha256=windows_digest,
+        runtime_platform_id="windows.x86_64",
+    )
+
+    platform_id, selected_resource, updated_pins = generator._current_platform_publication(result)
+
+    assert platform_id == "windows.x86_64"
+    assert selected_resource == (
+        directory / "freecad-reviewed-release-attestation-windows-x86_64-v1.json"
+    )
+    assert generator._decode_canonical_pins(updated_pins) == {
+        ("0.10.0", "macos.x86_64"): mac_digest,
+        ("0.10.0", "windows.x86_64"): windows_digest,
     }
 
 
@@ -504,7 +568,13 @@ def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_
         native_root = Path(os.environ["FREECAD_USER_TEMP"])
         assert native_root != Path("caller-value")
         assert native_root.is_dir()
-        assert native_root.stat().st_mode & 0o777 == 0o700
+        if sys.platform == "win32":
+            assert generator.capture_windows_path(
+                native_root,
+                directory=True,
+            ).path == str(native_root)
+        else:
+            assert native_root.stat().st_mode & 0o777 == 0o700
         events.append("discover")
         return discovery
 

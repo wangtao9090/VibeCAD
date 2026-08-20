@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibecad import __version__
+from vibecad import _file_compat as fcntl
 
 _BUNDLE_ID = "org.freecad.FreeCAD"
 _FREECAD_VERSION = "1.1.3"
@@ -57,6 +57,14 @@ _CONFIG_KEYS = frozenset(
 
 class ExternalFreeCADError(RuntimeError):
     """Actionable but non-reflective external-host failure."""
+
+
+def _require_macos_pilot() -> None:
+    if sys.platform != "darwin":
+        raise ExternalFreeCADError(
+            "the external FreeCAD .app pilot is available only on macOS; "
+            "use the managed FreeCAD runtime on this platform"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +180,7 @@ def _has_private_user_ancestor(path: Path) -> bool:
 
 
 def inspect_freecad_app(value: object) -> ExternalFreeCADHost:
+    _require_macos_pilot()
     if type(value) not in {str, type(Path("/"))}:
         raise ExternalFreeCADError("--freecad-app requires an absolute .app path")
     app = Path(value)

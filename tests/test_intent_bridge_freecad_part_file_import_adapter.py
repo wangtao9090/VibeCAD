@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from vibecad import _file_compat
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
     BridgeBudget,
@@ -495,6 +496,8 @@ def test_host_owned_stager_is_bounded_exact_and_rejects_symlink(tmp_path: Path) 
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
     root.chmod(0o700)
+    if os.name == "nt":
+        _file_compat.set_private_dacl(root)
     payload = b"exact staged payload"
     stager = HostOwnedImportStager(root)
     lease = stager.stage_exact(
@@ -534,12 +537,15 @@ def test_real_freecad_part_file_import_batch(tmp_path: Path) -> None:
     if not runtime_status.engine_compatible(runtime_python):
         pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
 
+    source_root = Path(__file__).parents[1] / "src"
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
     export_code = f"""
 import os, sys
 from pathlib import Path
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
+sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD as App
 import Part
 root = Path({str(artifact_root)!r})
@@ -613,13 +619,15 @@ App.closeDocument(doc.Name)
     staging_root = tmp_path / "staging"
     staging_root.mkdir(mode=0o700)
     staging_root.chmod(0o700)
+    if os.name == "nt":
+        _file_compat.set_private_dacl(staging_root)
     model_path = tmp_path / "part-file-imports.FCStd"
-    source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import dataclasses, hashlib, json, os, sys, zipfile
 from pathlib import Path
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD as App
 from vibecad.intent_bridge.contracts import DocumentRef
 from vibecad.parametric.freecad_part_file_import_rules import (

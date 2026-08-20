@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from vibecad._file_compat import set_private_dacl
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "freecad" / "VibeCAD"))
 
@@ -567,9 +569,13 @@ def test_fix04_review_attestor_requires_exact_owned_single_link_regular_file(
     path.parent.mkdir(parents=True)
     if file_shape == "regular":
         path.write_bytes(content)
+        if sys.platform == "win32":
+            set_private_dacl(path)
     else:
         target = tmp_path / f"{file_shape}-target.FCStd"
         target.write_bytes(content)
+        if sys.platform == "win32":
+            set_private_dacl(target)
         if file_shape == "symlink":
             path.symlink_to(target)
         else:

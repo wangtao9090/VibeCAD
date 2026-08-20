@@ -287,7 +287,7 @@ class AgentApplication:
         except Exception:
             raise TypeError("invalid AgentApplication composition") from None
         if not (
-            sys.platform == "darwin"
+            sys.platform in {"darwin", "win32"}
             and type(layout) is ApplicationDataLayout
             and type(lease_manager) is ResourceLeaseManager
             and type(task_store) is TaskRunStore
@@ -477,10 +477,13 @@ class AgentApplication:
         visual_provider_factory: Callable[[], object] = _default_visual_provider_factory,
     ) -> AgentApplication:
         layout = ApplicationDataLayout.open(data_root)
-        leases = ResourceLeaseManager(
-            layout.locks,
-            trust=LeaseRootTrust.TRUSTED_LOCAL,
-        )
+        try:
+            leases = ResourceLeaseManager(
+                layout.locks,
+                trust=LeaseRootTrust.TRUSTED_LOCAL,
+            )
+        except LeaseError:
+            raise TypeError("invalid AgentApplication composition") from None
         return cls.from_captured_layout(
             layout=layout,
             lease_manager=leases,
@@ -492,7 +495,9 @@ class AgentApplication:
     @staticmethod
     def execution_capabilities() -> dict[str, str | bool]:
         return {
-            "headless": ("verified" if sys.platform == "darwin" else "unsupported_platform"),
+            "headless": (
+                "verified" if sys.platform in {"darwin", "win32"} else "unsupported_platform"
+            ),
             "offscreen_gui": "planned_unavailable",
             "interactive_gui": "planned_unavailable",
             "daemon": False,

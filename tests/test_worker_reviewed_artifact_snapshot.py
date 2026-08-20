@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,12 @@ from tests.test_freecad_worker import (
     _candidate_rig,
     _inspect_program,
     _process,
+)
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_path,
+    set_private_dacl,
+    validate_windows_path,
 )
 from vibecad.execution.adapter import AdapterError
 from vibecad.execution.freecad_reviewed_artifact_inputs import (
@@ -110,7 +117,13 @@ def _snapshot_directory(
     task_id: str = _TASK_ID,
     project_id: str = _PROJECT_ID,
     base_revision: str = _BASE_REVISION,
-) -> tuple[ReviewedArtifactCatalogSnapshot, Path, int, dict[str, object]]:
+) -> tuple[
+    ReviewedArtifactCatalogSnapshot,
+    Path,
+    int,
+    WindowsPathCapability | None,
+    dict[str, object],
+]:
     snapshot = ReviewedArtifactCatalogSnapshot(
         task_id=task_id,
         project_id=project_id,
@@ -132,10 +145,18 @@ def _snapshot_directory(
         path = directory / name
         path.write_bytes(payload)
         path.chmod(0o600)
-    descriptor = os.open(
-        directory,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-    )
+        if sys.platform == "win32":
+            set_private_dacl(path)
+    capability: WindowsPathCapability | None = None
+    if sys.platform == "win32":
+        set_private_dacl(directory)
+        descriptor = -1
+        capability = capture_windows_path(directory, directory=True)
+    else:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
     envelope: dict[str, object] = {
         "kind": "reviewed_artifact_snapshot_v1",
         "schema_version": 1,
@@ -145,7 +166,34 @@ def _snapshot_directory(
         "run_id": snapshot.run_id,
         "catalog_sha256": snapshot.catalog_sha256,
     }
-    return snapshot, directory, descriptor, envelope
+    return snapshot, directory, descriptor, capability, envelope
+
+
+def _open_snapshot_resolver(
+    descriptor: int,
+    capability: WindowsPathCapability | None,
+    envelope: dict[str, object],
+):
+    return _open_artifact_run_resolver(
+        descriptor,
+        envelope,
+        directory_capability=capability,
+    )
+
+
+def _assert_snapshot_authority_live(
+    descriptor: int,
+    capability: WindowsPathCapability | None,
+) -> None:
+    if capability is None:
+        assert os.fstat(descriptor).st_mode
+    else:
+        validate_windows_path(capability, directory=True)
+
+
+def _close_snapshot_authority(descriptor: int) -> None:
+    if descriptor >= 0:
+        os.close(descriptor)
 
 
 def _resolve(resolver, token):
@@ -203,12 +251,12 @@ def test_execution_cursor_closes_on_first_failure_and_rejects_rebinding() -> Non
     assert resource.close_count == 1
 
 
-def test_worker_opens_exact_snapshot_and_keeps_original_descriptor_host_owned(
+def test_worker_opens_exact_snapshot_and_keeps_original_authority_host_owned(
     tmp_path: Path,
 ) -> None:
-    snapshot, _directory, descriptor, envelope = _snapshot_directory(tmp_path)
+    snapshot, _directory, descriptor, capability, envelope = _snapshot_directory(tmp_path)
     try:
-        resolver, token = _open_artifact_run_resolver(descriptor, envelope)
+        resolver, token = _open_snapshot_resolver(descriptor, capability, envelope)
         context = _resolve(resolver, token).artifact_context
 
         assert resolver.catalog_sha256 == snapshot.catalog_sha256
@@ -220,11 +268,11 @@ def test_worker_opens_exact_snapshot_and_keeps_original_descriptor_host_owned(
             )
             == _PAYLOAD
         )
-        assert os.fstat(descriptor).st_mode
+        _assert_snapshot_authority_live(descriptor, capability)
 
         resolver.close()
         resolver.close()
-        assert os.fstat(descriptor).st_mode
+        _assert_snapshot_authority_live(descriptor, capability)
         with pytest.raises(ReviewedArtifactInputError) as closed:
             context.artifacts.read(
                 context.artifact_document,
@@ -232,7 +280,7 @@ def test_worker_opens_exact_snapshot_and_keeps_original_descriptor_host_owned(
             )
         assert closed.value.code is ReviewedArtifactInputErrorCode.CLOSED
     finally:
-        os.close(descriptor)
+        _close_snapshot_authority(descriptor)
 
 
 @pytest.mark.parametrize("mutation", ("payload", "extra", "envelope"))
@@ -240,32 +288,36 @@ def test_worker_snapshot_tamper_fails_before_resolver_is_returned(
     mutation: str,
     tmp_path: Path,
 ) -> None:
-    _snapshot, directory, descriptor, envelope = _snapshot_directory(tmp_path)
+    _snapshot, directory, descriptor, capability, envelope = _snapshot_directory(tmp_path)
     if mutation == "payload":
         (directory / "artifact_step").write_bytes(b"tampered")
         (directory / "artifact_step").chmod(0o600)
     elif mutation == "extra":
         (directory / "unexpected").write_bytes(b"unexpected")
         (directory / "unexpected").chmod(0o600)
+        if sys.platform == "win32":
+            set_private_dacl(directory / "unexpected")
     else:
         envelope["run_id"] = "artifact_run_other"
     try:
         with pytest.raises(_ServiceError) as failure:
-            _open_artifact_run_resolver(descriptor, envelope)
+            _open_snapshot_resolver(descriptor, capability, envelope)
         assert failure.value.code.value == "integrity_failure"
     finally:
-        os.close(descriptor)
+        _close_snapshot_authority(descriptor)
 
 
 def test_live_snapshot_mutation_is_rejected_after_begin(tmp_path: Path) -> None:
-    _snapshot, directory, descriptor, envelope = _snapshot_directory(tmp_path)
+    _snapshot, directory, descriptor, capability, envelope = _snapshot_directory(tmp_path)
     resolver = None
     try:
-        resolver, token = _open_artifact_run_resolver(descriptor, envelope)
+        resolver, token = _open_snapshot_resolver(descriptor, capability, envelope)
         context = _resolve(resolver, token).artifact_context
         extra = directory / "late-entry"
         extra.write_bytes(b"late")
         extra.chmod(0o600)
+        if sys.platform == "win32":
+            set_private_dacl(extra)
 
         with pytest.raises(ReviewedArtifactInputError) as failure:
             context.artifacts.read(
@@ -276,13 +328,13 @@ def test_live_snapshot_mutation_is_rejected_after_begin(tmp_path: Path) -> None:
     finally:
         if resolver is not None:
             resolver.close()
-        os.close(descriptor)
+        _close_snapshot_authority(descriptor)
 
 
-def test_program_begin_requires_snapshot_mapping_iff_exactly_one_descriptor(
+def test_program_begin_requires_snapshot_mapping_and_exact_platform_authority(
     tmp_path: Path,
 ) -> None:
-    _snapshot, _directory, descriptor, envelope = _snapshot_directory(tmp_path)
+    _snapshot, _directory, descriptor, capability, envelope = _snapshot_directory(tmp_path)
     service = WorkerService(_GENERATION)
     legacy = {"session_id": "x", "candidate_id": "y", "program": {}}
     artifact = {**legacy, "artifact_snapshot": envelope}
@@ -291,21 +343,45 @@ def test_program_begin_requires_snapshot_mapping_iff_exactly_one_descriptor(
         "artifact_snapshot": {**envelope, "schema_version": True},
     }
     try:
-        for params, descriptors in (
-            (legacy, (descriptor,)),
-            (artifact, ()),
-            (artifact, (descriptor, descriptor)),
-            (boolean_schema, (descriptor,)),
-        ):
+        if capability is None:
+            invalid = (
+                (legacy, (descriptor,)),
+                (artifact, ()),
+                (artifact, (descriptor, descriptor)),
+                (boolean_schema, (descriptor,)),
+            )
+            ready_params: dict[str, object] = {}
+            ready_descriptors = (descriptor,)
+        else:
+            capability_mapping = capability.to_mapping()
+            authorized = {
+                **artifact,
+                "artifact_path_capability": capability_mapping,
+            }
+            invalid = (
+                ({**legacy, "artifact_path_capability": capability_mapping}, ()),
+                (artifact, ()),
+                ({**authorized, "unexpected": True}, ()),
+                (
+                    {
+                        **boolean_schema,
+                        "artifact_path_capability": capability_mapping,
+                    },
+                    (),
+                ),
+            )
+            ready_params = {"artifact_path_capability": capability_mapping}
+            ready_descriptors = ()
+        for params, descriptors in invalid:
             with pytest.raises(_ServiceError) as failure:
                 service.dispatch("program.begin", params, descriptors)
             assert failure.value.code.value == "invalid_request"
         with pytest.raises(_ServiceError) as unexpected:
-            service.dispatch("worker.ready", {}, (descriptor,))
+            service.dispatch("worker.ready", ready_params, ready_descriptors)
         assert unexpected.value.code.value == "invalid_request"
     finally:
         service.close()
-        os.close(descriptor)
+        _close_snapshot_authority(descriptor)
 
 
 @pytest.mark.parametrize("failure", (False, True), ids=("done", "failure"))
@@ -313,7 +389,7 @@ def test_program_begin_binds_resolver_to_real_cursor_until_done(
     tmp_path: Path,
     failure: bool,
 ) -> None:
-    snapshot, _directory, descriptor, envelope = _snapshot_directory(tmp_path)
+    snapshot, _directory, descriptor, capability, envelope = _snapshot_directory(tmp_path)
     source = ModelProgram(
         task_id=snapshot.task_id,
         base_revision=snapshot.base_revision,
@@ -386,16 +462,19 @@ def test_program_begin_binds_resolver_to_real_cursor_until_done(
         capability_id=candidate_id,
         value=object(),
     )
+    begin_params = {
+        "session_id": session_id,
+        "candidate_id": candidate_id,
+        "program": source.to_mapping(),
+        "artifact_snapshot": envelope,
+    }
+    if capability is not None:
+        begin_params["artifact_path_capability"] = capability.to_mapping()
     try:
         begun = service.dispatch(
             "program.begin",
-            {
-                "session_id": session_id,
-                "candidate_id": candidate_id,
-                "program": source.to_mapping(),
-                "artifact_snapshot": envelope,
-            },
-            (descriptor,),
+            begin_params,
+            () if capability is not None else (descriptor,),
         )
         program_id = begun["program_id"]
         assert type(program_id) is str
@@ -423,10 +502,10 @@ def test_program_begin_binds_resolver_to_real_cursor_until_done(
                 MAX_REVIEWED_ARTIFACT_BYTES,
             )
         assert closed.value.code is ReviewedArtifactInputErrorCode.CLOSED
-        assert os.fstat(descriptor).st_mode
+        _assert_snapshot_authority_live(descriptor, capability)
     finally:
         service.close()
-        os.close(descriptor)
+        _close_snapshot_authority(descriptor)
 
 
 @pytest.mark.parametrize("closure", ("session", "shutdown", "connection"))
@@ -471,13 +550,14 @@ def test_service_closes_program_resources_on_every_terminal_path(closure: str) -
     assert resource.close_count == 1
 
 
-def test_proxy_forwards_exact_snapshot_descriptor_without_closing_host_fd(
+def test_proxy_forwards_exact_snapshot_authority_without_invalidating_host_copy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     process, _grandchild = _process(tmp_path, "proxy_idle")
     worker = FreeCadWorker(process)
     descriptor = -1
+    snapshot_capability: WindowsPathCapability | None = None
     calls: list[tuple[dict[str, object], int | None]] = []
     original_request = _WorkerProcess.request
 
@@ -526,7 +606,13 @@ def test_proxy_forwards_exact_snapshot_descriptor_without_closing_host_fd(
             )
             session = worker.create_empty(candidate)
             program = _inspect_program(base_revision=rig.head.revision_id)
-            _snapshot, _directory, descriptor, proxy_envelope = _snapshot_directory(
+            (
+                _snapshot,
+                _directory,
+                descriptor,
+                snapshot_capability,
+                proxy_envelope,
+            ) = _snapshot_directory(
                 tmp_path,
                 task_id=program.task_id,
                 project_id=rig.head.project_id,
@@ -538,18 +624,29 @@ def test_proxy_forwards_exact_snapshot_descriptor_without_closing_host_fd(
                 candidate=candidate,
                 session=session,
                 artifact_snapshot=proxy_envelope,
-                artifact_snapshot_fd=descriptor,
+                artifact_snapshot_fd=None if snapshot_capability is not None else descriptor,
+                artifact_snapshot_capability=(
+                    snapshot_capability.to_mapping()
+                    if snapshot_capability is not None
+                    else None
+                ),
             )
 
             assert len(outcomes) == 1
             assert outcomes[0].result.ok is True
             assert len(calls) == 1
             assert calls[0][0]["artifact_snapshot"] == proxy_envelope
-            assert calls[0][1] == descriptor
-            assert os.fstat(descriptor).st_mode
+            if snapshot_capability is None:
+                assert "artifact_path_capability" not in calls[0][0]
+                assert calls[0][1] == descriptor
+            else:
+                assert calls[0][0]["artifact_path_capability"] == (
+                    snapshot_capability.to_mapping()
+                )
+                assert calls[0][1] is None
+            _assert_snapshot_authority_live(descriptor, snapshot_capability)
             worker.close_session(session)
             worker.release_candidate(candidate)
         finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+            _close_snapshot_authority(descriptor)
             worker.close()

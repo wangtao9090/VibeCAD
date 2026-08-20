@@ -37,16 +37,19 @@ jobs:
           git rev-parse HEAD | Out-File -Encoding ascii "$env:RUNNER_TEMP\windows-evidence\commit.txt"
           Get-ComputerInfo | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 "$env:RUNNER_TEMP\windows-evidence\host.json"
           uv run --frozen ruff check .
-          uv run --frozen pytest -q -m "not slow" `
+          uv run --frozen pytest -q -m "windows_contract and not slow" `
             tests/test_platform.py `
             tests/test_paths.py `
             tests/test_micromamba.py `
             tests/test_freecad_env.py `
             tests/test_status.py `
+            tests/test_local_daemon.py `
             tests/test_installer.py `
+            tests/test_uninstall.py `
             tests/test_workflow_lease.py `
-            tests/test_supervisor.py `
-            tests/test_freecad_worker.py `
+            tests/test_windows_package_cache.py `
+            tests/test_windows_job_runner.py `
+            tests/test_windows_qualification_plan.py `
             --junitxml "$env:RUNNER_TEMP\windows-evidence\contracts.xml"
       - name: Upload Windows contract evidence
         if: always()
@@ -59,7 +62,11 @@ jobs:
   managed:
     if: inputs.phase != 'contracts'
     needs: contracts
-    runs-on: windows-2022
+    # W1 is intentionally excluded from GitHub-hosted Windows runners: those
+    # images run as Administrator with UAC disabled.  These labels bind an
+    # ephemeral, dedicated machine whose runner process uses a standard-user
+    # token and whose LongPathsEnabled value is already 0.
+    runs-on: [self-hosted, Windows, X64, vibecad-w1-standard-user-disposable]
     timeout-minutes: 120
     env:
       VIBECAD_RUN_INTEGRATION: "1"
@@ -68,38 +75,481 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
-      - name: Bind an isolated Windows runtime and evidence root
+      - name: Install the frozen development environment
+        run: uv sync --frozen
+      - name: Bind the disposable default-home qualification context
         shell: pwsh
         run: |
-          "VIBECAD_HOME=$env:RUNNER_TEMP\vibecad-windows-runtime" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
-          "WINDOWS_EVIDENCE=$env:RUNNER_TEMP\windows-evidence" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
-          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\windows-evidence" | Out-Null
-      - run: uv sync --frozen
+          $env:WINDOWS_EVIDENCE = Join-Path $env:RUNNER_TEMP "windows-evidence"
+          $env:VIBECAD_HOSTILE_ROOT = Join-Path $env:RUNNER_TEMP "vibecad-hostile-environment"
+          "WINDOWS_EVIDENCE=$env:WINDOWS_EVIDENCE" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_HOSTILE_ROOT=$env:VIBECAD_HOSTILE_ROOT" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force $env:WINDOWS_EVIDENCE | Out-Null
+
+          if (Test-Path Env:VIBECAD_HOME) {
+            throw "the disposable W1 runner must not override the default VIBECAD_HOME"
+          }
+          if (Test-Path Env:VIBECAD_FREECAD_ENV) {
+            throw "the disposable W1 runner must not inherit an external FreeCAD override"
+          }
+          $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
+          $defaultHome = (& $python -c "from vibecad.runtime.paths import vibecad_home; print(vibecad_home().resolve(strict=False))").Trim()
+          if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            throw "the disposable W1 runner does not expose LOCALAPPDATA"
+          }
+          $expectedDefaultHome = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "VibeCAD"))
+          if (-not $defaultHome.Equals($expectedDefaultHome, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "the W1 runtime path helper did not select the real default LOCALAPPDATA VibeCAD home"
+          }
+          $managedPrefix = (& $python -c "from vibecad.runtime.paths import env_prefix; print(env_prefix().resolve(strict=False))").Trim()
+          $pathBudget = (& $python -c "import json; from vibecad.runtime import spec; print(json.dumps({'prefix': spec.WINDOWS_MAX_ENV_PREFIX_LENGTH, 'member': spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER}))") | ConvertFrom-Json
+          $defaultHomeExists = (& $python -c "import os; from vibecad.runtime.paths import vibecad_home; print('1' if os.path.lexists(vibecad_home()) else '0')").Trim()
+          if ($defaultHomeExists -ne "0" -or (Test-Path -LiteralPath $defaultHome)) {
+            throw "the dedicated disposable W1 runner default VIBECAD_HOME must not exist before qualification"
+          }
+          if ($managedPrefix.Length -gt [int]$pathBudget.prefix -or ($managedPrefix.Length + 1 + [int]$pathBudget.member) -gt 259) {
+            throw "the default managed prefix exceeds the reviewed legacy-path budget"
+          }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          $longPaths = Get-ItemPropertyValue `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name LongPathsEnabled `
+            -ErrorAction SilentlyContinue
+          if ($null -eq $longPaths) { $longPaths = 0 }
+          [ordered]@{
+            identity = $identity.Name
+            is_elevated = $isElevated
+            long_paths_enabled = [int]$longPaths
+            default_vibecad_home = $defaultHome
+            managed_prefix = $managedPrefix
+            managed_prefix_length = $managedPrefix.Length
+            managed_prefix_budget = [int]$pathBudget.prefix
+            user_profile = $env:USERPROFILE
+            windows_temp = (Join-Path $env:SystemRoot "Temp")
+          } | ConvertTo-Json | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\execution-context.json"
+          if ($isElevated) {
+            throw "W1 must run with a non-elevated token (membership in Administrators is allowed)"
+          }
+          if ([int]$longPaths -ne 0) {
+            throw "W1 must prove the automatic short-cache path with LongPathsEnabled=0"
+          }
+          "VIBECAD_EXPECTED_HOME=$defaultHome" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_EXPECTED_PREFIX=$managedPrefix" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+
+          $hostileBindings = [ordered]@{
+            CONDA_PKGS_DIRS = (Join-Path $env:VIBECAD_HOSTILE_ROOT "conda-pkgs")
+            MAMBA_ROOT_PREFIX = (Join-Path $env:VIBECAD_HOSTILE_ROOT "mamba-root")
+            CONDARC = (Join-Path $env:VIBECAD_HOSTILE_ROOT "condarc")
+            MAMBARC = (Join-Path $env:VIBECAD_HOSTILE_ROOT "mambarc")
+            XDG_CACHE_HOME = (Join-Path $env:VIBECAD_HOSTILE_ROOT "xdg-cache")
+          }
+          $hostileBindings | ConvertTo-Json | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\hostile-environment.json"
+          $canaryInitializer = @'
+          import os
+          from vibecad._file_compat import (
+              capture_windows_fd,
+              capture_windows_path,
+              ensure_private_directory,
+              open_private_file,
+              validate_windows_path,
+          )
+          from vibecad.runtime.status import _ensure_maintenance_write_root
+
+          home = _ensure_maintenance_write_root()
+          home_capability = capture_windows_path(home, directory=True)
+          data = home / "data"
+          data_capability = ensure_private_directory(
+              data,
+              expected_parent=home_capability,
+          )
+          payload = b"preserve-windows-w1-data"
+          descriptor, _capability = open_private_file(
+              data / "qualification-canary.txt",
+              create=True,
+              read_write=True,
+              exclusive=True,
+              expected_parent=data_capability,
+          )
+          try:
+              if os.write(descriptor, payload) != len(payload):
+                  raise OSError("short Windows qualification canary write")
+              os.fsync(descriptor)
+              observed = capture_windows_fd(
+                  descriptor,
+                  directory=False,
+                  generation_token=_capability.generation_token,
+              )
+              if observed != _capability:
+                  raise OSError("Windows qualification canary identity changed")
+          finally:
+              os.close(descriptor)
+          validate_windows_path(_capability, directory=False)
+          '@
+          $canaryInitializer | & $python -B -
+          if ($LASTEXITCODE -ne 0) {
+            throw "the product failed to initialize its ACL-protected home and data canary"
+          }
       - name: Install the current managed FreeCAD runtime
         env:
           VIBECAD_PIP_SPEC: ${{ github.workspace }}
-        run: >-
-          uv run --frozen python -c
-          "from vibecad.runtime.installer import RuntimeInstaller;
-          RuntimeInstaller().install()"
+          CONDA_PKGS_DIRS: ${{ runner.temp }}\vibecad-hostile-environment\conda-pkgs
+          MAMBA_ROOT_PREFIX: ${{ runner.temp }}\vibecad-hostile-environment\mamba-root
+          CONDARC: ${{ runner.temp }}\vibecad-hostile-environment\condarc
+          MAMBARC: ${{ runner.temp }}\vibecad-hostile-environment\mambarc
+          XDG_CACHE_HOME: ${{ runner.temp }}\vibecad-hostile-environment\xdg-cache
+        shell: pwsh
+        run: |
+          $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
+          $cacheRecord = (& $python -c "from vibecad.runtime.paths import package_cache_record; print(package_cache_record())").Trim()
+          if (Test-Path -LiteralPath $cacheRecord) {
+            throw "a package-cache recovery record exists before the fresh W1 install"
+          }
+
+          function Test-CommandArgument([string]$commandLine, [string]$argument) {
+            if ([string]::IsNullOrWhiteSpace($commandLine)) { return $false }
+            $pattern = "(?i)(?:^|\s)" + [regex]::Escape($argument) + "(?=\s|$)"
+            return [regex]::IsMatch($commandLine, $pattern)
+          }
+
+          function Get-CommandArgumentIndex([string]$commandLine, [string]$argument) {
+            if ([string]::IsNullOrWhiteSpace($commandLine)) { return -1 }
+            $pattern = "(?i)(?:^|\s)" + [regex]::Escape($argument) + "(?=\s|$)"
+            $match = [regex]::Match($commandLine, $pattern)
+            return $(if ($match.Success) { $match.Index } else { -1 })
+          }
+
+          function ConvertTo-OperationEvidence($process, [string]$role) {
+            $commandLine = [string]$process.CommandLine
+            $subcommandMatch = [regex]::Match($commandLine, "(?i)(?:^|\s)(create)(?=\s|$)")
+            if (-not $subcommandMatch.Success) { return $null }
+            $createIndex = Get-CommandArgumentIndex $commandLine "create"
+            $noRcIndex = Get-CommandArgumentIndex $commandLine "--no-rc"
+            $rootIndex = Get-CommandArgumentIndex $commandLine "-r"
+            $prefixIndex = Get-CommandArgumentIndex $commandLine "-p"
+            $downloadIndex = Get-CommandArgumentIndex $commandLine "--download-only"
+            $offlineIndex = Get-CommandArgumentIndex $commandLine "--offline"
+            return [pscustomobject][ordered]@{
+              role = $role
+              executable_name = [IO.Path]::GetFileName([string]$process.ExecutablePath)
+              subcommand = $subcommandMatch.Groups[1].Value.ToLowerInvariant()
+              no_rc = (Test-CommandArgument $commandLine "--no-rc")
+              root_option = (Test-CommandArgument $commandLine "-r")
+              prefix_option = (Test-CommandArgument $commandLine "-p")
+              download_only = (Test-CommandArgument $commandLine "--download-only")
+              offline = (Test-CommandArgument $commandLine "--offline")
+              global_options_before_subcommand = ($noRcIndex -ge 0 -and $rootIndex -gt $noRcIndex -and $rootIndex -lt $createIndex)
+              prefix_option_after_subcommand = ($prefixIndex -gt $createIndex)
+              operation_option_after_subcommand = (
+                ($downloadIndex -gt $createIndex) -or ($offlineIndex -gt $createIndex)
+              )
+            }
+          }
+
+          function Protect-EvidenceText([string]$value) {
+            if ($null -eq $value) { return "" }
+            foreach ($binding in @(
+              @{ source = [string]$env:VIBECAD_EXPECTED_HOME; replacement = "%VIBECAD_DEFAULT_HOME%" },
+              @{ source = [string]$env:USERPROFILE; replacement = "%USERPROFILE%" },
+              @{ source = [string]$env:RUNNER_TEMP; replacement = "%RUNNER_TEMP%" },
+              @{ source = [string]$env:GITHUB_WORKSPACE; replacement = "%GITHUB_WORKSPACE%" }
+            )) {
+              if (-not [string]::IsNullOrEmpty($binding.source)) {
+                $value = $value.Replace($binding.source, $binding.replacement, [StringComparison]::OrdinalIgnoreCase)
+              }
+            }
+            return $value
+          }
+
+          $linkerPath = [IO.Path]::GetFullPath((Join-Path $env:VIBECAD_EXPECTED_HOME "runtime\bin\micromamba.exe"))
+          $flatCachePath = [IO.Path]::GetFullPath((Join-Path $env:VIBECAD_EXPECTED_HOME "runtime\bin\micromamba-flat-cache.exe"))
+          $startInfo = [Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $python
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          $startInfo.ArgumentList.Add("-c")
+          $startInfo.ArgumentList.Add("from vibecad.runtime.installer import RuntimeInstaller; RuntimeInstaller().install()")
+          $installer = [Diagnostics.Process]::Start($startInfo)
+          $stdoutTask = $installer.StandardOutput.ReadToEndAsync()
+          $stderrTask = $installer.StandardError.ReadToEndAsync()
+          $observedRoot = $null
+          $observedSchema = $null
+          $observedState = $null
+          $observedHelperPid = $null
+          $flatCacheCommand = $null
+          $linkerCommand = $null
+          $nextProcessPoll = [DateTime]::UtcNow
+          while (-not $installer.HasExited) {
+            if (-not $observedRoot -and (Test-Path -LiteralPath $cacheRecord -PathType Leaf)) {
+              try {
+                $receipt = Get-Content -Raw -LiteralPath $cacheRecord | ConvertFrom-Json
+                if ($receipt.root -and $null -ne $receipt.schema -and $receipt.state -and $receipt.helper_pid) {
+                  $observedRoot = [IO.Path]::GetFullPath([string]$receipt.root)
+                  $observedSchema = $receipt.schema
+                  $observedState = $receipt.state
+                  $observedHelperPid = [int]$receipt.helper_pid
+                }
+              } catch {
+                # The writer may be between atomic receipt generations; retry.
+              }
+            }
+            if ([DateTime]::UtcNow -ge $nextProcessPoll) {
+              $nextProcessPoll = [DateTime]::UtcNow.AddSeconds(1)
+              $micromambaProcesses = Get-CimInstance Win32_Process `
+                -Filter "Name = 'micromamba.exe' OR Name = 'micromamba-flat-cache.exe'" `
+                -ErrorAction SilentlyContinue
+              foreach ($candidate in @($micromambaProcesses)) {
+                if (-not $candidate.ExecutablePath) { continue }
+                $candidatePath = [IO.Path]::GetFullPath([string]$candidate.ExecutablePath)
+                if (-not $flatCacheCommand -and [string]::Equals($candidatePath, $flatCachePath, [StringComparison]::OrdinalIgnoreCase)) {
+                  $flatCacheCommand = ConvertTo-OperationEvidence $candidate "flat-cache-downloader"
+                }
+                if (-not $linkerCommand -and [string]::Equals($candidatePath, $linkerPath, [StringComparison]::OrdinalIgnoreCase)) {
+                  $linkerCommand = ConvertTo-OperationEvidence $candidate "authoritative-linker"
+                }
+              }
+            }
+            Start-Sleep -Milliseconds 200
+          }
+          $installer.WaitForExit()
+          $stdout = Protect-EvidenceText ($stdoutTask.GetAwaiter().GetResult())
+          $stderr = Protect-EvidenceText ($stderrTask.GetAwaiter().GetResult())
+          $stdout | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\installer.stdout.log"
+          $stderr | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\installer.stderr.log"
+          [ordered]@{
+            exit_code = $installer.ExitCode
+            receipt_observed = [bool]$observedRoot
+            observed_receipt = $(if ($observedRoot) {
+              [ordered]@{
+                schema = $observedSchema
+                state = $observedState
+                root = $observedRoot
+                helper_pid = $observedHelperPid
+              }
+            } else { $null })
+            flat_cache_command_observed = [bool]$flatCacheCommand
+            linker_command_observed = [bool]$linkerCommand
+          } | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\installer-result.json"
+          [ordered]@{
+            flat_cache = $flatCacheCommand
+            linker = $linkerCommand
+          } | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\micromamba-commands.json"
+          if ($installer.ExitCode -ne 0) {
+            throw "the managed runtime installer failed with exit code $($installer.ExitCode)"
+          }
+          if (-not $observedRoot) {
+            throw "the managed installer did not publish a complete observable package-cache recovery record"
+          }
+          if (
+            -not $flatCacheCommand -or
+            $flatCacheCommand.subcommand -ne "create" -or
+            -not $flatCacheCommand.no_rc -or
+            -not $flatCacheCommand.root_option -or
+            -not $flatCacheCommand.prefix_option -or
+            -not $flatCacheCommand.download_only -or
+            $flatCacheCommand.offline -or
+            -not $flatCacheCommand.global_options_before_subcommand -or
+            -not $flatCacheCommand.prefix_option_after_subcommand -or
+            -not $flatCacheCommand.operation_option_after_subcommand
+          ) {
+            throw "the observed flat-cache command was not create --download-only with isolated global options"
+          }
+          if (
+            -not $linkerCommand -or
+            $linkerCommand.subcommand -ne "create" -or
+            -not $linkerCommand.no_rc -or
+            -not $linkerCommand.root_option -or
+            -not $linkerCommand.prefix_option -or
+            -not $linkerCommand.offline -or
+            $linkerCommand.download_only -or
+            -not $linkerCommand.global_options_before_subcommand -or
+            -not $linkerCommand.prefix_option_after_subcommand -or
+            -not $linkerCommand.operation_option_after_subcommand
+          ) {
+            throw "the observed authoritative-link command was not create --offline with isolated global options"
+          }
+          "VIBECAD_OBSERVED_PACKAGE_CACHE=$observedRoot" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_PACKAGE_CACHE_SCHEMA=$observedSchema" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_PACKAGE_CACHE_STATE=$observedState" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+          "VIBECAD_PACKAGE_CACHE_HELPER_PID=$observedHelperPid" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+      - name: Verify the isolated package transaction
+        shell: pwsh
+        run: |
+          $cacheRecord = uv run --frozen python -c "from vibecad.runtime.paths import package_cache_record; print(package_cache_record())"
+          if ([int]$env:VIBECAD_PACKAGE_CACHE_SCHEMA -ne 1) { throw "the observed package-cache receipt schema is not 1" }
+          if ($env:VIBECAD_PACKAGE_CACHE_STATE -ne "active") { throw "the observed package-cache receipt was not active" }
+          $shortRoot = [IO.Path]::GetFullPath($env:VIBECAD_OBSERVED_PACKAGE_CACHE)
+          if (-not [IO.Path]::IsPathRooted($shortRoot) -or $shortRoot -eq [IO.Path]::GetPathRoot($shortRoot)) {
+            throw "the observed package-cache root is unsafe"
+          }
+          $staging = Join-Path $shortRoot "tmp\m25"
+          $downloadPrefix = Join-Path $shortRoot "tmp\d25"
+          if ($shortRoot.Length -gt 40) { throw "the physical package-cache root exceeds the reviewed path budget" }
+          if (Test-Path -LiteralPath $shortRoot) { throw "the short physical package cache remains after installation" }
+          if (Test-Path -LiteralPath $staging) { throw "the 2.5 staging root remains after installation" }
+          if (Test-Path -LiteralPath $downloadPrefix) { throw "the 2.5 download prefix remains after installation" }
+          if (Test-Path -LiteralPath $cacheRecord) { throw "the package-cache recovery record remains after installation" }
+          if (Test-Path -LiteralPath $env:VIBECAD_HOSTILE_ROOT) { throw "ambient package-manager settings escaped into the hostile canary root" }
+          $commands = Get-Content -Raw -LiteralPath "$env:WINDOWS_EVIDENCE\micromamba-commands.json" | ConvertFrom-Json
+          if (
+            $commands.flat_cache.subcommand -ne "create" -or
+            -not $commands.flat_cache.download_only -or
+            $commands.flat_cache.offline -or
+            -not $commands.flat_cache.global_options_before_subcommand -or
+            -not $commands.flat_cache.prefix_option_after_subcommand -or
+            -not $commands.flat_cache.operation_option_after_subcommand -or
+            $commands.linker.subcommand -ne "create" -or
+            -not $commands.linker.offline -or
+            $commands.linker.download_only -or
+            -not $commands.linker.global_options_before_subcommand -or
+            -not $commands.linker.prefix_option_after_subcommand -or
+            -not $commands.linker.operation_option_after_subcommand
+          ) {
+            throw "the persisted micromamba command evidence does not match the observed transaction"
+          }
+          $helperLeaks = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'vibecad\.runtime\.windows_package_cache' -and
+            $_.CommandLine -match '--cleanup-helper'
+          }
+          $jobRunnerLeaks = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'windows_job_runner\.py' -and
+            $_.CommandLine -match '(?:^|\s)--gate(?:\s|$)'
+          }
+          if ($helperLeaks) {
+            $helperLeaks | Select-Object ProcessId, Name | ConvertTo-Json |
+              Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\package-cache-helper-leaks.json"
+            throw "the package-cache cleanup helper remains after installation"
+          }
+          if ($jobRunnerLeaks) {
+            $jobRunnerLeaks | Select-Object ProcessId, Name | ConvertTo-Json |
+              Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\windows-job-runner-leaks.json"
+            throw "a windows_job_runner.py --gate coordinator remains after installation"
+          }
+          [ordered]@{
+            short_cache_root = $shortRoot
+            short_cache_root_length = $shortRoot.Length
+            download_staging = $staging
+            download_prefix = $downloadPrefix
+            observed_commands = $commands
+            receipt_schema = $env:VIBECAD_PACKAGE_CACHE_SCHEMA
+            observed_receipt_state = $env:VIBECAD_PACKAGE_CACHE_STATE
+            observed_helper_pid = [int]$env:VIBECAD_PACKAGE_CACHE_HELPER_PID
+            short_cache_removed = $true
+            download_staging_removed = $true
+            download_prefix_removed = $true
+            recovery_record_removed = $true
+            helper_process_removed = $true
+            hostile_environment_ignored = $true
+          } | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\package-transaction.json"
       - name: Bind and fingerprint the managed runtime
         shell: pwsh
         run: |
           $managedPython = uv run --frozen python -c "from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())"
           $managedPrefix = uv run --frozen python -c "from vibecad.runtime.paths import env_prefix; print(env_prefix().resolve())"
+          $micromamba = uv run --frozen python -c "from vibecad.runtime.paths import micromamba_path; print(micromamba_path().resolve())"
+          $flatCacheMicromamba = uv run --frozen python -c "from vibecad.runtime.paths import flat_cache_micromamba_path; print(flat_cache_micromamba_path().resolve())"
+          if (-not [string]::Equals([IO.Path]::GetFullPath($managedPrefix), [IO.Path]::GetFullPath($env:VIBECAD_EXPECTED_PREFIX), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "the installed prefix is not the disposable runner default managed prefix"
+          }
+          $mainVersion = (& $micromamba --version | Select-Object -Last 1).Trim()
+          $flatVersion = (& $flatCacheMicromamba --version | Select-Object -Last 1).Trim()
+          $mainSha256 = (Get-FileHash -LiteralPath $micromamba -Algorithm SHA256).Hash.ToLowerInvariant()
+          $flatSha256 = (Get-FileHash -LiteralPath $flatCacheMicromamba -Algorithm SHA256).Hash.ToLowerInvariant()
+          $viskoresMetadata = Join-Path $managedPrefix "conda-meta\viskores-1.1.1-cpu_h4b717ef_1.json"
+          if (-not (Test-Path -LiteralPath $viskoresMetadata -PathType Leaf)) {
+            throw "the managed runtime did not link the exact reviewed Viskores build"
+          }
+          $viskores = Get-Content -Raw -LiteralPath $viskoresMetadata | ConvertFrom-Json
+          if ($viskores.name -ne "viskores" -or $viskores.version -ne "1.1.1" -or $viskores.build -ne "cpu_h4b717ef_1") {
+            throw "the Viskores conda metadata does not match the exact reviewed build"
+          }
+          $condaMetadata = @(Get-ChildItem -LiteralPath (Join-Path $managedPrefix "conda-meta") -Filter "*.json" -File)
+          $condaSubdirs = @($condaMetadata | ForEach-Object {
+            (Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).subdir
+          } | Where-Object { $_ } | Sort-Object -Unique)
+          $platformSubdirs = @($condaSubdirs | Where-Object { $_ -ne "noarch" })
+          [ordered]@{
+            metadata_files = $condaMetadata.Count
+            observed_subdirs = $condaSubdirs
+            observed_platform_subdirs = $platformSubdirs
+            viskores_subdir = $viskores.subdir
+          } | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\conda-metadata.json"
+          if ($platformSubdirs.Count -ne 1 -or $platformSubdirs[0] -ne "win-64" -or $viskores.subdir -ne "win-64") {
+            throw "the installed conda metadata does not prove one exact win-64 solve"
+          }
+          $expected = (uv run --frozen python -c "import json,sys; from vibecad.runtime import micromamba; subdir=sys.argv[1]; print(json.dumps({'linker_pin': micromamba.MICROMAMBA_VERSION, 'linker_sha256': micromamba.expected_sha256(subdir, version=micromamba.MICROMAMBA_VERSION), 'flat_pin': micromamba.WINDOWS_FLAT_CACHE_VERSION, 'flat_sha256': micromamba.expected_sha256(subdir, version=micromamba.WINDOWS_FLAT_CACHE_VERSION)}))" $platformSubdirs[0]) | ConvertFrom-Json
+          [ordered]@{
+            linker = [ordered]@{
+              release_pin = $expected.linker_pin
+              expected_sha256 = $expected.linker_sha256
+              observed_version = $mainVersion
+              observed_sha256 = $mainSha256
+            }
+            flat_cache = [ordered]@{
+              release_pin = $expected.flat_pin
+              expected_sha256 = $expected.flat_sha256
+              observed_version = $flatVersion
+              observed_sha256 = $flatSha256
+            }
+          } | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\micromamba-binaries.json"
+          if ($mainVersion -notmatch '^2\.8\.0' -or $mainSha256 -ne $expected.linker_sha256) {
+            throw "the linking engine does not match the exact reviewed micromamba pin and digest"
+          }
+          if ($flatVersion -notmatch '^2\.5\.0' -or $flatSha256 -ne $expected.flat_sha256) {
+            throw "the flat-cache downloader does not match the exact reviewed micromamba pin and digest"
+          }
           "VIBECAD_MANAGED_FREECAD_PYTHON=$managedPython" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
           "VIBECAD_FREECAD_ENV=$managedPrefix" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
-          & $managedPython -c "import json,platform,sys; import FreeCAD; print(json.dumps({'platform':'windows.x86_64','python':sys.version,'windows':platform.version(),'freecad':FreeCAD.Version()},sort_keys=True))" |
-            Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\runtime.json"
-      - name: Managed runtime and direct Worker gate
+          $freecadProbe = (& $managedPython -c "import json,platform,sys; from vibecad.freecad_env import prepare_freecad_import; prepare_freecad_import(); import FreeCAD; print(json.dumps({'sys_platform':sys.platform,'machine':platform.machine(),'python':sys.version,'windows':platform.version(),'freecad':FreeCAD.Version()},sort_keys=True))" | Select-Object -Last 1) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "the managed FreeCAD fingerprint probe failed" }
+          [ordered]@{
+            platform = [ordered]@{
+              sys_platform = $freecadProbe.sys_platform
+              machine = $freecadProbe.machine
+              conda_subdir = $platformSubdirs[0]
+              conda_subdirs = $condaSubdirs
+              conda_metadata_files = $condaMetadata.Count
+            }
+            python = $freecadProbe.python
+            windows = $freecadProbe.windows
+            freecad = $freecadProbe.freecad
+            micromamba_linker = [ordered]@{
+              version = $mainVersion
+              release_pin = $expected.linker_pin
+              sha256 = $mainSha256
+            }
+            micromamba_flat_cache = [ordered]@{
+              version = $flatVersion
+              release_pin = $expected.flat_pin
+              sha256 = $flatSha256
+            }
+            viskores = [ordered]@{
+              version = $viskores.version
+              build = $viskores.build
+              subdir = $viskores.subdir
+            }
+          } | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 "$env:WINDOWS_EVIDENCE\runtime.json"
+      - name: Managed runtime headless modeling gate
         run: >-
           uv run --frozen pytest -m slow -v -s
-          tests/test_freecad_worker.py::test_real_managed_worker_round_trips_parametric_design
+          tests/test_windows_managed_runtime.py::test_real_managed_freecad_round_trips_headless_model
           --junitxml "$env:WINDOWS_EVIDENCE\managed-runtime.xml"
       - name: Reviewed product gate
         if: inputs.phase == 'product' || inputs.phase == 'attestation'
         shell: pwsh
         run: |
+          Remove-Item Env:VIBECAD_FREECAD_ENV -ErrorAction SilentlyContinue
+          if (Test-Path Env:VIBECAD_FREECAD_ENV) {
+            throw "the reviewed product gate must use only the current managed FreeCAD generation"
+          }
+          if (-not (Test-Path -LiteralPath $env:VIBECAD_MANAGED_FREECAD_PYTHON -PathType Leaf)) {
+            throw "the reviewed product gate is missing its exact managed FreeCAD Python"
+          }
           uv run --frozen pytest -m slow -v -s `
             tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate `
             tests/test_task_kernel_integration.py::test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref `
@@ -107,32 +557,123 @@ jobs:
             --junitxml "$env:WINDOWS_EVIDENCE\product.xml"
       - name: Windows reviewed-attestation check
         if: inputs.phase == 'attestation'
-        run: >-
-          uv run --frozen python -I
-          .github/scripts/generate_freecad_reviewed_release_attestation.py --check
+        shell: pwsh
+        run: |
+          Remove-Item Env:VIBECAD_FREECAD_ENV -ErrorAction SilentlyContinue
+          if (Test-Path Env:VIBECAD_FREECAD_ENV) {
+            throw "the reviewed-attestation gate must not use an external FreeCAD override"
+          }
+          & $env:VIBECAD_MANAGED_FREECAD_PYTHON -I `
+            .github/scripts/generate_freecad_reviewed_release_attestation.py --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "the exact managed reviewed-attestation check failed"
+          }
       - name: Record exact source identity
         if: always()
         shell: pwsh
-        run: git rev-parse HEAD | Out-File -Encoding ascii "$env:WINDOWS_EVIDENCE\commit.txt"
-      - name: Remove the isolated managed runtime
+        run: |
+          $evidence = if ($env:WINDOWS_EVIDENCE) { $env:WINDOWS_EVIDENCE } else { Join-Path $env:RUNNER_TEMP "windows-evidence" }
+          New-Item -ItemType Directory -Force $evidence | Out-Null
+          git rev-parse HEAD | Out-File -Encoding ascii "$evidence\commit.txt"
+      - name: Remove only the managed runtime and verify complete isolation
         if: always()
         shell: pwsh
         run: |
-          uv run --frozen python -c "from vibecad.runtime.uninstall import uninstall_now; print(uninstall_now())"
-          $uninstallExit = $LASTEXITCODE
-          $expected = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP "vibecad-windows-runtime"))
-          $actual = [IO.Path]::GetFullPath($env:VIBECAD_HOME)
-          if ($actual -ne $expected) {
-            throw "refusing to clean an unexpected VIBECAD_HOME"
+          $evidence = if ($env:WINDOWS_EVIDENCE) { $env:WINDOWS_EVIDENCE } else { Join-Path $env:RUNNER_TEMP "windows-evidence" }
+          New-Item -ItemType Directory -Force $evidence | Out-Null
+          if ([string]::IsNullOrWhiteSpace($env:VIBECAD_EXPECTED_HOME)) {
+            [ordered]@{
+              cleanup_authorized = $false
+              reason = "the default-home preflight did not authorize a qualification root"
+            } | ConvertTo-Json | Out-File -Encoding utf8 "$evidence\cleanup-authorization.json"
+            exit 0
           }
-          if (Test-Path -LiteralPath $actual) {
-            Remove-Item -LiteralPath $actual -Recurse -Force
+          if (Test-Path Env:VIBECAD_HOME) {
+            throw "refusing cleanup while VIBECAD_HOME overrides the disposable runner default"
           }
-          if (Test-Path -LiteralPath $actual) {
-            throw "isolated VIBECAD_HOME remains after Windows qualification cleanup"
+          Remove-Item Env:VIBECAD_FREECAD_ENV -ErrorAction SilentlyContinue
+          if (Test-Path Env:VIBECAD_FREECAD_ENV) {
+            throw "the external FreeCAD override could not be cleared before managed-runtime uninstall"
           }
-          if ($uninstallExit -ne 0) {
-            throw "managed runtime uninstaller failed before exact-root cleanup"
+          $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
+          $expected = [IO.Path]::GetFullPath($env:VIBECAD_EXPECTED_HOME)
+          $actual = [IO.Path]::GetFullPath(((& $python -c "from vibecad.runtime.paths import vibecad_home; print(vibecad_home().resolve(strict=False))").Trim()))
+          if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refusing to clean a default VIBECAD_HOME that differs from the preflight identity"
+          }
+          $canary = Join-Path $actual "data\qualification-canary.txt"
+          if (
+            -not (Test-Path -LiteralPath $canary -PathType Leaf) -or
+            (Get-Content -Raw -LiteralPath $canary).Trim() -ne "preserve-windows-w1-data"
+          ) {
+            throw "refusing to clean a default VIBECAD_HOME without the exact qualification canary"
+          }
+          [ordered]@{
+            cleanup_authorized = $true
+            default_home_matches_preflight = $true
+            external_override_cleared = $true
+          } | ConvertTo-Json | Out-File -Encoding utf8 "$evidence\cleanup-authorization.json"
+          $uninstallJson = uv run --frozen python -c "import json; from vibecad.runtime.uninstall import uninstall_now; print(json.dumps(uninstall_now(), sort_keys=True))"
+          $uninstall = $uninstallJson | Select-Object -Last 1 | ConvertFrom-Json
+          $uninstallJson | Out-File -Encoding utf8 "$evidence\uninstall.json"
+          if (-not $uninstall.ok) {
+            throw "the exact-runtime uninstaller did not converge"
+          }
+          $runtime = Join-Path $actual "runtime"
+          if (Test-Path -LiteralPath $runtime) {
+            throw "isolated managed runtime remains after Windows qualification cleanup"
+          }
+          if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
+            throw "durable data was removed with the managed runtime"
+          }
+          if ((Get-Content -Raw -LiteralPath $canary).Trim() -ne "preserve-windows-w1-data") {
+            throw "the durable-data canary changed during managed runtime cleanup"
+          }
+          if (Test-Path -LiteralPath $env:VIBECAD_HOSTILE_ROOT) {
+            throw "hostile package-manager canary paths were created"
+          }
+          $cacheRecord = Join-Path $actual ".package-cache-session.json"
+          if (Test-Path -LiteralPath $cacheRecord) {
+            throw "the package-cache recovery record survived cleanup"
+          }
+          $transactionPath = Join-Path $evidence "package-transaction.json"
+          if (Test-Path -LiteralPath $transactionPath) {
+            $transaction = Get-Content -Raw -LiteralPath $transactionPath | ConvertFrom-Json
+            if (Test-Path -LiteralPath $transaction.short_cache_root) {
+              throw "the short physical package cache reappeared before cleanup completed"
+            }
+            if (Test-Path -LiteralPath $transaction.download_prefix) {
+              throw "the private 2.5 download prefix survived cleanup"
+            }
+          }
+          $allProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+          $leakedProcesses = $allProcesses | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($runtime, [StringComparison]::OrdinalIgnoreCase)
+          }
+          $helperLeaks = $allProcesses | Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'vibecad\.runtime\.windows_package_cache' -and
+            $_.CommandLine -match '--cleanup-helper'
+          }
+          $jobRunnerLeaks = $allProcesses | Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'windows_job_runner\.py' -and
+            $_.CommandLine -match '(?:^|\s)--gate(?:\s|$)'
+          }
+          if ($leakedProcesses) {
+            $leakedProcesses | Select-Object ProcessId, Name, ExecutablePath | ConvertTo-Json |
+              Out-File -Encoding utf8 "$evidence\leaked-processes.json"
+            throw "a managed FreeCAD, Python, Worker, or micromamba process remains"
+          }
+          if ($helperLeaks) {
+            $helperLeaks | Select-Object ProcessId, Name | ConvertTo-Json |
+              Out-File -Encoding utf8 "$evidence\package-cache-helper-leaks.json"
+            throw "a package-cache cleanup helper remains after qualification cleanup"
+          }
+          if ($jobRunnerLeaks) {
+            $jobRunnerLeaks | Select-Object ProcessId, Name | ConvertTo-Json |
+              Out-File -Encoding utf8 "$evidence\windows-job-runner-leaks.json"
+            throw "a windows_job_runner.py --gate coordinator remains after qualification cleanup"
           }
       - name: Upload Windows managed evidence
         if: always()

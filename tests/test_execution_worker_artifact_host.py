@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import vibecad.execution.worker_port as worker_port_module
+from vibecad import _file_compat
 from vibecad.execution.candidate import ActiveCandidate, SessionBinding
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.freecad_reviewed_artifact_host import (
@@ -153,6 +154,18 @@ class _Provider:
         payload = directory / snapshot.records[0].artifact_id
         payload.write_bytes(_PAYLOAD)
         payload.chmod(0o600)
+        if os.name == "nt":
+            _file_compat.set_private_dacl(directory)
+            _file_compat.set_private_dacl(manifest)
+            _file_compat.set_private_dacl(payload)
+            self.lease = TaskInputSnapshotLease(
+                snapshot=snapshot,
+                directory_capability=_file_compat.capture_windows_path(
+                    directory,
+                    directory=True,
+                ),
+            )
+            return self.lease
         descriptor = os.open(
             directory,
             os.O_RDONLY
@@ -182,6 +195,15 @@ def _port(
     )
     _install_candidate(port, worker, candidate)
     return port
+
+
+def _assert_lease_closed(lease: TaskInputSnapshotLease) -> None:
+    with pytest.raises(TaskInputSnapshotError) as closed:
+        if os.name == "nt":
+            lease.windows_capability_mapping()
+        else:
+            lease.duplicate_directory_fd()
+    assert closed.value.code is TaskInputSnapshotErrorCode.CLOSED
 
 
 def test_nonartifact_program_preserves_legacy_worker_call_and_skips_provider(
@@ -249,24 +271,28 @@ def test_artifact_program_sends_one_bound_descriptor_and_duplicate_fd_then_clean
 
     class Worker:
         received_fd = -1
+        received_capability: dict[str, object] | None = None
         received_snapshot: dict[str, object] | None = None
 
-        def execute_program(
-            self,
-            *,
-            program,
-            candidate,
-            session,
-            artifact_snapshot,
-            artifact_snapshot_fd,
-        ):
-            del program, candidate, session
+        def execute_program(self, **kwargs):
+            kwargs.pop("program")
+            kwargs.pop("candidate")
+            kwargs.pop("session")
+            artifact_snapshot = kwargs.pop("artifact_snapshot")
             assert type(artifact_snapshot) is dict
-            assert type(artifact_snapshot_fd) is int
             assert provider.lease is not None
-            assert artifact_snapshot_fd != provider.lease._directory_fd  # noqa: SLF001
-            os.fstat(artifact_snapshot_fd)
-            self.received_fd = artifact_snapshot_fd
+            if os.name == "nt":
+                capability_mapping = kwargs.pop("artifact_snapshot_capability")
+                capability = _file_compat.WindowsPathCapability.from_mapping(capability_mapping)
+                _file_compat.validate_windows_path(capability, directory=True)
+                self.received_capability = capability_mapping
+            else:
+                artifact_snapshot_fd = kwargs.pop("artifact_snapshot_fd")
+                assert type(artifact_snapshot_fd) is int
+                assert artifact_snapshot_fd != provider.lease._directory_fd  # noqa: SLF001
+                os.fstat(artifact_snapshot_fd)
+                self.received_fd = artifact_snapshot_fd
+            assert kwargs == {}
             self.received_snapshot = artifact_snapshot
             return ()
 
@@ -293,11 +319,12 @@ def test_artifact_program_sends_one_bound_descriptor_and_duplicate_fd_then_clean
         "schema_version": 1,
         "task_id": _TASK_ID,
     }
-    with pytest.raises(OSError):
-        os.fstat(worker.received_fd)
-    with pytest.raises(TaskInputSnapshotError) as closed:
-        provider.lease.duplicate_directory_fd()
-    assert closed.value.code is TaskInputSnapshotErrorCode.CLOSED
+    if os.name == "nt":
+        assert worker.received_capability is not None
+    else:
+        with pytest.raises(OSError):
+            os.fstat(worker.received_fd)
+    _assert_lease_closed(provider.lease)
 
 
 def test_wrong_task_snapshot_fails_before_worker_and_closes_lease(tmp_path: Path) -> None:
@@ -324,9 +351,7 @@ def test_wrong_task_snapshot_fails_before_worker_and_closes_lease(tmp_path: Path
     assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
     assert worker.calls == 0
     assert provider.lease is not None
-    with pytest.raises(TaskInputSnapshotError) as closed:
-        provider.lease.duplicate_directory_fd()
-    assert closed.value.code is TaskInputSnapshotErrorCode.CLOSED
+    _assert_lease_closed(provider.lease)
 
 
 def test_worker_cancellation_still_closes_transferred_fd_and_provider_lease(
@@ -337,10 +362,18 @@ def test_worker_cancellation_still_closes_transferred_fd_and_provider_lease(
 
     class Worker:
         received_fd = -1
+        received_capability: dict[str, object] | None = None
 
         def execute_program(self, **kwargs):
-            self.received_fd = kwargs["artifact_snapshot_fd"]
-            os.fstat(self.received_fd)
+            if os.name == "nt":
+                self.received_capability = kwargs["artifact_snapshot_capability"]
+                capability = _file_compat.WindowsPathCapability.from_mapping(
+                    self.received_capability
+                )
+                _file_compat.validate_windows_path(capability, directory=True)
+            else:
+                self.received_fd = kwargs["artifact_snapshot_fd"]
+                os.fstat(self.received_fd)
             raise KeyboardInterrupt
 
     worker = Worker()
@@ -352,9 +385,10 @@ def test_worker_cancellation_still_closes_transferred_fd_and_provider_lease(
     )
     with pytest.raises(KeyboardInterrupt):
         port.execute_program(program=_program(), candidate=candidate)
-    with pytest.raises(OSError):
-        os.fstat(worker.received_fd)
+    if os.name == "nt":
+        assert worker.received_capability is not None
+    else:
+        with pytest.raises(OSError):
+            os.fstat(worker.received_fd)
     assert provider.lease is not None
-    with pytest.raises(TaskInputSnapshotError) as closed:
-        provider.lease.duplicate_directory_fd()
-    assert closed.value.code is TaskInputSnapshotErrorCode.CLOSED
+    _assert_lease_closed(provider.lease)

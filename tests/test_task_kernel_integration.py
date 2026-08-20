@@ -13,6 +13,21 @@ import pytest
 from vibecad.runtime import status as runtime_status
 
 
+def _runtime_prefix_for_python(python: str | Path) -> Path:
+    path = Path(python).resolve()
+    return path.parent if os.name == "nt" else path.parent.parent
+
+
+def _create_private_work_root(path: Path) -> None:
+    if os.name == "nt":
+        from vibecad._file_compat import ensure_private_directory
+
+        ensure_private_directory(path, exclusive=True)
+        return
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+
+
 def _freecad_child_environment(
     python: str,
     *,
@@ -20,8 +35,13 @@ def _freecad_child_environment(
 ) -> dict[str, str]:
     """Build every real FreeCAD child environment through the runtime seam."""
 
-    prefix = Path(python).parent.parent.resolve()
-    environment = runtime_status.freecad_process_environment(os.environ)
+    prefix = _runtime_prefix_for_python(python)
+    base = dict(os.environ)
+    # The interpreter is already pinned explicitly.  Do not leak the selection
+    # override into the child process-directory builder: production rejects an
+    # external-runtime path that overlaps its managed runtime root.
+    base.pop("VIBECAD_FREECAD_ENV", None)
+    environment = runtime_status.freecad_process_environment(base)
     python_paths = [str(prefix / "lib")]
     if source is not None:
         python_paths.append(str(source))
@@ -39,13 +59,23 @@ def existing_freecad_python() -> str:
     if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
         pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
     prefix_value = os.environ.get("VIBECAD_FREECAD_ENV")
-    if not prefix_value:
-        pytest.fail("set VIBECAD_FREECAD_ENV to an existing ready FreeCAD environment")
-    prefix = Path(prefix_value).expanduser()
-    python = prefix / "bin" / "python"
+    from vibecad.runtime import paths as runtime_paths
+
+    managed_python = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if prefix_value:
+        prefix = Path(prefix_value).expanduser()
+        python = runtime_paths.env_python_for(prefix)
+    elif managed_python:
+        python = Path(managed_python).expanduser()
+        prefix = _runtime_prefix_for_python(python)
+    else:
+        pytest.fail(
+            "set VIBECAD_FREECAD_ENV or VIBECAD_MANAGED_FREECAD_PYTHON "
+            "to an existing ready FreeCAD environment"
+        )
     sentinel = prefix / ".vibecad_ready"
     if not python.is_file():
-        pytest.fail("VIBECAD_FREECAD_ENV does not contain bin/python")
+        pytest.fail("VIBECAD_FREECAD_ENV does not contain its platform Python")
     if not sentinel.is_file():
         pytest.fail("VIBECAD_FREECAD_ENV does not contain the ready sentinel")
     return str(python)
@@ -110,6 +140,7 @@ from pathlib import Path
 
 sys.path.insert(0, __SOURCE__)
 
+from vibecad import _file_compat
 from vibecad.engine.session import Session
 from vibecad.application.releases import ReleaseService, ReleaseStore
 from vibecad.execution.candidate import CandidateCoordinator, SessionBinding, SessionSlot
@@ -119,6 +150,9 @@ from vibecad.execution.executor import (
     _component_observations,
     _interference_observations,
     _managed_assembly_shape,
+    _stage_windows_cad_input,
+    _windows_cad_path_needs_bridge,
+    _windows_path_key,
 )
 from vibecad.execution.revisions import (
     LocalRevisionStore,
@@ -177,6 +211,22 @@ def sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def under_root(path: Path) -> bool:
+    if sys.platform == "win32":
+        root_key = _windows_path_key(ROOT)
+        try:
+            return os.path.commonpath((_windows_path_key(path), root_key)) == root_key
+        except ValueError:
+            return False
+    return path.resolve().is_relative_to(ROOT.resolve())
+
+
+def traversal_root(path: Path) -> Path:
+    if sys.platform == "win32":
+        return Path(_file_compat.windows_extended_path(path))
+    return path
 
 
 def command(
@@ -607,7 +657,18 @@ def entity_facts(session: object) -> list[dict[str, object]]:
 def step_geometry(path: Path) -> dict[str, object]:
     import Part
 
-    return shape_geometry(Part.read(str(path)))
+    bridge_owner = None
+    load_path = path
+    if _windows_cad_path_needs_bridge(path):
+        load_path, bridge_owner = _stage_windows_cad_input(path)
+    try:
+        shape = Part.read(str(load_path))
+        if bridge_owner is not None:
+            bridge_owner.validate_after_load()
+        return shape_geometry(shape)
+    finally:
+        if bridge_owner is not None:
+            bridge_owner.close()
 
 
 def close_best_effort(session: object | None) -> None:
@@ -928,7 +989,7 @@ try:
                 "expected_size": artifact.size_bytes,
                 "sha256": sha256(path) if path.is_file() else None,
                 "expected_sha256": artifact.sha256,
-                "under_root": path.resolve().is_relative_to(ROOT.resolve()),
+                "under_root": under_root(path),
             }
         )
 
@@ -1078,15 +1139,16 @@ try:
             and len(current_binding.session.doc.Objects) == expected_object_count
         )
 
-    head_files = tuple(revisions_root.rglob("HEAD.json"))
-    journal_files = tuple(revisions_root.rglob("journal.json"))
-    manifest_files = tuple(revisions_root.rglob("manifest.json"))
+    revision_walk_root = traversal_root(revisions_root)
+    head_files = tuple(revision_walk_root.rglob("HEAD.json"))
+    journal_files = tuple(revision_walk_root.rglob("journal.json"))
+    manifest_files = tuple(revision_walk_root.rglob("manifest.json"))
     candidate_files = tuple(
         path
-        for path in revisions_root.rglob("*")
+        for path in revision_walk_root.rglob("*")
         if path.is_file() and "candidates" in path.parts
     )
-    runtime_files = tuple(path for path in ROOT.rglob("*") if path.is_file())
+    runtime_files = tuple(path for path in traversal_root(ROOT).rglob("*") if path.is_file())
     layout = {
         "head_count": len(head_files),
         "journal_count": len(journal_files),
@@ -1097,9 +1159,7 @@ try:
         "manifest_count": len(manifest_files),
         "candidate_file_count": len(candidate_files),
         "task_record_count": len(tuple(tasks_root.glob("*.json"))),
-        "all_files_under_root": all(
-            path.resolve().is_relative_to(ROOT.resolve()) for path in runtime_files
-        ),
+        "all_files_under_root": all(under_root(path) for path in runtime_files),
     }
 
     payload = {
@@ -3005,6 +3065,30 @@ print("S3_AGENT_FIRST_RESULT=" + canonical(payload))
 """
 
 
+def _run_python_child(
+    python: str,
+    code: str,
+    *,
+    timeout: int,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Execute large acceptance programs without Windows command-line truncation."""
+
+    bootstrap = (
+        "import sys; source = sys.stdin.read(); "
+        "exec(compile(source, '<vibecad-task-kernel-gate>', 'exec'))"
+    )
+    return subprocess.run(
+        [python, "-c", bootstrap],
+        input=code,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=environment,
+    )
+
+
 def _run_case(
     existing_freecad_python: str,
     tmp_path: Path,
@@ -3012,20 +3096,17 @@ def _run_case(
 ) -> dict[str, object]:
     source = Path(__file__).resolve().parent.parent / "src"
     work_root = tmp_path / case
-    work_root.mkdir(mode=0o700)
-    work_root.chmod(0o700)
+    _create_private_work_root(work_root)
     code = (
         _CHILD.replace("__SOURCE__", repr(str(source)))
         .replace("__WORK_ROOT__", repr(str(work_root)))
         .replace("__CASE__", repr(case))
     )
-    process = subprocess.run(
-        [existing_freecad_python, "-c", code],
-        capture_output=True,
-        text=True,
+    process = _run_python_child(
+        existing_freecad_python,
+        code,
         timeout=240,
-        check=False,
-        env=_freecad_child_environment(existing_freecad_python, source=source),
+        environment=_freecad_child_environment(existing_freecad_python, source=source),
     )
     assert process.returncode == 0, process.stderr
     lines = [line for line in process.stdout.splitlines() if line.startswith("TK9_RESULT=")]
@@ -3044,8 +3125,7 @@ def _run_review_restart_case(
 ) -> dict[str, dict[str, object]]:
     source = Path(__file__).resolve().parent.parent / "src"
     work_root = tmp_path / "review-restart"
-    work_root.mkdir(mode=0o700)
-    work_root.chmod(0o700)
+    _create_private_work_root(work_root)
 
     def run_phase(case: str) -> dict[str, object]:
         code = (
@@ -3053,13 +3133,11 @@ def _run_review_restart_case(
             .replace("__WORK_ROOT__", repr(str(work_root)))
             .replace("__CASE__", repr(case))
         )
-        process = subprocess.run(
-            [existing_freecad_python, "-c", code],
-            capture_output=True,
-            text=True,
+        process = _run_python_child(
+            existing_freecad_python,
+            code,
             timeout=240,
-            check=False,
-            env=_freecad_child_environment(existing_freecad_python, source=source),
+            environment=_freecad_child_environment(existing_freecad_python, source=source),
         )
         assert process.returncode == 0, process.stderr + "\n" + process.stdout
         lines = [line for line in process.stdout.splitlines() if line.startswith("TK9_RESULT=")]
@@ -3080,18 +3158,15 @@ def _run_selector_preservation_case(
 ) -> dict[str, object]:
     source = Path(__file__).resolve().parent.parent / "src"
     work_root = tmp_path / "selector-preservation"
-    work_root.mkdir(mode=0o700)
-    work_root.chmod(0o700)
+    _create_private_work_root(work_root)
     code = _SELECTOR_PRESERVATION_CHILD.replace("__SOURCE__", repr(str(source))).replace(
         "__WORK_ROOT__", repr(str(work_root))
     )
-    process = subprocess.run(
-        [existing_freecad_python, "-c", code],
-        capture_output=True,
-        text=True,
+    process = _run_python_child(
+        existing_freecad_python,
+        code,
         timeout=240,
-        check=False,
-        env=_freecad_child_environment(existing_freecad_python, source=source),
+        environment=_freecad_child_environment(existing_freecad_python, source=source),
     )
     assert process.returncode == 0, process.stderr + "\n" + process.stdout
     lines = [line for line in process.stdout.splitlines() if line.startswith("S3_SELECTOR_RESULT=")]
@@ -3104,10 +3179,9 @@ def _run_application_restart_case(
     tmp_path: Path,
 ) -> dict[str, dict[str, object]]:
     source = Path(__file__).resolve().parent.parent / "src"
-    prefix = Path(existing_freecad_python).parent.parent.resolve()
+    prefix = _runtime_prefix_for_python(existing_freecad_python)
     work_root = tmp_path / "agent-application"
-    work_root.mkdir(mode=0o700)
-    work_root.chmod(0o700)
+    _create_private_work_root(work_root)
     environment = _freecad_child_environment(existing_freecad_python, source=source)
     environment.pop("VIBECAD_HOME", None)
 
@@ -3122,13 +3196,11 @@ def _run_application_restart_case(
             .replace("__PHASE__", repr(phase))
             .replace("__STATE__", repr(json.dumps(state or {}, sort_keys=True)))
         )
-        process = subprocess.run(
-            [existing_freecad_python, "-c", code],
-            capture_output=True,
-            text=True,
+        process = _run_python_child(
+            existing_freecad_python,
+            code,
             timeout=360,
-            check=False,
-            env=environment,
+            environment=environment,
         )
         assert process.returncode == 0, process.stderr + "\n" + process.stdout
         lines = [
@@ -3149,19 +3221,17 @@ def _run_application_restart_case(
 
 def _run_legacy_runtime_adoption(existing_freecad_python: str) -> dict[str, object]:
     source = Path(__file__).resolve().parent.parent / "src"
-    prefix = Path(existing_freecad_python).parent.parent.resolve()
+    prefix = _runtime_prefix_for_python(existing_freecad_python)
     environment = _freecad_child_environment(existing_freecad_python, source=source)
     environment.pop("VIBECAD_HOME", None)
     code = _RUNTIME_ADOPTION_CHILD.replace("__SOURCE__", repr(str(source))).replace(
         "__EXPECTED_PREFIX__", repr(str(prefix))
     )
-    process = subprocess.run(
-        [existing_freecad_python, "-c", code],
-        capture_output=True,
-        text=True,
+    process = _run_python_child(
+        existing_freecad_python,
+        code,
         timeout=240,
-        check=False,
-        env=environment,
+        environment=environment,
     )
     assert process.returncode == 0, process.stderr + "\n" + process.stdout
     lines = [
@@ -3179,8 +3249,7 @@ def _run_agent_first_acceptance(
 ) -> dict[str, dict[str, object]]:
     source = Path(__file__).resolve().parent.parent / "src"
     work_root = tmp_path / "agent-first-acceptance"
-    work_root.mkdir(mode=0o700)
-    work_root.chmod(0o700)
+    _create_private_work_root(work_root)
     environment = _freecad_child_environment(
         current_managed_freecad_python,
         source=source,
@@ -3196,13 +3265,11 @@ def _run_agent_first_acceptance(
             .replace("__PHASE__", repr(phase))
             .replace("__STATE__", repr(json.dumps(state or {}, sort_keys=True)))
         )
-        process = subprocess.run(
-            [current_managed_freecad_python, "-c", code],
-            capture_output=True,
-            text=True,
+        process = _run_python_child(
+            current_managed_freecad_python,
+            code,
             timeout=900,
-            check=False,
-            env=environment,
+            environment=environment,
         )
         assert process.returncode == 0, process.stderr + "\n" + process.stdout
         lines = [
@@ -3765,7 +3832,7 @@ def test_real_pre_epoch_external_legacy_fails_closed_without_mutation(
     assert payload["old_receipt_missing_identity"] is True
     assert payload["prefix_identity_still_matches"] is True
     assert payload["blocked_commands"] == []
-    expected_python = str(Path(existing_freecad_python).parent.parent / "bin" / "python")
+    expected_python = existing_freecad_python
     assert payload["receipt_before"] is True
     assert payload["verify_calls"] == [expected_python]
 

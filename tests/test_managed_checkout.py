@@ -4,6 +4,7 @@ import hashlib
 import multiprocessing
 import os
 import signal
+import sys
 import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 
 import vibecad.execution.revisions as revisions_module
 import vibecad.interaction.checkouts as checkout_module
+from vibecad import _file_compat
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     ProjectHead,
@@ -52,7 +54,18 @@ MODEL_BYTES = b"FCStd sample bytes"
 
 def _mkdir(path: Path) -> None:
     path.mkdir(mode=0o700)
-    os.chmod(path, 0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
+    else:
+        os.chmod(path, 0o700)
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    path.write_bytes(payload)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
+    else:
+        os.chmod(path, 0o600)
 
 
 def _store_from_base(base: Path) -> ManagedCheckoutStore:
@@ -199,8 +212,7 @@ def checkout_rig(tmp_path: Path):
     )
     tasks = TaskRunStore(task_root, leases, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
     source = tmp_path / "sample.FCStd"
-    source.write_bytes(MODEL_BYTES)
-    os.chmod(source, 0o600)
+    _write_private(source, MODEL_BYTES)
     raw = source.read_bytes()
     with leases.acquire_project_write(PROJECT_ID) as lease:
         head = revisions.import_trusted_fcstd(
@@ -393,27 +405,61 @@ def test_require_same_live_file_recomputes_liveness_and_full_file_identity(
 ) -> None:
     store, revisions, _head, _root = checkout_rig
     opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
-    original = revisions_module._validate_revision_content
     calls = 0
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
 
-    def counted(revision_fd, root_device, revision):
-        nonlocal calls
-        calls += 1
-        return original(revision_fd, root_device, revision)
+        original = revisions_windows._observe_model_binding
 
-    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+        def counted_windows(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_observe_model_binding",
+            counted_windows,
+        )
+        expected_calls = 2
+    else:
+        original = revisions_module._validate_revision_content
+
+        def counted_posix(revision_fd, root_device, revision):
+            nonlocal calls
+            calls += 1
+            return original(revision_fd, root_device, revision)
+
+        monkeypatch.setattr(
+            revisions_module,
+            "_validate_revision_content",
+            counted_posix,
+        )
+        expected_calls = 4
     captured = store.capture_live_file(opened.checkout_id)
     required = store.require_same_live_file(captured)
 
     assert required == captured
     assert required.path.read_bytes() == MODEL_BYTES
-    assert calls == 4
+    assert calls == expected_calls
     assert revisions.load_head(PROJECT_ID) == captured.descriptor.source_head
 
 
 @pytest.mark.parametrize(
     "replacement",
-    ["symlink", "hardlink", "inode", "bytes", "mode"],
+    [
+        "symlink",
+        "hardlink",
+        "inode",
+        "bytes",
+        pytest.param(
+            "mode",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="POSIX mode contract; Windows uses protected DACLs",
+            ),
+        ),
+    ],
 )
 def test_require_same_live_file_rejects_managed_model_rebinding(
     checkout_rig,
@@ -622,8 +668,7 @@ def test_key_first_replay_keeps_original_source_and_observes_safe_edit(checkout_
     source = HeadCheckoutSource(project_id=PROJECT_ID)
     first = store.open(OPEN_KEY, source)
     replacement = first.local_path.with_suffix(".replacement")
-    replacement.write_bytes(b"safely edited model")
-    os.chmod(replacement, 0o600)
+    _write_private(replacement, b"safely edited model")
     os.replace(replacement, first.local_path)
 
     replay = store.open(OPEN_KEY, source)
@@ -771,12 +816,12 @@ def test_open_descriptor_rebinds_the_live_checkout_root_after_hash(
 
     assert swapped is True
     assert raised.value.code is CheckoutErrorCode.INTEGRITY_FAILURE
+    expected_bytes = MODEL_BYTES if sys.platform == "win32" else forged_bytes
     assert tuple(path.read_bytes() for path in root.glob("checkout_*/model.FCStd")) == (
-        forged_bytes,
+        expected_bytes,
     )
-    assert tuple(path.read_bytes() for path in detached.glob("checkout_*/model.FCStd")) == (
-        MODEL_BYTES,
-    )
+    detached_models = tuple(path.read_bytes() for path in detached.glob("checkout_*/model.FCStd"))
+    assert detached_models == (() if sys.platform == "win32" else (MODEL_BYTES,))
 
 
 def test_get_revalidates_metadata_entry_after_trusted_read(
@@ -888,8 +933,7 @@ def test_atomic_edit_n_plus_one_fails_closed_until_explicit_close_recovers_capac
     assert store.get(first.checkout_id).current_size_bytes == len(MODEL_BYTES)
 
     replacement = first.local_path.with_suffix(".atomic-edit")
-    replacement.write_bytes(MODEL_BYTES + b"x")
-    os.chmod(replacement, 0o600)
+    _write_private(replacement, MODEL_BYTES + b"x")
     os.replace(replacement, first.local_path)
 
     restarted = ManagedCheckoutStore(
@@ -957,8 +1001,7 @@ def test_closed_replay_precedes_other_open_aggregate_exhaustion(
     second = store.open(second_key, source)
     third = store.open(third_key, source)
     replacement = second.local_path.with_suffix(".atomic-edit")
-    replacement.write_bytes(MODEL_BYTES + b"x")
-    os.chmod(replacement, 0o600)
+    _write_private(replacement, MODEL_BYTES + b"x")
     os.replace(replacement, second.local_path)
     second_bytes = second.local_path.read_bytes()
     third_bytes = third.local_path.read_bytes()
@@ -1015,8 +1058,7 @@ def test_temp_budget_reserves_n_then_rejects_n_plus_one(
 ) -> None:
     store, _revisions, _head, root = checkout_rig
     abandoned = root / (".checkout_" + "f" * 32 + ".tmp")
-    abandoned.mkdir(mode=0o700)
-    os.chmod(abandoned, 0o700)
+    _mkdir(abandoned)
     monkeypatch.setattr(checkout_module, "MAX_CHECKOUT_TEMP_ENTRIES", maximum_temps)
 
     if expected is None:
@@ -1099,19 +1141,41 @@ def test_live_head_liveness_uses_a_bounded_revision_validation_budget(
 ) -> None:
     store, revisions, _head, _root = checkout_rig
     opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
-    original = revisions_module._validate_revision_content
     calls = 0
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
 
-    def counted(revision_fd, root_device, revision):
-        nonlocal calls
-        calls += 1
-        return original(revision_fd, root_device, revision)
+        original = revisions_windows._observe_model_binding
 
-    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+        def counted_windows(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_observe_model_binding",
+            counted_windows,
+        )
+        expected_calls = 1
+    else:
+        original = revisions_module._validate_revision_content
+
+        def counted_posix(revision_fd, root_device, revision):
+            nonlocal calls
+            calls += 1
+            return original(revision_fd, root_device, revision)
+
+        monkeypatch.setattr(
+            revisions_module,
+            "_validate_revision_content",
+            counted_posix,
+        )
+        expected_calls = 2
     observed = store.get(opened.checkout_id)
 
     assert observed.source_liveness.value == "live"
-    assert calls == 2
+    assert calls == expected_calls
 
 
 def test_source_replacement_between_observation_and_copy_cannot_rebind_checkout(
@@ -1320,24 +1384,49 @@ def test_revision_directory_swap_during_validation_never_returns_live(
     store, revisions, head, _root = checkout_rig
     opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
     source = revisions.revision_model_path(PROJECT_ID, head.revision_id)
-    original = revisions_module._validate_revision_content
     moved = source.parent.with_name(source.parent.name + ".detached")
     swapped = False
 
-    def swap_after_read(revision_fd, root_device, revision):
+    def swap_source() -> None:
         nonlocal swapped
-        result = original(revision_fd, root_device, revision)
-        if revision.id == head.revision_id and not swapped:
-            swapped = True
-            source.parent.rename(moved)
-            source.parent.mkdir(mode=0o700)
-            os.chmod(source.parent, 0o700)
-            forged = source.parent / "model.FCStd"
-            forged.write_bytes(b"invalid replacement")
-            os.chmod(forged, 0o600)
-        return result
+        swapped = True
+        source.parent.rename(moved)
+        source.parent.mkdir(mode=0o700)
+        os.chmod(source.parent, 0o700)
+        forged = source.parent / "model.FCStd"
+        forged.write_bytes(b"invalid replacement")
+        os.chmod(forged, 0o600)
 
-    monkeypatch.setattr(revisions_module, "_validate_revision_content", swap_after_read)
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        original_windows = revisions_windows._observe_model_binding
+
+        def swap_after_windows_read(*args, **kwargs):
+            result = original_windows(*args, **kwargs)
+            if not swapped:
+                swap_source()
+            return result
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_observe_model_binding",
+            swap_after_windows_read,
+        )
+    else:
+        original_posix = revisions_module._validate_revision_content
+
+        def swap_after_posix_read(revision_fd, root_device, revision):
+            result = original_posix(revision_fd, root_device, revision)
+            if revision.id == head.revision_id and not swapped:
+                swap_source()
+            return result
+
+        monkeypatch.setattr(
+            revisions_module,
+            "_validate_revision_content",
+            swap_after_posix_read,
+        )
     observed = store.get(opened.checkout_id)
 
     assert swapped is True
@@ -1415,8 +1504,7 @@ def test_live_draft_guard_rejects_dirty_and_non_draft_checkouts(
     )
     assert accepted.source_liveness.value == "live"
     replacement = opened.local_path.with_suffix(".dirty")
-    replacement.write_bytes(b"manual unverified edit")
-    os.chmod(replacement, 0o600)
+    _write_private(replacement, b"manual unverified edit")
     os.replace(replacement, opened.local_path)
     with pytest.raises(CheckoutError) as dirty:
         store.require_acceptance(
@@ -1675,8 +1763,7 @@ def test_draft_checkout_edit_and_close_never_mutate_source_or_head(
         source,
     )
     replacement = opened.local_path.with_suffix(".edit")
-    replacement.write_bytes(b"manual draft edit")
-    os.chmod(replacement, 0o600)
+    _write_private(replacement, b"manual draft edit")
     os.replace(replacement, opened.local_path)
     closed = store.close(opened.checkout_id)
 
@@ -1914,7 +2001,10 @@ def test_close_removes_only_bounded_freecad_save_backups(
     checkout_directory = opened.local_path.parent
     backup = checkout_directory / "model.20260801-214704.FCBak"
     backup.write_bytes(b"FreeCAD managed-save backup")
-    backup.chmod(backup_mode)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(backup)
+    else:
+        backup.chmod(backup_mode)
 
     observed = store.get(opened.checkout_id)
     closed = store.close(opened.checkout_id)

@@ -6,12 +6,14 @@ import hashlib
 import io
 import json
 import os
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 import vibecad.application.releases as releases
+from vibecad import _file_compat
 from vibecad.application.releases import (
     ReleaseApi,
     ReleaseError,
@@ -189,6 +191,9 @@ class _RevisionStore:
         self.step.write_bytes(STEP_BYTES)
         os.chmod(self.model, 0o600)
         os.chmod(self.step, 0o600)
+        if sys.platform == "win32":
+            _file_compat.set_private_dacl(self.model)
+            _file_compat.set_private_dacl(self.step)
 
     def load_revision(self, project_id: str, revision_id: str) -> RevisionRef:
         if (project_id, revision_id) != (PROJECT_ID, REVISION_ID):
@@ -231,6 +236,9 @@ def _composition(tmp_path: Path):
     root.mkdir(mode=0o700)
     source = tmp_path / "source"
     source.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(root)
+        _file_compat.set_private_dacl(source)
     value = root.lstat()
     store = ReleaseStore(root=root, expected_identity=(value.st_dev, value.st_ino))
     cad = _Cad()

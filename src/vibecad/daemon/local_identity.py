@@ -1,4 +1,4 @@
-"""Fail-closed macOS peer identity for accepted local Unix sockets."""
+"""Fail-closed local peer identity with separate Darwin and Windows backends."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ __all__ = (
     "PeerIdentity",
     "darwin_peer_identity",
     "require_same_user_peer",
+    "windows_peer_identity",
 )
 
 
@@ -106,6 +107,8 @@ def darwin_peer_identity(connection: object) -> PeerIdentity:
 
 
 def require_same_user_peer(connection: object) -> PeerIdentity:
+    if sys.platform == "win32":
+        return windows_peer_identity(connection)  # type: ignore[return-value]
     identity = darwin_peer_identity(connection)
     try:
         current = os.geteuid()
@@ -114,3 +117,18 @@ def require_same_user_peer(connection: object) -> PeerIdentity:
     if type(current) is not int or identity.euid != current:
         raise LocalIdentityError(LocalIdentityErrorCode.DIFFERENT_USER)
     return identity
+
+
+def windows_peer_identity(connection: object):
+    """Return and pin the token identity of a connected Win32 named-pipe peer."""
+
+    if sys.platform != "win32":
+        raise LocalIdentityError(LocalIdentityErrorCode.UNSUPPORTED_PLATFORM)
+    try:
+        from vibecad.daemon.windows_ipc import require_same_user_peer as require_windows_peer
+
+        return require_windows_peer(connection)
+    except PermissionError:
+        raise LocalIdentityError(LocalIdentityErrorCode.DIFFERENT_USER) from None
+    except (OSError, TypeError, ValueError):
+        raise LocalIdentityError(LocalIdentityErrorCode.INVALID_SOCKET) from None

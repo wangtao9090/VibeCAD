@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
 from vibecad import workbuddy_adapter
@@ -219,7 +220,10 @@ def test_request_ingress_rejects_duplicate_fields_and_unsafe_file(
     assert duplicated["error"]["code"] == "invalid_request_file"
 
     path.write_text(json.dumps(_request()), encoding="utf-8")
-    path.chmod(0o622)
+    if sys.platform == "win32":
+        os.link(path, tmp_path / "second-link.json")
+    else:
+        path.chmod(0o622)
     unsafe = workbuddy_adapter.submit_request_file(REQUEST_NAME)
     assert unsafe["error"]["code"] == "unsafe_request_file"
 

@@ -69,6 +69,12 @@ def mamba_root_prefix() -> Path:
     return runtime_root() / "mamba"
 
 
+def package_cache_record() -> Path:
+    """Home-level recovery record for one transient Windows package cache."""
+
+    return vibecad_home() / ".package-cache-session.json"
+
+
 def env_prefix() -> Path:
     return mamba_root_prefix() / "envs" / "vibecad"
 
@@ -244,6 +250,13 @@ def freecad_path() -> Path:
 
 def micromamba_path() -> Path:
     return runtime_root() / "bin" / ("micromamba.exe" if platform.is_windows() else "micromamba")
+
+
+def flat_cache_micromamba_path() -> Path:
+    """Windows downloader/extractor retaining the reviewed flat cache layout."""
+
+    name = "micromamba-flat-cache.exe" if platform.is_windows() else "micromamba-flat-cache"
+    return runtime_root() / "bin" / name
 
 
 def legacy_micromamba_path() -> Path:

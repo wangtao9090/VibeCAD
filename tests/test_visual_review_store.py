@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 
 import pytest
 
 from tests.test_visual_review_artifacts import _artifact
+from vibecad._file_compat import set_private_dacl
 from vibecad.daemon.adapters import LocalAgentClient
 from vibecad.visual.review_artifacts import encode_visual_review_artifact
 from vibecad.visual.review_store import (
@@ -21,6 +23,8 @@ from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
 def _private_directory(path: Path) -> Path:
     path.mkdir(mode=0o700)
     path.chmod(0o700)
+    if os.name == "nt":
+        set_private_dacl(path)
     return path
 
 
@@ -112,9 +116,13 @@ def test_valid_stage_rolls_forward_and_partial_stage_rolls_back(tmp_path: Path) 
     valid_stage = root / f".stage_{suffix}_00_{'1' * 32}.tmp"
     valid_stage.write_bytes(encode_visual_review_artifact(artifact))
     valid_stage.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(valid_stage)
     partial_stage = root / f".stage_{suffix}_01_{'2' * 32}.tmp"
     partial_stage.write_bytes(b"partial")
     partial_stage.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(partial_stage)
 
     result = store.recover_pending()
 
@@ -296,6 +304,8 @@ def test_forged_tombstone_temp_cannot_poison_a_valid_observation(tmp_path: Path)
         encoding="ascii",
     )
     forged.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(forged)
 
     with pytest.raises(VisualReviewStoreError) as caught:
         store.recover_pending()
@@ -346,6 +356,8 @@ def test_recovery_does_not_publish_valid_stage_past_final_budget(
     stage = root / f".stage_{suffix}_00_{'3' * 32}.tmp"
     stage.write_bytes(encode_visual_review_artifact(artifact))
     stage.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(stage)
     monkeypatch.setattr("vibecad.visual.review_store.MAX_VISUAL_REVIEW_RECORDS", 0)
 
     with pytest.raises(VisualReviewStoreError) as caught:

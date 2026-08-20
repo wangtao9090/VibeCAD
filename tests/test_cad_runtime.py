@@ -918,7 +918,8 @@ def test_cad_runtime_imports_and_adapter_authority_surface_are_pure():
 
 def test_interaction_package_initializer_remains_byte_identical():
     path = Path(cad_module.__file__).with_name("__init__.py")
+    source = path.read_bytes().replace(b"\r\n", b"\n")
 
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+    assert hashlib.sha256(source).hexdigest() == (
         "f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5"
     )

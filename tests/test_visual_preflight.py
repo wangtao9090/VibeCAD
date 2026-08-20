@@ -90,7 +90,7 @@ def _seal(store: VisualInputStore, paths: tuple[Path, ...]):
     fds: list[int] = []
     try:
         for index, path in enumerate(paths):
-            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
             fds.append(descriptor)
             descriptors.append(
                 DescriptorSource(

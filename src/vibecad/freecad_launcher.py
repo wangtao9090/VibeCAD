@@ -17,6 +17,16 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from vibecad._file_compat import (
+    capture_windows_external_fd,
+    capture_windows_path,
+    ensure_private_directory,
+    open_private_file,
+    open_windows_external_file,
+    set_private_dacl,
+    validate_windows_external_file,
+    validate_windows_path,
+)
 from vibecad.runtime import paths, spec, status
 from vibecad.runtime.installer import RuntimeInstaller
 
@@ -143,11 +153,26 @@ def _require_packaged_addon() -> Path:
         for relative in _ADDON_FILES:
             source = root / relative
             info = source.lstat()
-            if (
-                source != source.resolve(strict=True)
-                or not stat.S_ISREG(info.st_mode)
-                or stat.S_IMODE(info.st_mode) & 0o022
-            ):
+            if source != source.resolve(strict=True) or not stat.S_ISREG(info.st_mode):
+                raise OSError
+            if sys.platform == "win32":
+                descriptor, capability = open_windows_external_file(source)
+                try:
+                    opened = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or _wheel_file_binding(opened) != _wheel_file_binding(info)
+                        or capture_windows_external_fd(
+                            descriptor,
+                            generation_token=capability.generation_token,
+                        )
+                        != capability
+                        or validate_windows_external_file(capability) != source
+                    ):
+                        raise OSError
+                finally:
+                    os.close(descriptor)
+            elif stat.S_IMODE(info.st_mode) & 0o022:
                 raise OSError
     except OSError:
         raise FreeCADLaunchError("the installed VibeCAD FreeCAD addon is incomplete") from None
@@ -158,6 +183,26 @@ def _progress(value: status.RuntimeStatus) -> None:
     message = value.message.strip() if type(value.message) is str else ""
     if message:
         print(f"VibeCAD runtime: {message}", file=sys.stderr, flush=True)
+
+
+def _wheel_file_binding(value: os.stat_result) -> tuple[int, ...]:
+    """Return stable mutation fields while deliberately excluding access time.
+
+    On Windows, a path stat and a CRT-descriptor stat can expose different
+    ``st_ctime`` meanings (NTFS birth time versus change time).  Birth time is
+    stable across those two views; the native File ID capability remains the
+    identity authority.
+    """
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        (int(value.st_birthtime_ns) if sys.platform == "win32" else value.st_ctime_ns),
+    )
 
 
 def _local_distribution_wheel() -> tuple[Path, str] | None:
@@ -186,11 +231,41 @@ def _local_distribution_wheel() -> tuple[Path, str] | None:
         if canonical != wheel or not stat.S_ISREG(info.st_mode):
             raise OSError
         digest = hashlib.sha256()
-        with wheel.open("rb") as stream:
-            while chunk := stream.read(1 << 20):
-                digest.update(chunk)
-        if wheel.lstat() != info:
-            raise OSError
+        if sys.platform == "win32":
+            descriptor, capability = open_windows_external_file(wheel)
+            try:
+                before = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or _wheel_file_binding(before) != _wheel_file_binding(info)
+                    or capture_windows_external_fd(
+                        descriptor,
+                        generation_token=capability.generation_token,
+                    )
+                    != capability
+                ):
+                    raise OSError
+                while chunk := os.read(descriptor, 1 << 20):
+                    digest.update(chunk)
+                after = os.fstat(descriptor)
+                if (
+                    _wheel_file_binding(after) != _wheel_file_binding(before)
+                    or capture_windows_external_fd(
+                        descriptor,
+                        generation_token=capability.generation_token,
+                    )
+                    != capability
+                    or validate_windows_external_file(capability) != wheel
+                ):
+                    raise OSError
+            finally:
+                os.close(descriptor)
+        else:
+            with wheel.open("rb") as stream:
+                while chunk := stream.read(1 << 20):
+                    digest.update(chunk)
+            if _wheel_file_binding(wheel.lstat()) != _wheel_file_binding(info):
+                raise OSError
         return wheel, digest.hexdigest()
     except (ImportError, json.JSONDecodeError, OSError, TypeError, UnicodeError, ValueError):
         raise FreeCADLaunchError(
@@ -235,10 +310,27 @@ def _require_managed_runtime() -> tuple[Path, status.RuntimeGenerationEvidence, 
         target = binary.resolve(strict=True)
         target.relative_to(prefix)
         target_info = target.lstat()
-        if (
-            not binary.is_absolute()
-            or not stat.S_ISREG(info.st_mode)
-            or not stat.S_ISREG(target_info.st_mode)
+        if not binary.is_absolute() or not stat.S_ISREG(info.st_mode):
+            raise OSError
+        if sys.platform == "win32":
+            if binary != target or not stat.S_ISREG(target_info.st_mode):
+                raise OSError
+            descriptor, capability = open_windows_external_file(binary)
+            try:
+                if (
+                    not stat.S_ISREG(os.fstat(descriptor).st_mode)
+                    or capture_windows_external_fd(
+                        descriptor,
+                        generation_token=capability.generation_token,
+                    )
+                    != capability
+                    or validate_windows_external_file(capability) != binary
+                ):
+                    raise OSError
+            finally:
+                os.close(descriptor)
+        elif (
+            not stat.S_ISREG(target_info.st_mode)
             or stat.S_IMODE(info.st_mode) & 0o022
             or stat.S_IMODE(target_info.st_mode) & 0o022
             or not os.access(target, os.X_OK)
@@ -250,9 +342,46 @@ def _require_managed_runtime() -> tuple[Path, status.RuntimeGenerationEvidence, 
 
 
 def _prepare_private_profile(root: Path) -> tuple[Path, Path, Path, Path]:
+    children = tuple(root / name for name in ("home", "data", "temp", "tmp"))
+    if sys.platform == "win32":
+        try:
+            if root != root.resolve(strict=True) or not stat.S_ISDIR(root.lstat().st_mode):
+                raise OSError
+            set_private_dacl(root)
+            root_capability = capture_windows_path(root, directory=True)
+            child_capabilities = tuple(
+                ensure_private_directory(
+                    child,
+                    expected_parent=root_capability,
+                    exclusive=True,
+                )
+                for child in children
+            )
+            config = children[0] / "user.cfg"
+            descriptor, config_capability = open_private_file(
+                config,
+                exclusive=True,
+                expected_parent=child_capabilities[0],
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(_USER_CONFIG.encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            if (
+                validate_windows_path(root_capability, directory=True) != root
+                or any(
+                    validate_windows_path(capability, directory=True) != child
+                    for capability, child in zip(child_capabilities, children, strict=True)
+                )
+                or validate_windows_path(config_capability, directory=False) != config
+            ):
+                raise OSError
+        except (OSError, TypeError, ValueError):
+            raise FreeCADLaunchError("the private FreeCAD profile is unavailable") from None
+        return children
+
     if root != root.resolve(strict=True) or stat.S_IMODE(root.lstat().st_mode) != 0o700:
         raise FreeCADLaunchError("the private FreeCAD session root is unsafe")
-    children = tuple(root / name for name in ("home", "data", "temp", "tmp"))
     try:
         for child in children:
             child.mkdir(mode=0o700)
@@ -266,6 +395,24 @@ def _prepare_private_profile(root: Path) -> tuple[Path, Path, Path, Path]:
 
 def _write_activation_script(root: Path) -> Path:
     script = root / "activate_vibecad.py"
+    if sys.platform == "win32":
+        try:
+            root_capability = capture_windows_path(root, directory=True)
+            descriptor, script_capability = open_private_file(
+                script,
+                exclusive=True,
+                expected_parent=root_capability,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(_ACTIVATION_SCRIPT.encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            if validate_windows_path(script_capability, directory=False) != script:
+                raise OSError
+        except (OSError, TypeError, ValueError):
+            raise FreeCADLaunchError("the VibeCAD activation script is unavailable") from None
+        return script
+
     try:
         script.write_text(_ACTIVATION_SCRIPT, encoding="utf-8")
         script.chmod(0o600)
@@ -280,6 +427,7 @@ def _child_environment(
     profile: tuple[Path, Path, Path, Path],
     ready_file: Path,
     error_file: Path,
+    managed_prefix: Path,
 ) -> dict[str, str]:
     home, data, freecad_temp, process_temp = profile
     environment = dict(os.environ)
@@ -297,6 +445,24 @@ def _child_environment(
             "VIBECAD_FREECAD_READY_FILE": str(ready_file),
         }
     )
+    environment.setdefault("VIBECAD_HOME", str(paths.vibecad_home()))
+    if sys.platform == "win32":
+        # FreeCAD.exe is linked against DLLs shipped beside the managed
+        # conda environment.  Launching it by absolute path does not perform
+        # conda activation, so Windows cannot otherwise resolve Qt, OCCT, and
+        # the other runtime DLLs.  Keep the user's remaining PATH entries,
+        # but put the exact reviewed prefix first and keep all GUI scratch
+        # files inside this session's private directory.
+        managed_paths = (
+            managed_prefix / "Library" / "bin",
+            managed_prefix,
+            managed_prefix / "Scripts",
+        )
+        environment["PATH"] = os.pathsep.join(
+            (*map(str, managed_paths), environment.get("PATH", ""))
+        )
+        environment["TEMP"] = str(process_temp)
+        environment["TMP"] = str(process_temp)
     return environment
 
 
@@ -344,7 +510,11 @@ def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         return
     except subprocess.TimeoutExpired:
         pass
-    if not _forward_signal(process, signal.SIGKILL):
+    # Windows exposes no SIGKILL.  Popen.kill() is the native process-handle
+    # termination primitive there; looking up signal.SIGKILL would itself
+    # raise AttributeError on the GUI failure path we are trying to contain.
+    kill_signal = getattr(signal, "SIGKILL", None)
+    if kill_signal is None or not _forward_signal(process, kill_signal):
         process.kill()
     process.wait(timeout=5)
 
@@ -430,7 +600,7 @@ def launch() -> int:
                     str(addon),
                     str(activation_script),
                 ],
-                env=_child_environment(profile, ready_file, error_file),
+                env=_child_environment(profile, ready_file, error_file, prefix),
                 start_new_session=True,
             )
             try:

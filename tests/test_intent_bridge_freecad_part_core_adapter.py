@@ -676,8 +676,9 @@ def _real_batch_code(
 
     return f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part
 import vibecad.parametric.freecad_part_core_rules as part_core_rules

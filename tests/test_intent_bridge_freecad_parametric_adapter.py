@@ -138,11 +138,9 @@ def _graph(
             term_definition_sha256=family_definition,
         )
     if locator_definition is not None:
-        groove_terms[groove_terms.index(GROOVE_SKETCH_V_AXIS_LOCATOR_TERM)] = (
-            dataclasses.replace(
-                GROOVE_SKETCH_V_AXIS_LOCATOR_TERM,
-                term_definition_sha256=locator_definition,
-            )
+        groove_terms[groove_terms.index(GROOVE_SKETCH_V_AXIS_LOCATOR_TERM)] = dataclasses.replace(
+            GROOVE_SKETCH_V_AXIS_LOCATOR_TERM,
+            term_definition_sha256=locator_definition,
         )
     base = FeatureNodeV2(
         node_id="node_base",
@@ -538,10 +536,7 @@ def test_adapter_lowers_exact_graph_to_atomic_content_addressed_authority_free_p
     assert plan.angle_degrees == 360.0
     assert plan.reversed is False
     assert plan.lowering_request_sha256 == request.request_digest
-    assert (
-        plan.adapter_contract_sha256
-        == FREECAD_GROOVE_ADAPTER_DESCRIPTOR.adapter_contract_sha256
-    )
+    assert plan.adapter_contract_sha256 == FREECAD_GROOVE_ADAPTER_DESCRIPTOR.adapter_contract_sha256
     assert payload == plan.canonical_bytes
     assert result.plan_document.content_sha256 == hashlib.sha256(payload).hexdigest()
     assert result.plan_document.document_digest == plan.plan_sha256
@@ -559,9 +554,7 @@ def test_adapter_lowers_exact_graph_to_atomic_content_addressed_authority_free_p
 
 
 def test_adapter_rejects_semantic_substitution_and_sink_failure_without_publication() -> None:
-    wrong_request, wrong_reader, wrong_policy = _request(
-        _graph(family_definition="f" * 64)
-    )
+    wrong_request, wrong_reader, wrong_policy = _request(_graph(family_definition="f" * 64))
     sink = _MemoryPlanSink()
     with pytest.raises(IntentBridgeError) as semantic_error:
         _lower(FreeCADParametricGrooveAdapter(sink), wrong_request, wrong_reader, wrong_policy)
@@ -704,8 +697,9 @@ def test_real_freecad_groove_create_edit_save_reopen_and_rollback(
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 from pathlib import Path
 import FreeCAD, Part, Sketcher
 from vibecad.parametric.freecad_partdesign_sketch_rules import (

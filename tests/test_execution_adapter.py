@@ -225,14 +225,30 @@ def existing_freecad_python() -> str:
 
     if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
         pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+
     prefix_value = os.environ.get("VIBECAD_FREECAD_ENV")
-    if not prefix_value:
-        pytest.fail("set VIBECAD_FREECAD_ENV to an existing ready FreeCAD environment")
-    prefix = Path(prefix_value).expanduser()
-    python = prefix / "bin" / "python"
+    if sys.platform == "win32":
+        python_value = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+        if prefix_value:
+            pytest.fail("the Windows real gate requires the default managed runtime")
+        if not python_value:
+            pytest.fail("set VIBECAD_MANAGED_FREECAD_PYTHON to the managed Python")
+        prefix = runtime_paths.env_prefix().expanduser().resolve(strict=False)
+        if runtime_paths.active_runtime_prefix().expanduser().resolve(strict=False) != prefix:
+            pytest.fail("the default managed FreeCAD runtime is not selected")
+        python = Path(python_value).expanduser().resolve(strict=False)
+        expected_python = runtime_paths.env_python_for(prefix).resolve(strict=False)
+        if python != expected_python:
+            pytest.fail("VIBECAD_MANAGED_FREECAD_PYTHON is not the default managed Python")
+    else:
+        if not prefix_value:
+            pytest.fail("set VIBECAD_FREECAD_ENV to an existing ready FreeCAD environment")
+        prefix = Path(prefix_value).expanduser()
+        python = runtime_paths.env_python_for(prefix)
     sentinel = prefix / ".vibecad_ready"
     if not python.is_file():
-        pytest.fail("VIBECAD_FREECAD_ENV does not contain bin/python")
+        pytest.fail("VIBECAD_FREECAD_ENV does not contain its platform Python")
     if not sentinel.is_file():
         pytest.fail("VIBECAD_FREECAD_ENV does not contain the ready sentinel")
     return str(python)
@@ -1664,6 +1680,7 @@ def test_adapter_source_has_no_dynamic_or_reflective_handler_resolution() -> Non
 @pytest.mark.slow
 def test_real_freecad_legacy_custom_registry_flow_and_cleanup(
     existing_freecad_python: str,
+    tmp_path: Path,
 ) -> None:
     source = Path(__file__).resolve().parent.parent / "src"
     code = """
@@ -1789,12 +1806,21 @@ finally:
 print(json.dumps(payload, ensure_ascii=False))
 """.replace("__SOURCE__", repr(str(source)))
 
+    environment = None
+    if sys.platform == "win32":
+        from vibecad._file_compat import ensure_private_directory
+
+        freecad_user_temp = (tmp_path / "freecad-user-temp").resolve(strict=False)
+        ensure_private_directory(freecad_user_temp)
+        environment = {**os.environ, "FREECAD_USER_TEMP": str(freecad_user_temp)}
+
     process = subprocess.run(
         [existing_freecad_python, "-c", code],
         capture_output=True,
         text=True,
         timeout=180,
         check=False,
+        env=environment,
     )
 
     assert process.returncode == 0, process.stderr

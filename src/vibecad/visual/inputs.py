@@ -9,7 +9,7 @@ import hashlib
 import hmac
 import io
 import json
-import os
+import os as _native_os
 import re
 import stat
 import sys
@@ -23,7 +23,9 @@ from typing import Any
 
 from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 
+from vibecad import _file_compat
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
 from vibecad.visual.contracts import (
     MAX_DIMENSION_HINTS,
     MAX_IMAGE_PIXELS,
@@ -60,6 +62,8 @@ from vibecad.visual.contracts import (
     visual_input_identity,
 )
 from vibecad.workflow.lease import LeaseError, LeaseErrorCode, ResourceLeaseManager
+
+os = _storage_os
 
 _COPY_CHUNK_BYTES = 64 * 1024
 _LEASE_WAIT_SECONDS = 3.0
@@ -330,18 +334,42 @@ class DescriptorSource:
 def _identity_body(value: os.stat_result) -> dict[str, object]:
     return {
         "schema_version": VISUAL_SCHEMA_VERSION,
-        "dev": value.st_dev,
-        "ino": value.st_ino,
+        "dev": _wire_identity(value.st_dev, width=16),
+        "ino": _wire_identity(value.st_ino, width=32),
         "mode": value.st_mode,
         "uid": value.st_uid,
         "nlink": value.st_nlink,
         "size": value.st_size,
         "mtime_ns": str(value.st_mtime_ns),
-        "ctime_ns": str(value.st_ctime_ns),
+        "ctime_ns": str(_stable_ctime_ns(value)),
     }
 
 
+def _wire_identity(value: int, *, width: int) -> int | str:
+    if sys.platform != "win32":
+        return value
+    if type(value) is not int or value < 0 or value >= 1 << (width * 4):
+        _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+    return f"{value:0{width}x}"
+
+
+def _parse_wire_identity(value: object, *, width: int) -> int:
+    if sys.platform != "win32":
+        if type(value) is not int:
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        return value
+    if type(value) is not str or len(value) != width or re.fullmatch(r"[0-9a-f]+", value) is None:
+        _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+    return int(value, 16)
+
+
 def _safe_source(value: os.stat_result) -> bool:
+    if sys.platform == "win32":
+        return (
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and 0 < value.st_size <= MAX_IMAGE_SOURCE_BYTES
+        )
     return (
         stat.S_ISREG(value.st_mode)
         and value.st_uid == os.geteuid()
@@ -380,8 +408,14 @@ def _source_identity(value: os.stat_result) -> tuple[int, int, int, int, int, in
         value.st_nlink,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        _stable_ctime_ns(value),
     )
+
+
+def _stable_ctime_ns(value: os.stat_result) -> int:
+    if sys.platform == "win32":
+        return int(getattr(value, "st_birthtime_ns", value.st_ctime_ns))
+    return int(value.st_ctime_ns)
 
 
 def _validate_locator(
@@ -390,9 +424,11 @@ def _validate_locator(
     locator: Mapping[str, object],
 ) -> tuple[int, int, int, int, int, int, int, int]:
     data = _exact_mapping(locator, _LOCATOR_FIELDS)
-    for key in ("schema_version", "dev", "ino", "mode", "uid", "nlink", "size"):
+    for key in ("schema_version", "mode", "uid", "nlink", "size"):
         if type(data[key]) is not int:
             _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+    dev = _parse_wire_identity(data["dev"], width=16)
+    ino = _parse_wire_identity(data["ino"], width=32)
     if data["schema_version"] != VISUAL_SCHEMA_VERSION:
         _raise(VisualInputStoreErrorCode.INVALID_INPUT)
     for key in ("mtime_ns", "ctime_ns"):
@@ -409,8 +445,8 @@ def _validate_locator(
     if not hmac.compare_digest(digest, expected):
         _raise(VisualInputStoreErrorCode.INVALID_INPUT)
     identity = (
-        data["dev"],
-        data["ino"],
+        dev,
+        ino,
         data["mode"],
         data["uid"],
         data["nlink"],
@@ -421,8 +457,8 @@ def _validate_locator(
     synthetic = os.stat_result(
         (
             data["mode"],
-            data["ino"],
-            data["dev"],
+            ino,
+            dev,
             data["nlink"],
             data["uid"],
             0,
@@ -447,6 +483,14 @@ def _write_all(fd: int, raw: bytes) -> None:
 
 
 def _rename_directory_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    if sys.platform == "win32":
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        return
     try:
         library = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":
@@ -1057,20 +1101,26 @@ class VisualInputStore:
         try:
             duplicate = os.dup(source_fd)
             os.set_inheritable(duplicate, False)
-            before = os.fstat(duplicate)
+            if sys.platform == "win32":
+                _file_compat.require_read_only(duplicate)
+            before = _native_os.fstat(duplicate)
             if not _safe_source(before) or _source_identity(before) != expected:
                 _raise(VisualInputStoreErrorCode.INVALID_INPUT)
             digest = hashlib.sha256()
             remaining = before.st_size
             offset = 0
             while remaining:
-                chunk = os.pread(duplicate, min(_COPY_CHUNK_BYTES, remaining), offset)
+                chunk = _file_compat.pread(
+                    duplicate,
+                    min(_COPY_CHUNK_BYTES, remaining),
+                    offset,
+                )
                 if not chunk:
                     _raise(VisualInputStoreErrorCode.INVALID_INPUT)
                 digest.update(chunk)
                 remaining -= len(chunk)
                 offset += len(chunk)
-            if _source_identity(os.fstat(duplicate)) != expected:
+            if _source_identity(_native_os.fstat(duplicate)) != expected:
                 _raise(VisualInputStoreErrorCode.INVALID_INPUT)
             return digest.hexdigest(), before.st_size
         finally:
@@ -1090,7 +1140,9 @@ class VisualInputStore:
         try:
             duplicate = os.dup(source_fd)
             os.set_inheritable(duplicate, False)
-            before = os.fstat(duplicate)
+            if sys.platform == "win32":
+                _file_compat.require_read_only(duplicate)
+            before = _native_os.fstat(duplicate)
             if not _safe_source(before) or _source_identity(before) != expected:
                 _raise(VisualInputStoreErrorCode.INVALID_INPUT)
             target = os.open(
@@ -1103,14 +1155,18 @@ class VisualInputStore:
             remaining = before.st_size
             offset = 0
             while remaining:
-                chunk = os.pread(duplicate, min(_COPY_CHUNK_BYTES, remaining), offset)
+                chunk = _file_compat.pread(
+                    duplicate,
+                    min(_COPY_CHUNK_BYTES, remaining),
+                    offset,
+                )
                 if not chunk:
                     _raise(VisualInputStoreErrorCode.INVALID_INPUT)
                 digest.update(chunk)
                 _write_all(target, chunk)
                 remaining -= len(chunk)
                 offset += len(chunk)
-            after = os.fstat(duplicate)
+            after = _native_os.fstat(duplicate)
             if _source_identity(after) != expected:
                 _raise(VisualInputStoreErrorCode.INVALID_INPUT)
             os.fsync(target)
@@ -1134,7 +1190,7 @@ class VisualInputStore:
     ) -> tuple[int, int, Image.Image]:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=stage_fd)
         try:
-            header = os.pread(fd, 16, 0)
+            header = _file_compat.pread(fd, 16, 0)
             expected_format = "JPEG" if declared_mime is ImageMime.JPEG else "PNG"
             if declared_mime is ImageMime.JPEG:
                 magic_ok = header.startswith(b"\xff\xd8\xff")
@@ -1419,7 +1475,7 @@ class VisualInputStore:
             if (
                 not self._root.regular_file(info, maximum=MAX_IMAGE_SET_RECORD_BYTES)
                 or info.st_size != len(raw)
-                or os.pread(fd, len(raw) + 1, 0) != raw
+                or _file_compat.pread(fd, len(raw) + 1, 0) != raw
             ):
                 _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
             self._root.verify_file_entry(
@@ -1462,7 +1518,7 @@ class VisualInputStore:
             if (
                 not self._root.regular_file(info, maximum=MAX_IMAGE_SET_RECORD_BYTES)
                 or info.st_size != len(raw)
-                or os.pread(fd, len(raw) + 1, 0) != raw
+                or _file_compat.pread(fd, len(raw) + 1, 0) != raw
             ):
                 _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
             self._root.verify_file_entry(
@@ -1563,7 +1619,7 @@ class VisualInputStore:
                     maximum=MAX_IMAGE_SET_RECORD_BYTES,
                 )
                 or opened.st_size != len(raw)
-                or os.pread(fd, len(raw) + 1, 0) != raw
+                or _file_compat.pread(fd, len(raw) + 1, 0) != raw
             ):
                 _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
             after = os.fstat(fd)
@@ -1714,12 +1770,14 @@ class VisualInputStore:
         finally:
             os.close(directory_fd)
         current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        if (
-            (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
-            or not stat.S_ISDIR(current.st_mode)
-            or current.st_uid != self._root.uid
-            or stat.S_IMODE(current.st_mode) != 0o700
-        ):
+        identity_changed = (current.st_dev, current.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        )
+        posix_permissions_changed = sys.platform != "win32" and (
+            current.st_uid != self._root.uid or stat.S_IMODE(current.st_mode) != 0o700
+        )
+        if identity_changed or not stat.S_ISDIR(current.st_mode) or posix_permissions_changed:
             _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
         os.rmdir(name, dir_fd=root_fd)
         os.fsync(root_fd)
@@ -1885,7 +1943,7 @@ class VisualInputStore:
                         dir_fd=directory_fd,
                     )
                     try:
-                        if not os.pread(fd, len(magic), 0).startswith(magic):
+                        if not _file_compat.pread(fd, len(magic), 0).startswith(magic):
                             _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
                         with os.fdopen(os.dup(fd), "rb") as stream, Image.open(stream) as probe:
                             expected_format = "JPEG" if ref.mime is ImageMime.JPEG else "PNG"

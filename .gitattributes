@@ -1,0 +1,4 @@
+# This compatibility corpus is an exact byte-level fixture, not checkout text.
+/tests/fixtures/durable_v1/** -text
+# Release attestation resources and their generated pin source are byte-canonical.
+/src/vibecad/execution/_attestations/** -text

@@ -227,10 +227,11 @@ without creating, copying, or cleaning any delivery file; only then should
 
 ## Installation: The MCP Service and Agent Skill Are Separate
 
-The current MCPB product declaration covers only the verified macOS (Darwin) path. Installing
-`VibeCAD.mcpb` installs the MCP service, but the bundled Skill is archive content and is not
-activated automatically. The host must separately copy or link `skills/vibecad-agent/`, then
-restart or reload the host.
+The current MCPB product declaration covers the verified macOS (Darwin) and Windows x86-64
+paths. Installing `VibeCAD.mcpb` installs the MCP service, but the bundled Skill is archive
+content and is not activated automatically. The host must separately copy or link
+`skills/vibecad-agent/`, then restart or reload the host. Linux and Windows on ARM are not part
+of this support declaration.
 
 Skill discovery paths are:
 
@@ -282,12 +283,20 @@ contract paths that WorkBuddy may otherwise surface only as `-32603`. It is not
 an artifact adapter or second execution path: ResourceLink/Blob delivery stays
 native MCP, and the existing Task Kernel revalidates and executes the program.
 
+The Windows host path is also verified with WorkBuddy 5.3.13 / CLI 2.115.0:
+one real task reached committed HEAD, all deterministic box checks passed, and
+native FCStd/STEP resource reads matched the VibeCAD manifest byte-for-byte.
+For that exact host version, use `"draft_id": "committed"` when selecting
+committed artifacts; VibeCAD normalizes this documented alias to the canonical
+`null` scope without changing draft or authority semantics.
+
 On first launch, the extension needs network access to fetch locked Python packages and, when
 needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
-cache. The default macOS data root is typically:
+cache. The default data root is platform-specific:
 
 ```text
-~/Library/Application Support/VibeCAD/
+macOS:  ~/Library/Application Support/VibeCAD/
+Windows: %LOCALAPPDATA%\VibeCAD\
 ```
 
 Runtime and project data are separate. `uninstall_runtime` first presents a preview and then

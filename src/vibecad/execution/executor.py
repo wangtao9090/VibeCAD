@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import zipfile
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -27,6 +28,7 @@ from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 
+from vibecad import _file_compat
 from vibecad.engine.session import Session as _Session
 from vibecad.engine.session import SessionLifecycleError as _SessionLifecycleError
 from vibecad.execution.adapter import (
@@ -149,6 +151,8 @@ _SIGNATURE_WINDOW_BYTES = 1024 * 1024
 _MAX_ZIP_ENTRIES = 4096
 _CHECKPOINT_NAME_ATTEMPTS = 8
 _REVISION_PATTERN = re.compile(r"revision_[0-9a-f]{32}")
+_WINDOWS_CAD_LEGACY_PATH_BUDGET = 220
+_WINDOWS_CAD_BRIDGE_ATTRIBUTE = "_vibecad_executor_windows_cad_bridge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +163,56 @@ class _ArtifactSnapshot:
 
 class _ArtifactReadFailure(Exception):
     """Private marker whose details never cross the executor boundary."""
+
+
+@dataclass(slots=True)
+class _WindowsCadBridgeOwner:
+    """Keep one exact short FCStd copy alive for a loaded Windows document."""
+
+    manager: object
+    directory_capability: object
+    source_directory_capability: object
+    source_identity: object
+    staged_identity: object
+    closed: bool = False
+
+    def _validate_live_bridge(self) -> None:
+        if self.closed:
+            raise OSError("Windows CAD bridge is closed")
+        from vibecad.worker import windows_files
+
+        windows_files.validate_entry(self.staged_identity)
+        windows_files.validate_directory(self.directory_capability)
+
+    def validate_after_load(self) -> None:
+        from vibecad.worker import windows_files
+
+        windows_files.validate_entry(self.source_identity)
+        windows_files.validate_directory(self.source_directory_capability)
+        self._validate_live_bridge()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        validation_error: BaseException | None = None
+        try:
+            # The revision/candidate source may be intentionally retired while
+            # this document is still open.  Its FileID/DACL were revalidated
+            # immediately after load; only the live short bridge must remain
+            # pinned until Session.close_document completes.
+            self._validate_live_bridge()
+        except BaseException as error:
+            validation_error = error
+        cleanup_error: BaseException | None = None
+        try:
+            self.manager.__exit__(None, None, None)  # type: ignore[attr-defined]
+        except BaseException as error:
+            cleanup_error = error
+        self.closed = True
+        if cleanup_error is not None:
+            raise cleanup_error
+        if validation_error is not None:
+            raise validation_error
 
 
 class _ObservationFailure(Exception):
@@ -519,6 +573,11 @@ def _prefer_cleanup_failure(
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    creation_ns = (
+        int(value.st_birthtime_ns)
+        if sys.platform == "win32" and hasattr(value, "st_birthtime_ns")
+        else int(value.st_ctime_ns)
+    )
     return (
         value.st_dev,
         value.st_ino,
@@ -526,7 +585,7 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_nlink,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        creation_ns,
     )
 
 
@@ -535,10 +594,154 @@ def _ordinary_owned_file(value: os.stat_result) -> bool:
         return False
     if value.st_size <= 0 or value.st_size > _MAX_ARTIFACT_BYTES:
         return False
+    if sys.platform == "win32":
+        # The caller must pair this metadata predicate with a native Windows
+        # file capability.  CRT uid values are not an ownership authority.
+        return True
     try:
         return value.st_uid == os.geteuid()
     except AttributeError:
-        return True
+        return False
+
+
+def _windows_path_key(path: Path) -> str:
+    """Return one comparable Win32 spelling, accepting the verbatim prefix."""
+
+    raw = os.path.abspath(path)
+    if raw.startswith("\\\\?\\UNC\\"):
+        raw = "\\\\" + raw[8:]
+    elif raw.startswith("\\\\?\\"):
+        raw = raw[4:]
+    return os.path.normcase(raw)
+
+
+def _windows_path_units(path: Path) -> int:
+    """Count the UTF-16 code units consumed by one Win32 path."""
+
+    return len(os.fspath(path).encode("utf-16-le")) // 2
+
+
+def _windows_cad_path_needs_bridge(path: Path) -> bool:
+    return (
+        sys.platform == "win32"
+        and _windows_path_units(Path(os.path.abspath(path))) >= _WINDOWS_CAD_LEGACY_PATH_BUDGET
+    )
+
+
+def _stage_windows_cad_input(path: Path) -> tuple[Path, _WindowsCadBridgeOwner]:
+    """Copy one long private FCStd into a short, identity-pinned CAD bridge."""
+
+    if sys.platform != "win32":
+        raise _ArtifactReadFailure
+    freecad_temp = os.environ.get("FREECAD_USER_TEMP")
+    if type(freecad_temp) is not str or not freecad_temp:
+        raise _ArtifactReadFailure
+    # RevisionStore deliberately returns a Win32 verbatim spelling for long
+    # paths.  Capability capture opens that path with a verbatim prefix of its
+    # own, but GetFinalPathNameByHandleW reports the ordinary absolute
+    # spelling.  Normalize only the spelling here; the native FileID/DACL
+    # checks below remain the authority for object identity.
+    source_path = Path(os.path.abspath(_freecad_application_path(path)))
+    bridge_parent_path = Path(os.path.abspath(freecad_temp))
+    bridge = None
+    entered = False
+    try:
+        from vibecad.worker import windows_files
+
+        source_directory = _file_compat.capture_windows_path(
+            source_path.parent,
+            directory=True,
+        )
+        source = windows_files.capture_entry(
+            source_directory,
+            source_path.name,
+        )
+        bridge_parent = _file_compat.capture_windows_path(
+            bridge_parent_path,
+            directory=True,
+        )
+        bridge = windows_files.cad_staging_directory(
+            parent_capability=bridge_parent,
+        )
+        staging = bridge.__enter__()
+        entered = True
+        staged = windows_files.stage_cad_input(
+            source_directory,
+            source,
+            staging,
+            source_path.name,
+        )
+        staged_path = windows_files.validate_entry(staged)
+        if _windows_path_units(staged_path) >= _WINDOWS_CAD_LEGACY_PATH_BUDGET:
+            raise OSError("Windows CAD bridge path exceeds the legacy budget")
+        owner = _WindowsCadBridgeOwner(
+            manager=bridge,
+            directory_capability=staging,
+            source_directory_capability=source_directory,
+            source_identity=source,
+            staged_identity=staged,
+        )
+        owner.validate_after_load()
+        return staged_path, owner
+    except BaseException:
+        if entered and bridge is not None:
+            try:
+                bridge.__exit__(None, None, None)
+            except BaseException:
+                pass
+        raise _ArtifactReadFailure from None
+
+
+def _attach_windows_cad_bridge(session: object, owner: _WindowsCadBridgeOwner) -> None:
+    if getattr(session, _WINDOWS_CAD_BRIDGE_ATTRIBUTE, None) is not None:
+        raise _ArtifactReadFailure
+    try:
+        setattr(session, _WINDOWS_CAD_BRIDGE_ATTRIBUTE, owner)
+    except (AttributeError, TypeError):
+        raise _ArtifactReadFailure from None
+
+
+def _session_windows_cad_bridge(session: object) -> _WindowsCadBridgeOwner | None:
+    owner = getattr(session, _WINDOWS_CAD_BRIDGE_ATTRIBUTE, None)
+    if owner is None:
+        return None
+    if type(owner) is not _WindowsCadBridgeOwner:
+        raise _SessionLifecycleError("invalid Windows CAD bridge owner")
+    return owner
+
+
+def _release_session_windows_cad_bridge(session: object) -> None:
+    owner = _session_windows_cad_bridge(session)
+    if owner is None:
+        return
+    owner.close()
+    try:
+        delattr(session, _WINDOWS_CAD_BRIDGE_ATTRIBUTE)
+    except AttributeError:
+        raise _SessionLifecycleError("Windows CAD bridge owner disappeared") from None
+
+
+def _discard_failed_loaded_session(
+    session: object,
+    owner: _WindowsCadBridgeOwner | None,
+) -> bool:
+    """Best-effort close in document-before-bridge order; report any poison."""
+
+    failed = False
+    try:
+        session.close_document()  # type: ignore[attr-defined]
+    except _SessionLifecycleError:
+        failed = True
+    except Exception:
+        pass
+    except BaseException:
+        failed = True
+    if owner is not None:
+        try:
+            owner.close()
+        except BaseException:
+            failed = True
+    return failed
 
 
 def _step_placeholder_identity(value: os.stat_result) -> tuple[int, ...] | None:
@@ -586,6 +789,40 @@ def _step_output_matches_placeholder(
             value.st_nlink,
         )
         == placeholder_identity
+    )
+
+
+def _windows_step_output_matches_placeholder(
+    path: Path,
+    value: os.stat_result,
+    placeholder: _file_compat.WindowsPathCapability,
+    parent: _file_compat.WindowsPathCapability,
+) -> bool:
+    """Validate one STEP output against its private NTFS capability."""
+
+    if sys.platform != "win32":
+        return False
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or value.st_nlink != 1
+        or value.st_size <= 0
+        or value.st_size > _MAX_ARTIFACT_BYTES
+    ):
+        return False
+    try:
+        _file_compat.validate_windows_path(parent, directory=True)
+        validated = _file_compat.validate_windows_path(
+            placeholder,
+            directory=False,
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+    return validated == path and (
+        int(value.st_dev),
+        int(value.st_ino),
+    ) == (
+        placeholder.volume,
+        placeholder.file_id,
     )
 
 
@@ -657,22 +894,44 @@ def _validate_step_envelope(prefix: bytes, suffix: bytes, saw_nul: bool) -> None
 def _read_artifact(path: object, artifact_format: str) -> _ArtifactSnapshot:
     if not isinstance(path, Path) or artifact_format not in {"fcstd", "step"}:
         raise _ArtifactReadFailure
-    try:
-        before = os.lstat(path)
-    except OSError:
-        raise _ArtifactReadFailure from None
+    fd = -1
+    windows_capability = None
+    if sys.platform == "win32":
+        try:
+            absolute = Path(os.path.abspath(path))
+            fd, windows_capability = _file_compat.open_windows_external_file(absolute)
+            before = os.fstat(fd)
+            if _windows_path_key(absolute) != _windows_path_key(Path(windows_capability.path)):
+                raise OSError
+        except (OSError, TypeError, ValueError):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise _ArtifactReadFailure from None
+    else:
+        try:
+            before = os.lstat(path)
+        except OSError:
+            raise _ArtifactReadFailure from None
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            raise _ArtifactReadFailure from None
     if not _ordinary_owned_file(before):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         raise _ArtifactReadFailure
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        raise _ArtifactReadFailure from None
     digest = hashlib.sha256()
     prefix = bytearray()
     suffix = bytearray()
@@ -704,17 +963,30 @@ def _read_artifact(path: object, artifact_format: str) -> _ArtifactSnapshot:
         after = os.fstat(fd)
         if _stat_identity(after) != _stat_identity(opened):
             raise _ArtifactReadFailure
+        if windows_capability is not None:
+            current_capability = _file_compat.capture_windows_external_fd(
+                fd,
+                generation_token=windows_capability.generation_token,
+            )
+            if (
+                current_capability != windows_capability
+                or _file_compat.validate_windows_external_file(windows_capability)
+                != Path(windows_capability.path)
+                or _stat_identity(os.fstat(fd)) != _stat_identity(opened)
+            ):
+                raise _ArtifactReadFailure
     finally:
         try:
             os.close(fd)
         except OSError:
             raise _ArtifactReadFailure from None
-    try:
-        closed = os.lstat(path)
-    except OSError:
-        raise _ArtifactReadFailure from None
-    if _stat_identity(closed) != _stat_identity(before):
-        raise _ArtifactReadFailure
+    if windows_capability is None:
+        try:
+            closed = os.lstat(path)
+        except OSError:
+            raise _ArtifactReadFailure from None
+        if _stat_identity(closed) != _stat_identity(before):
+            raise _ArtifactReadFailure
     return _ArtifactSnapshot(sha256=digest.hexdigest(), size_bytes=before.st_size)
 
 
@@ -1373,6 +1645,7 @@ def _reloaded_observations(
     BomObservation | None,
 ]:
     probe = None
+    bridge_owner: _WindowsCadBridgeOwner | None = None
     failed = False
     shape: ShapeObservation | None = None
     entities: tuple[EntityObservation, ...] = ()
@@ -1381,7 +1654,12 @@ def _reloaded_observations(
     bom: BomObservation | None = None
     try:
         probe = _Session()
-        probe.load_document(path)
+        load_path = path
+        if _windows_cad_path_needs_bridge(path):
+            load_path, bridge_owner = _stage_windows_cad_input(path)
+        probe.load_document(load_path)
+        if bridge_owner is not None:
+            bridge_owner.validate_after_load()
         if include_shape:
             shape = _shape_observation(probe)
         entities = _entity_observations(probe)
@@ -1398,6 +1676,11 @@ def _reloaded_observations(
                 probe.close_document()
             except _SessionLifecycleError:
                 raise
+            except Exception:
+                failed = True
+        if bridge_owner is not None:
+            try:
+                bridge_owner.close()
             except Exception:
                 failed = True
     if failed:
@@ -4059,14 +4342,40 @@ def _remove_failed_artifact(path: Path) -> None:
     """Remove only an executor-owned ordinary partial file, never a link."""
 
     try:
+        if sys.platform == "win32":
+            absolute = Path(os.path.abspath(_freecad_application_path(path)))
+            descriptor, external = _file_compat.open_windows_external_file(absolute)
+            try:
+                current = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or current.st_nlink != 1
+                    or current.st_size > _MAX_ARTIFACT_BYTES
+                ):
+                    return
+                _file_compat.set_private_dacl(absolute)
+                expected = _file_compat.capture_windows_path(
+                    absolute,
+                    directory=False,
+                )
+                pinned = _file_compat.capture_windows_external_fd(
+                    descriptor,
+                    generation_token=external.generation_token,
+                )
+                if pinned != external or (expected.volume, expected.file_id) != (
+                    external.volume,
+                    external.file_id,
+                ):
+                    return
+            finally:
+                os.close(descriptor)
+            _file_compat.delete_windows_file_capability(expected)
+            return
         current = os.lstat(path)
         if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
             return
-        try:
-            if current.st_uid != os.geteuid():
-                return
-        except AttributeError:
-            pass
+        if current.st_uid != os.geteuid():
+            return
         if current.st_size > _MAX_ARTIFACT_BYTES:
             return
         os.unlink(path)
@@ -4086,6 +4395,170 @@ def _fresh_checkpoint_path(path: Path) -> Path:
         except OSError:
             raise _ArtifactReadFailure from None
     raise _ArtifactReadFailure
+
+
+def _freecad_application_path(path: Path) -> str:
+    """Strip the Win32 verbatim prefix only at the FreeCAD API boundary."""
+
+    raw = os.fspath(path)
+    if sys.platform != "win32":
+        return raw
+    if raw.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + raw[8:]
+    if raw.startswith("\\\\?\\"):
+        return raw[4:]
+    return raw
+
+
+def _checkpoint_long_windows_fcstd(document: object, path: Path) -> None:
+    """Save through a short private bridge, then publish by exact File ID."""
+
+    if sys.platform != "win32":
+        raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE)
+    freecad_temp = os.environ.get("FREECAD_USER_TEMP")
+    if type(freecad_temp) is not str or not freecad_temp:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    destination = Path(os.path.abspath(_freecad_application_path(path)))
+    bridge_parent_path = Path(os.path.abspath(freecad_temp))
+    bridge = None
+    entered = False
+    failure: ExecutorError | None = None
+    try:
+        from vibecad.worker import windows_files
+
+        destination_directory = _file_compat.capture_windows_path(
+            destination.parent,
+            directory=True,
+        )
+        expected_destination = windows_files.capture_entry(
+            destination_directory,
+            destination.name,
+        )
+        bridge_parent = _file_compat.capture_windows_path(
+            bridge_parent_path,
+            directory=True,
+        )
+        bridge = windows_files.cad_staging_directory(
+            parent_capability=bridge_parent,
+        )
+        staging = bridge.__enter__()
+        entered = True
+        staged_path = windows_files.cad_output_path(staging, "checkpoint.FCStd")
+        try:
+            with _silence_fd1():
+                document.saveCopy(_freecad_application_path(staged_path))  # type: ignore[attr-defined]
+        except Exception:
+            failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+        if failure is None:
+            try:
+                staged = windows_files.capture_cad_output(
+                    staging,
+                    "checkpoint.FCStd",
+                )
+                saved = _read_artifact(staged_path, "fcstd")
+                published = windows_files.publish_cad_output(
+                    staging,
+                    staged,
+                    destination_directory,
+                    destination.name,
+                    expected_destination=expected_destination,
+                )
+                if windows_files.validate_entry(published) != destination:
+                    raise _ArtifactReadFailure
+                if _read_artifact(destination, "fcstd") != saved:
+                    raise _ArtifactReadFailure
+            except (OSError, TypeError, ValueError, _ArtifactReadFailure):
+                failure = _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    except (OSError, TypeError, ValueError, _ArtifactReadFailure):
+        failure = _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    finally:
+        if entered and bridge is not None:
+            try:
+                bridge.__exit__(None, None, None)
+            except Exception:
+                failure = _prefer_cleanup_failure(
+                    failure,
+                    _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE),
+                )
+    if failure is not None:
+        raise failure
+
+
+def _export_long_windows_step(*, session: object, step_path: Path) -> None:
+    """Export through a short private bridge, then publish by exact File ID."""
+
+    if sys.platform != "win32":
+        raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE)
+    freecad_temp = os.environ.get("FREECAD_USER_TEMP")
+    if type(freecad_temp) is not str or not freecad_temp:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    destination = Path(os.path.abspath(_freecad_application_path(step_path)))
+    bridge_parent_path = Path(os.path.abspath(freecad_temp))
+    bridge = None
+    entered = False
+    failure: ExecutorError | None = None
+    try:
+        from vibecad.worker import windows_files
+
+        destination_directory = _file_compat.capture_windows_path(
+            destination.parent,
+            directory=True,
+        )
+        expected_destination = windows_files.capture_entry(
+            destination_directory,
+            destination.name,
+        )
+        if expected_destination.size != 0:
+            raise _ArtifactReadFailure
+        bridge_parent = _file_compat.capture_windows_path(
+            bridge_parent_path,
+            directory=True,
+        )
+        bridge = windows_files.cad_staging_directory(
+            parent_capability=bridge_parent,
+        )
+        staging = bridge.__enter__()
+        entered = True
+        reserved = windows_files.reserve_cad_output(staging, "model.step")
+        staged_path = windows_files.validate_entry(reserved)
+        try:
+            _export_session_step(
+                session=session,
+                model_path=staged_path.with_name("model.FCStd"),
+                step_path=staged_path,
+            )
+        except ExecutorError as error:
+            failure = error
+        if failure is None:
+            try:
+                staged = windows_files.capture_cad_output(staging, "model.step")
+                saved = _read_artifact(staged_path, "step")
+                published = windows_files.publish_cad_output(
+                    staging,
+                    staged,
+                    destination_directory,
+                    destination.name,
+                    expected_destination=expected_destination,
+                )
+                if windows_files.validate_entry(published) != destination:
+                    raise _ArtifactReadFailure
+                if _read_artifact(destination, "step") != saved:
+                    raise _ArtifactReadFailure
+            except (OSError, TypeError, ValueError, _ArtifactReadFailure):
+                failure = _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    except (OSError, TypeError, ValueError, _ArtifactReadFailure):
+        failure = _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    finally:
+        if entered and bridge is not None:
+            try:
+                bridge.__exit__(None, None, None)
+            except Exception:
+                failure = _prefer_cleanup_failure(
+                    failure,
+                    _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE),
+                )
+    if failure is not None:
+        raise failure
 
 
 def _require_revision_layout(revision: object) -> tuple[RevisionArtifactRef, RevisionArtifactRef]:
@@ -4281,13 +4754,45 @@ def _export_session_step(
         or model_path.parent != step_path.parent
     ):
         raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+    if sys.platform == "win32":
+        model_path = Path(os.path.abspath(_freecad_application_path(model_path)))
+        step_path = Path(os.path.abspath(_freecad_application_path(step_path)))
+        if _windows_cad_path_needs_bridge(step_path):
+            _export_long_windows_step(session=session, step_path=step_path)
+            return
     try:
         existing = os.lstat(step_path)
     except (FileNotFoundError, OSError):
         raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-    placeholder_identity = _step_placeholder_identity(existing)
-    if placeholder_identity is None:
-        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    placeholder_identity: tuple[int, ...] | None = None
+    windows_placeholder: _file_compat.WindowsPathCapability | None = None
+    windows_parent: _file_compat.WindowsPathCapability | None = None
+    if sys.platform == "win32":
+        if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1 or existing.st_size != 0:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+        try:
+            windows_parent = _file_compat.capture_windows_path(
+                step_path.parent,
+                directory=True,
+            )
+            windows_placeholder = _file_compat.capture_windows_path(
+                step_path,
+                directory=False,
+            )
+        except (OSError, TypeError, ValueError):
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if (
+            int(existing.st_dev),
+            int(existing.st_ino),
+        ) != (
+            windows_placeholder.volume,
+            windows_placeholder.file_id,
+        ):
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    else:
+        placeholder_identity = _step_placeholder_identity(existing)
+        if placeholder_identity is None:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
     try:
         parent = os.lstat(step_path.parent)
         if not stat.S_ISDIR(parent.st_mode):
@@ -4302,17 +4807,39 @@ def _export_session_step(
         with _silence_fd1():
             shape.exportStep(str(step_path))
         after_export = os.lstat(step_path)
-        if not _step_output_matches_placeholder(
-            after_export,
-            placeholder_identity,
-        ):
+        output_matches = (
+            _windows_step_output_matches_placeholder(
+                step_path,
+                after_export,
+                windows_placeholder,
+                windows_parent,
+            )
+            if windows_placeholder is not None and windows_parent is not None
+            else placeholder_identity is not None
+            and _step_output_matches_placeholder(
+                after_export,
+                placeholder_identity,
+            )
+        )
+        if not output_matches:
             raise _ArtifactReadFailure
         _read_artifact(step_path, "step")
         after_read = os.lstat(step_path)
-        if not _step_output_matches_placeholder(
-            after_read,
-            placeholder_identity,
-        ):
+        output_matches = (
+            _windows_step_output_matches_placeholder(
+                step_path,
+                after_read,
+                windows_placeholder,
+                windows_parent,
+            )
+            if windows_placeholder is not None and windows_parent is not None
+            else placeholder_identity is not None
+            and _step_output_matches_placeholder(
+                after_read,
+                placeholder_identity,
+            )
+        )
+        if not output_matches:
             raise _ArtifactReadFailure
     except _ArtifactReadFailure:
         raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
@@ -4676,20 +5203,35 @@ class InProcessCadExecutor(CadExecutionPort):
             session = _Session()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        bridge_owner: _WindowsCadBridgeOwner | None = None
         try:
-            session.load_document(path)
+            load_path = path
+            if _windows_cad_path_needs_bridge(path):
+                load_path, bridge_owner = _stage_windows_cad_input(path)
+            session.load_document(load_path)
             if require_identities:
                 _entity_observations(session)
+            if bridge_owner is not None:
+                bridge_owner.validate_after_load()
+                _attach_windows_cad_bridge(session, bridge_owner)
+                bridge_owner = None
         except _SessionLifecycleError:
+            _discard_failed_loaded_session(session, bridge_owner)
             raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
+        except _ArtifactReadFailure:
+            cleanup_failed = _discard_failed_loaded_session(session, bridge_owner)
+            raise _fixed_error(
+                ExecutorErrorCode.INTERNAL_FAILURE
+                if cleanup_failed
+                else ExecutorErrorCode.ARTIFACT_FAILURE
+            ) from None
         except Exception:
-            try:
-                session.close_document()
-            except _SessionLifecycleError:
-                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
-            except Exception:
-                pass
-            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+            cleanup_failed = _discard_failed_loaded_session(session, bridge_owner)
+            raise _fixed_error(
+                ExecutorErrorCode.INTERNAL_FAILURE
+                if cleanup_failed
+                else ExecutorErrorCode.CAD_FAILURE
+            ) from None
         return session
 
     def checkpoint_fcstd(self, session: object, path: Path) -> None:
@@ -4705,6 +5247,9 @@ class InProcessCadExecutor(CadExecutionPort):
             session.persist_state()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        if _windows_cad_path_needs_bridge(path):
+            _checkpoint_long_windows_fcstd(document, path)
+            return
         try:
             temporary = _fresh_checkpoint_path(path)
         except Exception:
@@ -4712,15 +5257,42 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             try:
                 with _silence_fd1():
-                    document.saveCopy(str(temporary))
+                    document.saveCopy(_freecad_application_path(temporary))
             except Exception:
                 raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
             try:
                 saved = _read_artifact(temporary, "fcstd")
-                os.chmod(temporary, 0o600)
+                if sys.platform == "win32":
+                    _file_compat.protect_windows_path(temporary, directory=False)
+                    source_parent = _file_compat.capture_windows_path(
+                        temporary.parent,
+                        directory=True,
+                    )
+                    source_capability = _file_compat.capture_windows_path(
+                        temporary,
+                        directory=False,
+                    )
+                    try:
+                        destination_capability = _file_compat.capture_windows_path(
+                            path,
+                            directory=False,
+                        )
+                    except FileNotFoundError:
+                        destination_capability = None
+                else:
+                    os.chmod(temporary, 0o600)
                 if _read_artifact(temporary, "fcstd") != saved:
                     raise _ArtifactReadFailure
-                os.replace(temporary, path)
+                if sys.platform == "win32":
+                    _file_compat.replace_windows_file(
+                        Path(os.path.abspath(temporary)),
+                        Path(os.path.abspath(path)),
+                        source_parent=source_parent,
+                        expected_source=source_capability,
+                        expected_destination=destination_capability,
+                    )
+                else:
+                    os.replace(temporary, path)
                 temporary = None
                 if _read_artifact(path, "fcstd") != saved:
                     raise _ArtifactReadFailure
@@ -4741,6 +5313,10 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        try:
+            _release_session_windows_cad_bridge(session)
+        except BaseException:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
 
     def execute_program(
         self,

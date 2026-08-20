@@ -43,6 +43,7 @@ def test_durable_data_layout_is_sibling_of_replaceable_runtime(monkeypatch, tmp_
     assert paths.external_runtime_receipt() == home / "runtime" / "external-runtime.json"
 
 
+@pytest.mark.windows_contract
 def test_env_python_windows(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
     monkeypatch.setattr(paths.platform, "is_windows", lambda: True)
@@ -68,6 +69,7 @@ def test_freecadcmd_honors_override(monkeypatch, tmp_path):
     assert paths.freecadcmd_path() == tmp_path / "myenv" / "bin" / "freecadcmd"
 
 
+@pytest.mark.windows_contract
 def test_freecadcmd_honors_override_windows(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
     monkeypatch.setattr(paths.platform, "is_windows", lambda: True)
@@ -96,6 +98,7 @@ def test_freecad_path_honors_override_without_side_effects(
     assert not prefix.exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFO support")
 def test_bound_external_prefix_rejects_fifo_receipt_without_blocking(
     monkeypatch,
     tmp_path,
@@ -109,7 +112,19 @@ def test_bound_external_prefix_rejects_fifo_receipt_without_blocking(
     assert paths.bound_external_prefix() is None
 
 
-@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize(
+    "windows",
+    [
+        pytest.param(
+            False,
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="POSIX mode-bit simulation is unavailable on Windows",
+            ),
+        ),
+        True,
+    ],
+)
 def test_bound_external_prefix_accepts_identity_bound_regular_receipt(
     monkeypatch,
     tmp_path,

@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic, sleep
 
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.lease import (
@@ -52,6 +53,8 @@ _TEMP_NAME_RE = re.compile(r"^\.[0-9a-f]{64}\.json\.[0-9a-f]{32}\.tmp$")
 _DECIMAL_ID_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
 _MAX_RECORD_BYTES = 2 * 1024 * 1024
 _MAX_TASK_RECORDS = 1024
+_WINDOWS_LEASE_WAIT_SECONDS = 5.0
+_WINDOWS_LEASE_RETRY_SECONDS = 0.005
 _MAX_TASK_STORE_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_JOURNAL_BYTES = 64 * 1024
 _MAX_JSON_DEPTH = 64
@@ -424,6 +427,11 @@ def _decode_record(raw: bytes, selected_task_id: str) -> StoredTaskRun:
 
 
 def _require_storage_capabilities() -> None:
+    if sys.platform == "win32" and os.name == "nt":
+        from vibecad.workflow.windows_store import require_windows_storage_capabilities
+
+        require_windows_storage_capabilities()
+        return
     missing = False
     try:
         if sys.platform not in ("darwin", "linux"):
@@ -486,6 +494,10 @@ def _coerce_root(root) -> tuple[str, ...]:
     if failed or path is None or not path.is_absolute():
         raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
     parts = path.parts
+    if sys.platform == "win32" and os.name == "nt":
+        if not parts or any(part in ("", ".", "..") for part in parts[1:]):
+            raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+        return parts
     if not parts or parts[0] != "/" or any(part in ("", ".", "..") for part in parts[1:]):
         raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
     return parts
@@ -1499,7 +1511,7 @@ def _release(lease: ResourceLease) -> bool:
 
 
 class TaskRunStore:
-    __slots__ = ("_lease_manager", "_root_identity", "_root_parts")
+    __slots__ = ("_lease_manager", "_root_identity", "_root_parts", "_windows_backend")
 
     def __init__(
         self,
@@ -1514,12 +1526,21 @@ class TaskRunStore:
             raise TypeError("lease_manager must be an exact ResourceLeaseManager")
         _require_storage_capabilities()
         parts = _coerce_root(root)
-        root_fd, root_stat = _open_root(parts, None)
-        if not _close(root_fd):
-            raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+        windows_backend = None
+        if sys.platform == "win32" and os.name == "nt":
+            from vibecad.workflow.windows_store import WindowsTaskStoreBackend
+
+            windows_backend = WindowsTaskStoreBackend(Path(*parts))
+            root_identity = windows_backend.identity
+        else:
+            root_fd, root_stat = _open_root(parts, None)
+            if not _close(root_fd):
+                raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+            root_identity = (root_stat.st_dev, root_stat.st_ino)
         self._root_parts = parts
-        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
+        self._root_identity = root_identity
         self._lease_manager = lease_manager
+        self._windows_backend = windows_backend
         catalog_lease = None
         catalog_contended = False
         try:
@@ -1538,17 +1559,32 @@ class TaskRunStore:
         return self._acquire_resource(_CATALOG_LEASE_RESOURCE)
 
     def _acquire_resource(self, resource_id: str) -> ResourceLease:
-        failed = False
-        lease = None
-        try:
-            lease = self._lease_manager.acquire(resource_id)
-        except LeaseError:
-            failed = True
-        if failed or type(lease) is not ResourceLease:
-            raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
-        return lease
+        deadline = monotonic() + _WINDOWS_LEASE_WAIT_SECONDS
+        while True:
+            failed = False
+            try:
+                lease = self._lease_manager.acquire(resource_id)
+            except LeaseError as error:
+                if (
+                    self._windows_backend is not None
+                    and error.code is LeaseErrorCode.CONTENDED
+                    and monotonic() < deadline
+                ):
+                    sleep(_WINDOWS_LEASE_RETRY_SECONDS)
+                    continue
+                failed = True
+                lease = None
+            if failed:
+                # Raise outside the LeaseError handler so the public error has
+                # no hidden exception context, matching the POSIX contract.
+                raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+            if type(lease) is not ResourceLease:
+                raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+            return lease
 
     def _load_locked(self, task_id: str):
+        if self._windows_backend is not None:
+            return self._windows_backend.load(task_id)
         root_fd = -1
         failure = None
         stored = None
@@ -1568,6 +1604,8 @@ class TaskRunStore:
         return stored
 
     def _record_exists(self, task_id: str) -> bool:
+        if self._windows_backend is not None:
+            return self._windows_backend.exists(task_id)
         root_fd = -1
         failure = None
         exists = False
@@ -1619,6 +1657,14 @@ class TaskRunStore:
 
         _require_storage_capabilities()
         lease = self._acquire_catalog()
+        if self._windows_backend is not None:
+            try:
+                records = self._windows_backend.snapshot()
+            finally:
+                release_ok = _release(lease)
+            if not release_ok:
+                raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+            return records
         root_fd = -1
         failure = None
         records: tuple[TaskSnapshotEntry, ...] | None = None
@@ -1743,6 +1789,12 @@ class TaskRunStore:
         expected_generation: int | None,
         raw: bytes,
     ) -> tuple[str, bytes, bytes]:
+        if self._windows_backend is not None:
+            return self._windows_backend.prepare_mutation(
+                task_id,
+                expected_generation,
+                raw,
+            )
         root_fd = -1
         failure = None
         prepared = None
@@ -1839,6 +1891,9 @@ class TaskRunStore:
             raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
 
     def _recover_pending_mutation(self) -> None:
+        if self._windows_backend is not None:
+            self._windows_backend.recover(self)
+            return
         root_fd = -1
         journal = None
         clean = False
@@ -1877,6 +1932,9 @@ class TaskRunStore:
             raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
 
     def _recover_pending_locked(self) -> None:
+        if self._windows_backend is not None:
+            self._windows_backend.recover_locked()
+            return
         root_fd = -1
         publication_fd = -1
         clean = False
@@ -2041,6 +2099,15 @@ class TaskRunStore:
         raw: bytes,
         prepared: tuple[str, bytes, bytes],
     ) -> StoredTaskRun:
+        if self._windows_backend is not None:
+            return self._windows_backend.mutate_locked(
+                task_id,
+                expected_generation,
+                next_generation,
+                task_run,
+                raw,
+                prepared,
+            )
         root_fd = -1
         temp_fd = -1
         publication_fd = -1

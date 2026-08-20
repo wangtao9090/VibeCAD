@@ -685,6 +685,7 @@ def test_staging_journal_replay_advances_a_crashed_reserved_record_to_staged(
         assert rolled_back.status is CandidateRollbackStatus.NOT_COMMITTED
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX RLIMIT_FSIZE restore contract")
 def test_new_session_is_closed_when_file_limit_restore_fails_after_create(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -941,8 +942,19 @@ def test_seeded_reservation_cancel_cleans_unbound_intent_and_quota_owner(
             reservation_key=reservation_key,
             lease=rig.lease,
         )
-        assert len(tuple(rig.store._root.rglob("seed-intent.json"))) == 1
-        assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
+        if sys.platform == "win32":
+            candidate_model = rig.store.candidate_model_path(
+                PROJECT_ID,
+                revision_id,
+                rig.lease,
+            )
+            seed_intent = candidate_model.with_name("seed-intent.json")
+            seed_binding = candidate_model.with_name("seed-binding.json")
+            assert seed_intent.is_file()
+            assert not seed_binding.exists()
+        else:
+            assert len(tuple(rig.store._root.rglob("seed-intent.json"))) == 1
+            assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
 
         result = rig.coordinator.cancel_reservation(
             project_id=PROJECT_ID,
@@ -952,8 +964,12 @@ def test_seeded_reservation_cancel_cleans_unbound_intent_and_quota_owner(
             lease=rig.lease,
         )
         assert result.status is CandidateRollbackStatus.NOT_COMMITTED
-        assert tuple(rig.store._root.rglob("seed-intent.json")) == ()
-        assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
+        if sys.platform == "win32":
+            assert not seed_intent.exists()
+            assert not seed_binding.exists()
+        else:
+            assert tuple(rig.store._root.rglob("seed-intent.json")) == ()
+            assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
         assert tuple(rig.store._root.rglob("reservation.json")) == ()
         assert not any(path.is_dir() for path in rig.store._root.rglob("candidates/*"))
 
@@ -1119,6 +1135,7 @@ def test_seeded_source_corruption_remains_recovery_required(
             assert len(tuple(rig.store._root.rglob("reservation.json"))) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX RLIMIT_FSIZE restore contract")
 def test_file_limit_restore_failure_remains_candidate_recovery_required(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1158,6 +1175,7 @@ def test_file_limit_restore_failure_remains_candidate_recovery_required(
         assert tuple(rig.store._root.rglob("reservation.json")) == ()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX RLIMIT_FSIZE restore contract")
 def test_new_session_is_closed_when_file_limit_restore_fails_after_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3489,42 +3507,64 @@ def test_prepare_review_durability_uncertainty_settles_and_closes_once(
             lease=rig.lease,
         )
         review_session = reopened.binding.session
-        original_open = revisions_module.os.open
-        original_fsync = revisions_module.os.fsync
-        original_replace = revisions_module.os.replace
-        roles: dict[int, str] = {}
-        prepared_replaced = False
-        failed = False
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
 
-        def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
-            if dir_fd is None:
-                fd = original_open(path, flags, mode)
-            else:
-                fd = original_open(path, flags, mode, dir_fd=dir_fd)
-            roles[fd] = str(path)
-            return fd
+            original_replace_windows_file = revisions_windows.replace_windows_file
+            prepared_replaced = False
+            failed = False
 
-        def tracked_replace(src, dst, *args, **kwargs):
-            nonlocal prepared_replaced
-            result = original_replace(src, dst, *args, **kwargs)
-            if dst == "journal.json":
-                prepared_replaced = True
-            return result
+            def fail_after_windows_journal_replace(source, destination, **kwargs):
+                nonlocal prepared_replaced, failed
+                result = original_replace_windows_file(source, destination, **kwargs)
+                if destination.name == "journal.json" and not failed:
+                    prepared_replaced = True
+                    failed = True
+                    raise OSError("SECRET review prepare write-through uncertainty")
+                return result
 
-        def fail_first_project_fsync(fd):
-            nonlocal failed
-            if (
-                prepared_replaced
-                and not failed
-                and roles.get(fd) == revisions_module._project_key(PROJECT_ID)
-            ):
-                failed = True
-                raise OSError("SECRET review prepare fsync")
-            return original_fsync(fd)
+            monkeypatch.setattr(
+                revisions_windows,
+                "replace_windows_file",
+                fail_after_windows_journal_replace,
+            )
+        else:
+            original_open = revisions_module.os.open
+            original_fsync = revisions_module.os.fsync
+            original_replace = revisions_module.os.replace
+            roles: dict[int, str] = {}
+            prepared_replaced = False
+            failed = False
 
-        monkeypatch.setattr(revisions_module.os, "open", tracked_open)
-        monkeypatch.setattr(revisions_module.os, "replace", tracked_replace)
-        monkeypatch.setattr(revisions_module.os, "fsync", fail_first_project_fsync)
+            def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+                if dir_fd is None:
+                    fd = original_open(path, flags, mode)
+                else:
+                    fd = original_open(path, flags, mode, dir_fd=dir_fd)
+                roles[fd] = str(path)
+                return fd
+
+            def tracked_replace(src, dst, *args, **kwargs):
+                nonlocal prepared_replaced
+                result = original_replace(src, dst, *args, **kwargs)
+                if dst == "journal.json":
+                    prepared_replaced = True
+                return result
+
+            def fail_first_project_fsync(fd):
+                nonlocal failed
+                if (
+                    prepared_replaced
+                    and not failed
+                    and roles.get(fd) == revisions_module._project_key(PROJECT_ID)
+                ):
+                    failed = True
+                    raise OSError("SECRET review prepare fsync")
+                return original_fsync(fd)
+
+            monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+            monkeypatch.setattr(revisions_module.os, "replace", tracked_replace)
+            monkeypatch.setattr(revisions_module.os, "fsync", fail_first_project_fsync)
         with pytest.raises(CandidateError) as caught:
             rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
 
@@ -4162,7 +4202,35 @@ def test_real_store_pre_head_linearization_fault_uses_durable_reconcile(
             rollback_calls += 1
             raise AssertionError("commit ambiguity must use durable reconcile exactly once")
 
-        monkeypatch.setattr(revisions_module, "_replace_head_record", fail_head_replace)
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            original_replace_record = revisions_windows._replace_record
+
+            def fail_windows_head_replace(parent, name, raw):
+                if name != "HEAD.json":
+                    return original_replace_record(parent, name, raw)
+                events.append("head_replace")
+                if failure == "io_result":
+                    raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+                if failure == "generic":
+                    raise RuntimeError("generic failure before HEAD replacement")
+                raise RevisionStoreError(
+                    RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+                    head_committed=True,
+                )
+
+            monkeypatch.setattr(
+                revisions_windows,
+                "_replace_record",
+                fail_windows_head_replace,
+            )
+        else:
+            monkeypatch.setattr(
+                revisions_module,
+                "_replace_head_record",
+                fail_head_replace,
+            )
         monkeypatch.setattr(LocalRevisionStore, "reconcile", counted_reconcile)
         monkeypatch.setattr(LocalRevisionStore, "rollback_revision", forbidden_rollback)
         with pytest.raises(CandidateError) as caught:

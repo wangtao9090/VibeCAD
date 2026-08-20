@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 import vibecad.workflow.lease as lease_module
+from vibecad._file_compat import ensure_private_directory
 from vibecad.workflow.lease import (
     LeaseError,
     LeaseErrorCode,
@@ -42,6 +43,7 @@ OTHER_RESOURCE_ID = "project-write:project_11111111111111111111111111111111"
 RESOURCE_DOMAIN = b"vibecad-resource-lease-v1\0"
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="live POSIX lease contract")
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="live Windows lease contract")
 
 
 def _expected_key(resource_id: str) -> str:
@@ -73,8 +75,11 @@ def _assert_lease_error(caught, code: LeaseErrorCode) -> LeaseError:
 @pytest.fixture
 def lease_root(tmp_path: Path) -> Path:
     root = tmp_path / "leases"
-    root.mkdir(mode=0o700)
-    root.chmod(0o700)
+    if os.name == "nt":
+        ensure_private_directory(root)
+    else:
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
     return root
 
 
@@ -2990,6 +2995,7 @@ def test_posix_capability_flag_and_support_set_types_are_exact():
         _assert_lease_error(caught, LeaseErrorCode.LOCK_UNAVAILABLE)
 
 
+@pytest.mark.windows_contract
 def test_windows_open_flags_are_binary_noninheritable_and_non_destructive():
     fake_os = SimpleNamespace(
         O_RDWR=1,
@@ -3052,6 +3058,7 @@ def test_posix_adapter_release_errors_are_operation_aware(native_errno, expected
     assert "native unlock details" not in str(error)
 
 
+@pytest.mark.windows_contract
 def test_windows_adapter_locks_and_unlocks_exact_one_byte_at_zero(tmp_path: Path):
     path = tmp_path / "byte.lock"
     path.write_bytes(b"0")
@@ -3079,6 +3086,7 @@ def test_windows_adapter_locks_and_unlocks_exact_one_byte_at_zero(tmp_path: Path
         (errno.EIO, None, LeaseErrorCode.IO_ERROR),
     ],
 )
+@pytest.mark.windows_contract
 def test_windows_adapter_maps_only_declared_native_errors(
     tmp_path: Path, native_errno, winerror, expected
 ):
@@ -3102,6 +3110,7 @@ def test_windows_adapter_maps_only_declared_native_errors(
     ("native_errno", "winerror"),
     [(errno.EACCES, None), (errno.EIO, 33), (errno.EIO, None)],
 )
+@pytest.mark.windows_contract
 def test_windows_adapter_release_error_is_not_reported_as_contention(
     tmp_path: Path, native_errno, winerror
 ):
@@ -3122,11 +3131,19 @@ def test_windows_adapter_release_error_is_not_reported_as_contention(
     assert "native unlock details" not in str(error)
 
 
-@pytest.mark.parametrize("platform_name", ["win32", "unknown-host"])
+@pytest.mark.parametrize("platform_name", ["unknown-host"])
 def test_unverified_or_unknown_platform_selector_fails_closed(platform_name: str):
     with pytest.raises(LeaseError) as caught:
         lease_module._select_platform_adapter(platform_name)
     _assert_lease_error(caught, LeaseErrorCode.UNSUPPORTED_PLATFORM)
+
+
+@WINDOWS_ONLY
+def test_verified_windows_selector_returns_native_lockfileex_adapter():
+    assert (
+        type(lease_module._select_platform_adapter("win32"))
+        is lease_module._WindowsNativeFileLock
+    )
 
 
 @POSIX_ONLY
@@ -3134,12 +3151,53 @@ def test_production_platform_factory_returns_exact_posix_adapter():
     assert type(lease_module._new_platform_adapter()) is lease_module._PosixFileLock
 
 
-@pytest.mark.parametrize("platform_name", ["win32", "unknown-host"])
+@pytest.mark.parametrize("platform_name", ["unknown-host"])
 def test_production_platform_factory_has_no_unverified_fallback(monkeypatch, platform_name: str):
     monkeypatch.setattr(lease_module.sys, "platform", platform_name)
     with pytest.raises(LeaseError) as caught:
         lease_module._new_platform_adapter()
     _assert_lease_error(caught, LeaseErrorCode.UNSUPPORTED_PLATFORM)
+
+
+@WINDOWS_ONLY
+def test_production_platform_factory_returns_exact_windows_adapter():
+    assert type(lease_module._new_platform_adapter()) is lease_module._WindowsNativeFileLock
+
+
+@WINDOWS_ONLY
+def test_live_windows_subprocess_contention_and_release(lease_root: Path):
+    manager = _manager(lease_root)
+    lease = manager.acquire(RESOURCE_ID)
+    deadline = time.monotonic() + 5
+    contended = _run_child_try(lease_root, RESOURCE_ID, deadline)
+    assert contended.returncode == 3, contended.stderr
+    messages = _parse_child_lines(contended.stdout)
+    assert messages[0]["phase"] == "error"
+    assert messages[0]["code"] == LeaseErrorCode.CONTENDED.value
+    lease.release(owner_token=lease.owner_token)
+
+    acquired = _run_child_try(lease_root, RESOURCE_ID, deadline)
+    assert acquired.returncode == 0, acquired.stderr
+    assert [item["phase"] for item in _parse_child_lines(acquired.stdout)] == [
+        "acquired",
+        "released",
+    ]
+
+
+@WINDOWS_ONLY
+def test_windows_open_lease_prevents_lock_entry_replacement(lease_root: Path):
+    manager = _manager(lease_root)
+    lease = manager.acquire(RESOURCE_ID)
+    path = _lock_path(lease_root, RESOURCE_ID)
+    replacement = lease_root / "replacement.lock"
+    replacement.write_bytes(b"replacement")
+    try:
+        with pytest.raises(OSError):
+            os.replace(replacement, path)
+        lease.require_current()
+    finally:
+        lease.release(owner_token=lease.owner_token)
+        replacement.unlink(missing_ok=True)
 
 
 @POSIX_ONLY
@@ -3911,6 +3969,15 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
         "stat",
         "sys",
         "threading",
+        "vibecad._file_compat",
+        "vibecad._file_compat.LOCK_EX",
+        "vibecad._file_compat.LOCK_NB",
+        "vibecad._file_compat.LOCK_UN",
+        "vibecad._file_compat.WindowsPathCapability",
+        "vibecad._file_compat.capture_windows_path",
+        "vibecad._file_compat.flock",
+        "vibecad._file_compat.open_private_file",
+        "vibecad._file_compat.validate_windows_path",
     }
 
     def is_annotation_reference(value: ast.AST) -> bool:
@@ -4870,6 +4937,15 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
         "stat",
         "sys",
         "threading",
+        "vibecad._file_compat",
+        "vibecad._file_compat.LOCK_EX",
+        "vibecad._file_compat.LOCK_NB",
+        "vibecad._file_compat.LOCK_UN",
+        "vibecad._file_compat.WindowsPathCapability",
+        "vibecad._file_compat.capture_windows_path",
+        "vibecad._file_compat.flock",
+        "vibecad._file_compat.open_private_file",
+        "vibecad._file_compat.validate_windows_path",
     }
     assert imported_modules <= allowed_imports
     assert unsafe_import_alias_lines == []

@@ -15,7 +15,9 @@ import re
 import stat
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
+from vibecad import _file_compat
 from vibecad.daemon.adapters import LocalAgentClient, LocalAgentClientError
 from vibecad.parametric import ParametricContractError, ParametricDesignIR
 from vibecad.workflow.contracts import ModelProgram
@@ -113,6 +115,8 @@ def _safe_read_request(name: object) -> tuple[bytes, str]:
             "/request_file",
             "Use a project-local .vibecad-workbuddy-request*.json file.",
         )
+    if sys.platform == "win32":
+        return _safe_read_request_windows(name)
     required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
     if any(type(getattr(os, item, None)) is not int for item in required):
         raise _AdapterFailure("unavailable", "/request_file", "Safe file ingress is unavailable.")
@@ -206,6 +210,96 @@ def _safe_read_request(name: object) -> tuple[bytes, str]:
         if directory_fd >= 0:
             try:
                 os.close(directory_fd)
+            except OSError:
+                pass
+
+
+def _safe_read_request_windows(name: str) -> tuple[bytes, str]:
+    """Read one exact project-local Windows file through a pinned HANDLE.
+
+    Windows CRT directory descriptors and POSIX owner/mode bits cannot express
+    the original ingress authority.  The native file handle instead withholds
+    delete sharing, rejects reparse points and multiple links, and pins the
+    volume plus 128-bit File ID while bounded bytes are read.  A final-path
+    comparison also rejects a junction in the supplied working-directory path.
+    """
+
+    expected = Path(os.path.abspath(name))
+    file_fd = -1
+    try:
+        file_fd, capability = _file_compat.open_windows_external_file(expected)
+        if os.path.normcase(capability.path) != os.path.normcase(os.fspath(expected)):
+            raise _AdapterFailure(
+                "unsafe_request_file",
+                "/request_file",
+                "The project request path contains an alias.",
+            )
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 1 <= before.st_size <= _MAX_REQUEST_FILE_BYTES
+        ):
+            raise _AdapterFailure(
+                "unsafe_request_file",
+                "/request_file",
+                "The request file is not a bounded single-link regular file.",
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                file_fd,
+                min(_READ_CHUNK_BYTES, _MAX_REQUEST_FILE_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_REQUEST_FILE_BYTES:
+                raise _AdapterFailure(
+                    "request_too_large",
+                    "/request_file",
+                    "The request file exceeds the supported size.",
+                )
+        after = os.fstat(file_fd)
+        current_capability = _file_compat.capture_windows_external_fd(
+            file_fd,
+            generation_token=capability.generation_token,
+        )
+        _file_compat.validate_windows_external_file(capability)
+
+        def binding(value: os.stat_result) -> tuple[int, ...]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+
+        if current_capability != capability or binding(before) != binding(after):
+            raise _AdapterFailure(
+                "unsafe_request_file",
+                "/request_file",
+                "The request file changed during ingress.",
+            )
+        raw = b"".join(chunks)
+        return raw, hashlib.sha256(raw).hexdigest()
+    except _AdapterFailure:
+        raise
+    except OSError:
+        raise _AdapterFailure(
+            "unsafe_request_file",
+            "/request_file",
+            "The request file could not be opened safely.",
+        ) from None
+    finally:
+        if file_fd >= 0:
+            try:
+                os.close(file_fd)
             except OSError:
                 pass
 

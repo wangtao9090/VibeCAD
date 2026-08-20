@@ -13,8 +13,14 @@ from vibecad.runtime import spec
 from vibecad.runtime.status import Phase
 
 _FAKE_MICROMAMBA = b"#!/bin/sh\nexit 0\n"
+_WINDOWS_FAKE_MICROMAMBA = b"mock micromamba"
+_REAL_ENSURE_MICROMAMBA = inst.micromamba.ensure_micromamba
 _REAL_VERIFY_GENERATION = inst.status.verify_runtime_generation
 _REAL_ENGINE_GENERATION = inst.status.engine_compatible_generation
+_POSIX_DIRECTORY_CAPABILITY = pytest.mark.skipif(
+    inst.sys.platform == "win32",
+    reason="POSIX dir-fd/pass_fds runner contract; Windows uses Job Objects and native guards",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +28,11 @@ def _offline_capability_download(monkeypatch):
     """Every installer test is offline unless it installs a stricter FD seam."""
 
     digest = hashlib.sha256(_FAKE_MICROMAMBA).hexdigest()
-    monkeypatch.setattr(inst, "_expected_micromamba_sha256", lambda subdir: digest)
+    monkeypatch.setattr(
+        inst,
+        "_expected_micromamba_sha256",
+        lambda subdir, **_kwargs: digest,
+    )
 
     def download_to_fd(_url, file_descriptor):
         inst.os.write(file_descriptor, _FAKE_MICROMAMBA)
@@ -51,6 +61,16 @@ def _offline_capability_download(monkeypatch):
         "engine_compatible_generation",
         lambda evidence: inst.status.engine_compatible(evidence.python),
     )
+    if inst.sys.platform == "win32":
+        # pytest's deeply nested temp roots are intentionally unlike the product
+        # default. Individual path-budget tests restore the qualified constants.
+        monkeypatch.setattr(spec, "WINDOWS_MAX_ENV_PREFIX_LENGTH", 240)
+        monkeypatch.setattr(spec, "WINDOWS_REVIEWED_MAX_ENV_MEMBER", 10)
+        monkeypatch.setattr(
+            inst.micromamba,
+            "ensure_micromamba",
+            _materialize_micromamba,
+        )
 
 
 def _tree_fingerprint(root: Path) -> dict[str, tuple[int, int, int, str | None]]:
@@ -75,7 +95,7 @@ def _tree_fingerprint(root: Path) -> dict[str, tuple[int, int, int, str | None]]
 def _materialize_created_env(command: list) -> None:
     """Make a mocked micromamba create leave the prefix it promises."""
 
-    if len(command) < 2 or command[1] != "create":
+    if "create" not in command:
         return
     raw_prefix = command[command.index("-p") + 1]
     prefix = inst.paths.env_prefix() if raw_prefix in {".", "./"} else Path(raw_prefix)
@@ -84,7 +104,23 @@ def _materialize_created_env(command: list) -> None:
     python.touch()
 
 
-def _materialize_micromamba(destination: Path, calls: list | None = None) -> Path:
+def _micromamba_subcommand(command: list) -> str | None:
+    for candidate in ("create", "run"):
+        if candidate in command:
+            return candidate
+    return None
+
+
+def _assert_pip_install_command(command: list) -> None:
+    start = command.index("python")
+    assert command[start : start + 4] == ["python", "-m", "pip", "install"]
+
+
+def _materialize_micromamba(
+    destination: Path,
+    calls: list | None = None,
+    **_kwargs,
+) -> Path:
     """Make a mocked successful download leave one regular binary."""
 
     if calls is not None:
@@ -96,7 +132,11 @@ def _materialize_micromamba(destination: Path, calls: list | None = None) -> Pat
 
 def _install_capability_runner(monkeypatch, payload: bytes) -> None:
     digest = hashlib.sha256(payload).hexdigest()
-    monkeypatch.setattr(inst, "_expected_micromamba_sha256", lambda subdir: digest)
+    monkeypatch.setattr(
+        inst,
+        "_expected_micromamba_sha256",
+        lambda subdir, **_kwargs: digest,
+    )
 
     def download_to_fd(_url, file_descriptor):
         inst.os.write(file_descriptor, payload)
@@ -139,10 +179,232 @@ def test_install_happy_path(monkeypatch, tmp_path):
     create = " ".join(map(str, ran[0]))
     assert "create" in create and "python=3.12" in create and "freecad=1.1.0" in create
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
-    assert "--upgrade" in ran[1]
-    assert Path(ran[1][0]).name == "micromamba" and ran[1][1] == "run"
-    assert Path(ran[1][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
-    assert ran[1][2:6] == ["-r", "../..", "-p", "./"]
+    pip_command = ran[-1]
+    assert "--upgrade" in pip_command
+    if inst.sys.platform == "win32":
+        assert len(ran) == 3
+        assert "--download-only" in ran[0]
+        assert spec.WINDOWS_VISKORES_PIN in ran[0]
+        assert "--offline" in ran[1]
+        assert Path(pip_command[0]).name == "micromamba.exe"
+        assert pip_command[1:5] == ["--no-rc", "-r", str(inst.paths.mamba_root_prefix()), "run"]
+    else:
+        assert len(ran) == 2
+        assert Path(pip_command[0]).name == "micromamba" and pip_command[1] == "run"
+        assert Path(pip_command[0]).parent.name == inst._RUNNER_DIRECTORY_NAME
+        assert pip_command[2:6] == ["-r", "../..", "-p", "./"]
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows transaction")
+def test_windows_fresh_install_uses_one_isolated_cache_before_verification(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("Conda_Pkgs_Dirs", str(tmp_path / "hostile-conda-cache"))
+    monkeypatch.setenv("MAMBA_ROOT_PREFIX", str(tmp_path / "hostile-mamba-root"))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "hostile-python"))
+    monkeypatch.setattr(spec, "WINDOWS_MAX_ENV_PREFIX_LENGTH", 240)
+    monkeypatch.setattr(spec, "WINDOWS_REVIEWED_MAX_ENV_MEMBER", 10)
+    monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
+    ensured = []
+
+    def ensure_binary(destination, **kwargs):
+        ensured.append((destination, kwargs.get("version", inst.micromamba.MICROMAMBA_VERSION)))
+        return _materialize_micromamba(destination, **kwargs)
+
+    monkeypatch.setattr(inst.micromamba, "ensure_micromamba", ensure_binary)
+    events = []
+    cache_root = tmp_path / "short-cache"
+    session = inst.windows_package_cache.PackageCacheSession(
+        root=cache_root,
+        temporary=cache_root / "tmp",
+        pip=cache_root / "pip",
+        xdg=cache_root / "xdg",
+        _identity=(1, 1),
+        _maximum_root_length=40,
+    )
+    monkeypatch.setattr(session, "validate", lambda: events.append("cache-validate"))
+
+    @inst.contextlib.contextmanager
+    def cache_transaction():
+        events.append("cache-acquire")
+        try:
+            yield session
+        finally:
+            events.append("cache-release")
+
+    monkeypatch.setattr(
+        inst.windows_package_cache,
+        "package_cache_session",
+        cache_transaction,
+    )
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        events.append(
+            f"command:{_micromamba_subcommand(command)}:"
+            f"{'offline' if '--offline' in command else 'online'}"
+        )
+        _materialize_created_env(command)
+
+    monkeypatch.setattr(inst, "_run", fake_run)
+
+    def verify(*_args, **_kwargs):
+        events.append("verify")
+        return True
+
+    monkeypatch.setattr(inst.status, "verify_runtime", verify)
+    phases = []
+    inst.RuntimeInstaller(on_progress=lambda value: phases.append(value.phase)).install()
+
+    assert [_micromamba_subcommand(command[0]) for command in commands] == [
+        "create",
+        "create",
+        "run",
+    ]
+    assert "--download-only" in commands[0][0]
+    assert "--offline" in commands[1][0]
+    assert spec.WINDOWS_VISKORES_PIN in commands[0][0]
+    child_environments = [value[1]["process_env"] for value in commands]
+    assert all(environment == child_environments[0] for environment in child_environments)
+    assert all(value[1]["windows_kill_tree"] is True for value in commands)
+    names = {name.upper() for name in child_environments[0]}
+    assert "MAMBA_ROOT_PREFIX" not in names
+    assert "PYTHONPATH" not in names
+    assert child_environments[0]["CONDA_PKGS_DIRS"] == str(cache_root)
+    assert events.count("cache-acquire") == events.count("cache-release") == 1
+    assert events.index("cache-release") < events.index("verify")
+    assert phases[-1] is Phase.READY
+    assert ensured == [
+        (inst.paths.micromamba_path(), inst.micromamba.MICROMAMBA_VERSION),
+        (
+            inst.paths.flat_cache_micromamba_path(),
+            inst.micromamba.WINDOWS_FLAT_CACHE_VERSION,
+        ),
+    ]
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows transaction")
+def test_windows_cache_release_failure_prevents_verification_and_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(spec, "WINDOWS_MAX_ENV_PREFIX_LENGTH", 240)
+    monkeypatch.setattr(spec, "WINDOWS_REVIEWED_MAX_ENV_MEMBER", 10)
+    monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
+    monkeypatch.setattr(inst.micromamba, "ensure_micromamba", _materialize_micromamba)
+    cache_root = tmp_path / "short-cache"
+    session = inst.windows_package_cache.PackageCacheSession(
+        root=cache_root,
+        temporary=cache_root / "tmp",
+        pip=cache_root / "pip",
+        xdg=cache_root / "xdg",
+        _identity=(1, 1),
+        _maximum_root_length=40,
+    )
+    monkeypatch.setattr(session, "validate", lambda: None)
+
+    @inst.contextlib.contextmanager
+    def failed_release():
+        yield session
+        raise inst.windows_package_cache.PackageCacheError("simulated release failure")
+
+    monkeypatch.setattr(inst.windows_package_cache, "package_cache_session", failed_release)
+    monkeypatch.setattr(
+        inst,
+        "_run",
+        lambda command, **_kwargs: _materialize_created_env(command),
+    )
+    verified = []
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime",
+        lambda *_args, **_kwargs: verified.append(True) or True,
+    )
+
+    with pytest.raises(inst.InstallError, match="simulated release failure"):
+        inst.RuntimeInstaller().install()
+
+    assert verified == []
+    assert not inst.paths.ready_sentinel().exists()
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows path budget")
+def test_windows_fresh_env_prefix_keeps_legacy_path_margin(monkeypatch, tmp_path):
+    monkeypatch.setattr(spec, "WINDOWS_MAX_ENV_PREFIX_LENGTH", 80)
+    monkeypatch.setattr(spec, "WINDOWS_REVIEWED_MAX_ENV_MEMBER", 168)
+    default_prefix = inst.paths.env_prefix()
+    assert (
+        len(str(default_prefix.resolve()))
+        + 1
+        + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER
+        <= 249
+    )
+
+    home = tmp_path / ("x" * 70)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+
+    with pytest.raises(inst.InstallError, match="Windows 托管运行时路径过长"):
+        installer._prepare_empty_managed_env(inst.paths.env_prefix())
+
+    assert not inst.paths.env_prefix().exists()
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows recovery")
+def test_windows_recovers_stale_cache_before_ready_shortcut(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+    events = []
+    monkeypatch.setattr(
+        inst.windows_package_cache,
+        "recover_stale_package_cache",
+        lambda: events.append("recover"),
+    )
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "is_ready",
+        lambda self: events.append("ready-check") or True,
+    )
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "_emit",
+        lambda self, *_args: events.append("ready-published"),
+    )
+
+    inst.RuntimeInstaller().install()
+
+    assert events == ["recover", "ready-check", "ready-published"]
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows recovery")
+def test_windows_recovery_failure_prevents_ready_shortcut(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+
+    def fail_recovery():
+        raise inst.windows_package_cache.PackageCacheError("identity mismatch")
+
+    monkeypatch.setattr(
+        inst.windows_package_cache,
+        "recover_stale_package_cache",
+        fail_recovery,
+    )
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "is_ready",
+        lambda self: pytest.fail("recovery failure must prevent receipt repair"),
+    )
+
+    with pytest.raises(inst.InstallError, match="identity mismatch"):
+        inst.RuntimeInstaller().install()
 
 
 def test_installer_verification_fails_closed_without_freecad_process_directory(
@@ -216,6 +478,7 @@ def test_install_holds_stable_home_maintenance_lock_outside_runtime(monkeypatch,
     assert not inst.paths.install_lock().exists()
 
 
+@pytest.mark.windows_contract
 def test_runtime_generation_windows_fallback_validates_root_once(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     runtime = home / "runtime"
@@ -287,7 +550,7 @@ def test_install_rejects_managed_layout_alias_before_download_or_run(
     monkeypatch.setattr(
         inst.micromamba,
         "ensure_micromamba",
-        lambda path: ensured.append(path),
+        lambda path, **_kwargs: ensured.append(path),
     )
     monkeypatch.setattr(inst, "_run", lambda command, **kwargs: ran.append(command))
 
@@ -303,29 +566,36 @@ def test_install_rejects_managed_layout_alias_before_download_or_run(
 @pytest.mark.parametrize("kind", ["symlink", "directory"])
 def test_install_rejects_unsafe_existing_micromamba_entries(monkeypatch, tmp_path, entry, kind):
     home = tmp_path / "VibeCAD"
-    bin_dir = home / "runtime" / "bin"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    destination = inst.paths.micromamba_path()
+    bin_dir = destination.parent
     (home / "runtime" / "mamba" / "envs").mkdir(parents=True)
     bin_dir.mkdir()
-    destination = home / "runtime" / "bin" / "micromamba"
-    target = destination if entry == "destination" else destination.with_name("micromamba.part")
+    target = (
+        destination
+        if entry == "destination"
+        else destination.with_name(destination.name + ".part")
+    )
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"outside")
     if kind == "symlink":
         target.symlink_to(outside)
     else:
         target.mkdir()
-    monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
     ensured = []
     ran = []
-    monkeypatch.setattr(
-        inst.micromamba,
-        "ensure_micromamba",
-        lambda path: ensured.append(path),
-    )
+    if inst.sys.platform == "win32":
+        monkeypatch.setattr(inst.micromamba, "ensure_micromamba", _REAL_ENSURE_MICROMAMBA)
+    else:
+        monkeypatch.setattr(
+            inst.micromamba,
+            "ensure_micromamba",
+            lambda path, **_kwargs: ensured.append(path),
+        )
     monkeypatch.setattr(inst, "_run", lambda command, **kwargs: ran.append(command))
 
-    with pytest.raises(inst.InstallError, match="普通文件"):
+    with pytest.raises(inst.InstallError, match="普通文件|unsafe"):
         inst.RuntimeInstaller().install()
 
     assert ensured == []
@@ -333,6 +603,7 @@ def test_install_rejects_unsafe_existing_micromamba_entries(monkeypatch, tmp_pat
     assert outside.read_bytes() == b"outside"
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_pinned_download_parent_replacement_never_writes_outside(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -474,7 +745,7 @@ def test_legacy_or_old_version_reuses_healthy_env_for_pip_only(monkeypatch, tmp_
     monkeypatch.setattr(
         inst.micromamba,
         "ensure_micromamba",
-        lambda path: _materialize_micromamba(path, ensured),
+        lambda path, **kwargs: _materialize_micromamba(path, ensured, **kwargs),
     )
     ran = []
     monkeypatch.setattr(inst, "_run", lambda cmd, **k: ran.append(cmd))
@@ -482,19 +753,31 @@ def test_legacy_or_old_version_reuses_healthy_env_for_pip_only(monkeypatch, tmp_
     inst.RuntimeInstaller().install()
 
     assert len(ran) == 1
-    assert Path(ran[0][0]).name == "micromamba"
-    assert Path(ran[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
-    assert ran[0][1:6] == [
-        "run",
-        "-r",
-        "../..",
-        "-p",
-        "./",
-    ]
-    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    if inst.sys.platform == "win32":
+        assert Path(ran[0][0]).name == "micromamba.exe"
+        assert ran[0][1:5] == [
+            "--no-rc",
+            "-r",
+            str(inst.paths.mamba_root_prefix()),
+            "run",
+        ]
+    else:
+        assert Path(ran[0][0]).name == "micromamba"
+        assert Path(ran[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
+        assert ran[0][1:6] == [
+            "run",
+            "-r",
+            "../..",
+            "-p",
+            "./",
+        ]
+    _assert_pip_install_command(ran[0])
     assert "--upgrade" in ran[0]
-    assert ensured == []
-    assert inst.paths.micromamba_path().read_bytes() == _FAKE_MICROMAMBA
+    assert ensured == ([inst.paths.micromamba_path()] if inst.sys.platform == "win32" else [])
+    expected_micromamba = (
+        _WINDOWS_FAKE_MICROMAMBA if inst.sys.platform == "win32" else _FAKE_MICROMAMBA
+    )
+    assert inst.paths.micromamba_path().read_bytes() == expected_micromamba
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
 
 
@@ -524,7 +807,7 @@ def test_same_version_pre_epoch_receipt_runs_pip_only_and_reissues_current_recei
     inst.RuntimeInstaller().install()
 
     assert len(ran) == 1
-    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    _assert_pip_install_command(ran[0])
     assert "create" not in ran[0]
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
 
@@ -567,7 +850,7 @@ def test_previous_positive_epoch_runs_one_pip_sync_without_replacing_managed_pre
     after = prefix.lstat()
     assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
     assert len(ran) == 1
-    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    _assert_pip_install_command(ran[0])
     assert "create" not in ran[0]
     assert observed_receipts == [old_receipt, old_receipt]
     current_receipt = inst.status.read_runtime_receipt()
@@ -611,7 +894,7 @@ def test_previous_positive_epoch_sync_failure_keeps_old_receipt_and_prefix(
     after = prefix.lstat()
     assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
     assert len(ran) == 1
-    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    _assert_pip_install_command(ran[0])
     assert "create" not in ran[0]
     assert json.loads(sentinel.read_text(encoding="utf-8")) == old_receipt
 
@@ -753,8 +1036,19 @@ def test_same_version_server_refresh_forces_exact_wheel_before_receipt_commit(
     assert len(calls) == 1
     assert retirements == [{"reason": "incompatible_build", "_maintenance_held": True}]
     command = calls[0]
-    assert command[1:6] == ["run", "-r", "../..", "-p", "./"]
-    assert command[6:11] == ["python", "-B", "-m", "pip", "install"]
+    if inst.sys.platform == "win32":
+        assert command[1:7] == [
+            "--no-rc",
+            "-r",
+            str(inst.paths.mamba_root_prefix()),
+            "run",
+            "-p",
+            str(inst.paths.env_prefix()),
+        ]
+        assert command[7:12] == ["python", "-B", "-m", "pip", "install"]
+    else:
+        assert command[1:6] == ["run", "-r", "../..", "-p", "./"]
+        assert command[6:11] == ["python", "-B", "-m", "pip", "install"]
     assert "--no-index" in command
     assert "--force-reinstall" in command
     assert "--no-deps" in command
@@ -1053,10 +1347,10 @@ def test_unhealthy_existing_managed_env_is_removed_before_create(monkeypatch, tm
 
     inst.RuntimeInstaller().install()
 
-    assert ran[0][1] == "create"
+    assert _micromamba_subcommand(ran[0]) == "create"
     assert keep.read_text(encoding="utf-8") == "keep"
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
-    assert python.parent.parent == env
+    assert python == inst.paths.env_python_for(env)
 
 
 def test_successful_create_without_python_stops_after_pip_and_before_receipt(monkeypatch, tmp_path):
@@ -1064,7 +1358,14 @@ def test_successful_create_without_python_stops_after_pip_and_before_receipt(mon
     monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
     monkeypatch.setattr(inst.micromamba, "ensure_micromamba", _materialize_micromamba)
     calls = []
-    monkeypatch.setattr(inst, "_run", lambda command, **kwargs: calls.append(command))
+
+    def create_only_download_prefix(command, **_kwargs):
+        calls.append(command)
+        if "--download-only" in command:
+            raw_prefix = command[command.index("-p") + 1]
+            Path(raw_prefix).mkdir(parents=True)
+
+    monkeypatch.setattr(inst, "_run", create_only_download_prefix)
     monkeypatch.setattr(
         inst.status,
         "verify_runtime",
@@ -1074,7 +1375,11 @@ def test_successful_create_without_python_stops_after_pip_and_before_receipt(mon
     with pytest.raises(inst.InstallError, match="目录不安全|unavailable"):
         inst.RuntimeInstaller().install()
 
-    assert [command[1] for command in calls] == ["create", "run"]
+    assert [_micromamba_subcommand(command) for command in calls] == [
+        "create",
+        "create",
+        "run",
+    ]
     assert not inst.paths.ready_sentinel().exists()
 
 
@@ -1091,20 +1396,29 @@ def test_runtime_generation_replacement_after_create_stops_before_pip(monkeypatc
 
     def replace_runtime_after_create(command, **_kwargs):
         calls.append(command)
-        assert command[1] == "create", "pip must not run after runtime replacement"
+        assert _micromamba_subcommand(command) == "create", (
+            "pip must not run after runtime replacement"
+        )
         _materialize_created_env(command)
+        if "--download-only" in command:
+            return
         inst.os.rename(runtime, detached)
         runtime.symlink_to(outside, target_is_directory=True)
 
     monkeypatch.setattr(inst, "_run", replace_runtime_after_create)
 
-    with pytest.raises((inst.InstallError, ValueError), match="identity changed"):
+    with pytest.raises(
+        (inst.InstallError, ValueError),
+        match="identity changed|contains an alias|Access is denied|being used",
+    ):
         inst.RuntimeInstaller().install()
 
-    assert len(calls) == 1 and calls[0][1] == "create"
+    assert len(calls) == 2
+    assert all(_micromamba_subcommand(command) == "create" for command in calls)
     assert list(outside.iterdir()) == []
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 @pytest.mark.parametrize("replaced_entry", ["root", "env"])
 def test_capability_bound_create_never_writes_replacement_tree(
     monkeypatch, tmp_path, replaced_entry
@@ -1159,6 +1473,7 @@ def test_capability_bound_create_never_writes_replacement_tree(
     assert _tree_fingerprint(outside) == before
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_capability_bound_pip_never_writes_replacement_env(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -1198,6 +1513,7 @@ def test_capability_bound_pip_never_writes_replacement_env(monkeypatch, tmp_path
     assert _tree_fingerprint(outside) == before
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_staged_validated_runner_ignores_source_binary_replacement(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -1236,6 +1552,7 @@ def test_staged_validated_runner_ignores_source_binary_replacement(monkeypatch, 
     assert not evil_marker.exists()
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_persistent_runner_preserves_basename_and_validates_private_directory(
     monkeypatch,
     tmp_path,
@@ -1281,6 +1598,7 @@ def test_persistent_runner_preserves_basename_and_validates_private_directory(
     _assert_persistent_private_runner(env, payload)
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_staged_runner_real_exec_observes_exact_micromamba_basename(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     marker = tmp_path / "runner-basename.txt"
@@ -1307,6 +1625,7 @@ def test_staged_runner_real_exec_observes_exact_micromamba_basename(monkeypatch,
     _assert_persistent_private_runner(env, payload)
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 @pytest.mark.parametrize("fault", ("copy", "stored_bytes", "digest", "command"))
 def test_persistent_runner_operational_failure_is_fixed_and_bounded(
     monkeypatch,
@@ -1398,6 +1717,7 @@ def test_persistent_runner_operational_failure_is_fixed_and_bounded(
     assert _tree_fingerprint(_private_runner_directory(env)) == before
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_staged_runner_never_unlinks_replacement_file(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -1436,6 +1756,7 @@ def test_staged_runner_never_unlinks_replacement_file(monkeypatch, tmp_path):
     assert (replacement_path.parent / "original-micromamba").read_bytes() == payload
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_persistent_runner_post_command_sha_rejects_same_inode_mutation(
     monkeypatch,
     tmp_path,
@@ -1477,6 +1798,7 @@ def test_persistent_runner_post_command_sha_rejects_same_inode_mutation(
     assert runner.read_bytes() == mutated_payload
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_staged_runner_directory_replacement_is_not_removed(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -1514,6 +1836,7 @@ def test_staged_runner_directory_replacement_is_not_removed(monkeypatch, tmp_pat
     assert (detached_directory / "micromamba").read_bytes() == payload
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_persistent_runner_never_reaches_name_unlink_replacement_seam(monkeypatch, tmp_path):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
@@ -1555,6 +1878,7 @@ def test_persistent_runner_never_reaches_name_unlink_replacement_seam(monkeypatc
     assert not detached_original.exists()
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_persistent_exact_runner_is_reused_without_copy_or_unlink(
     monkeypatch,
     tmp_path,
@@ -1602,6 +1926,7 @@ def test_persistent_exact_runner_is_reused_without_copy_or_unlink(
     _assert_persistent_private_runner(env, payload)
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 @pytest.mark.parametrize("remnant", ("mismatch", "extra"))
 def test_staged_runner_refuses_untrusted_fixed_directory_remnant(
     monkeypatch,
@@ -1658,8 +1983,8 @@ def test_importable_but_wrong_version_engine_is_rebuilt_not_reused(monkeypatch, 
     inst.RuntimeInstaller().install()
 
     assert not stale.exists()
-    assert ran[0][1] == "create"
-    assert not any(cmd[1] == "run" for cmd in ran[:1])
+    assert _micromamba_subcommand(ran[0]) == "create"
+    assert not any(_micromamba_subcommand(cmd) == "run" for cmd in ran[:1])
 
 
 def test_remove_managed_env_rejects_symlink_without_touching_target(monkeypatch, tmp_path):
@@ -1673,7 +1998,7 @@ def test_remove_managed_env_rejects_symlink_without_touching_target(monkeypatch,
     env.parent.mkdir(parents=True)
     env.symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(inst.InstallError, match="不安全"):
+    with pytest.raises(inst.InstallError, match="不安全|安全删除失败"):
         inst.RuntimeInstaller()._remove_managed_env(env)
 
     assert env.is_symlink()
@@ -1708,7 +2033,7 @@ def test_remove_managed_env_rejects_ancestor_alias_without_touching_target(
             encoding="utf-8",
         )
 
-    with pytest.raises(inst.InstallError, match="不安全"):
+    with pytest.raises(inst.InstallError, match="不安全|安全删除失败"):
         inst.RuntimeInstaller()._remove_managed_env(env)
 
     assert marker.read_text(encoding="utf-8") == "keep"
@@ -1735,6 +2060,7 @@ def test_remove_managed_env_does_not_follow_nested_symlink(monkeypatch, tmp_path
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_remove_managed_env_restores_parked_entry_when_parent_is_replaced(monkeypatch, tmp_path):
     home = tmp_path / "home"
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
@@ -1771,6 +2097,7 @@ def test_remove_managed_env_restores_parked_entry_when_parent_is_replaced(monkey
     assert (detached / env.name / "original.bin").read_bytes() == b"original"
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_remove_managed_env_never_replaces_concurrent_live_generation(monkeypatch, tmp_path):
     home = tmp_path / "home"
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
@@ -1795,6 +2122,7 @@ def test_remove_managed_env_never_replaces_concurrent_live_generation(monkeypatc
     assert (parked[0] / "original.bin").read_bytes() == b"original"
 
 
+@pytest.mark.windows_contract
 def test_remove_managed_env_windows_fallback_parks_and_deletes_once(monkeypatch, tmp_path):
     home = tmp_path / "home"
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
@@ -1826,7 +2154,7 @@ def test_remove_managed_env_windows_fallback_parks_and_deletes_once(monkeypatch,
 
 def test_override_version_mismatch_never_pip_installs(monkeypatch, tmp_path):
     override = tmp_path / "external"
-    python = override / "bin" / "python"
+    python = inst.paths.env_python_for(override)
     python.parent.mkdir(parents=True)
     python.touch()
     (override / ".vibecad_ready").write_text(spec.FREECAD_PIN, encoding="utf-8")
@@ -1843,7 +2171,7 @@ def test_override_version_mismatch_never_pip_installs(monkeypatch, tmp_path):
 
 def test_matching_override_migrates_receipt_without_pip(monkeypatch, tmp_path):
     override = tmp_path / "external"
-    python = override / "bin" / "python"
+    python = inst.paths.env_python_for(override)
     python.parent.mkdir(parents=True)
     python.touch()
     (override / "engine.bin").write_bytes(b"external engine")
@@ -1912,6 +2240,7 @@ def test_external_receipt_is_not_published_when_python_changes_after_verify(
     assert inst.status.runtime_ready() is False
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_capability_bound_python_probe_ignores_prefix_replacement_and_writes_no_receipt(
     monkeypatch, tmp_path
 ):
@@ -2029,9 +2358,18 @@ def test_unowned_legacy_is_preserved_while_new_runtime_is_created(
     inst.RuntimeInstaller().install()
 
     assert _tree_fingerprint(legacy) == before
-    create = next(command for command in calls if command[1] == "create")
-    assert create[create.index("-p") + 1] == "./"
-    assert create[create.index("-r") + 1] == "../.."
+    create = next(
+        command
+        for command in calls
+        if _micromamba_subcommand(command) == "create"
+        and (inst.sys.platform != "win32" or "--offline" in command)
+    )
+    if inst.sys.platform == "win32":
+        assert create[create.index("-p") + 1] == str(inst.paths.env_prefix())
+        assert create[create.index("-r") + 1] == str(inst.paths.mamba_root_prefix())
+    else:
+        assert create[create.index("-p") + 1] == "./"
+        assert create[create.index("-r") + 1] == "../.."
     assert inst.paths.env_prefix().is_dir()
 
 
@@ -2121,7 +2459,7 @@ def test_unhealthy_external_legacy_is_preserved_and_new_runtime_is_installed(mon
     inst.RuntimeInstaller().install()
 
     assert _tree_fingerprint(legacy) == before
-    assert any(command[1] == "create" for command in calls)
+    assert any(_micromamba_subcommand(command) == "create" for command in calls)
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
 
 
@@ -2142,25 +2480,41 @@ def test_stale_owned_legacy_uses_legacy_micromamba_for_pip_only(monkeypatch, tmp
     monkeypatch.setattr(
         inst.micromamba,
         "ensure_micromamba",
-        lambda path: _materialize_micromamba(path, ensured),
+        lambda path, **kwargs: _materialize_micromamba(path, ensured, **kwargs),
     )
     calls = []
     monkeypatch.setattr(inst, "_run", lambda command, **kwargs: calls.append(command))
 
     inst.RuntimeInstaller().install()
 
-    assert ensured == []
-    assert inst.paths.legacy_micromamba_path().read_bytes() == _FAKE_MICROMAMBA
+    if inst.sys.platform == "win32":
+        assert ensured == [inst.paths.legacy_micromamba_path()]
+        assert inst.paths.legacy_micromamba_path().read_bytes() == _WINDOWS_FAKE_MICROMAMBA
+    else:
+        assert ensured == []
+        assert inst.paths.legacy_micromamba_path().read_bytes() == _FAKE_MICROMAMBA
     assert len(calls) == 1
-    assert Path(calls[0][0]).name == "micromamba"
-    assert Path(calls[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
-    assert calls[0][1:6] == [
-        "run",
-        "-r",
-        "../..",
-        "-p",
-        "./",
-    ]
+    if inst.sys.platform == "win32":
+        assert Path(calls[0][0]).name == "micromamba.exe"
+        assert calls[0][1:7] == [
+            "--no-rc",
+            "-r",
+            str(inst.paths.legacy_mamba_root_prefix()),
+            "run",
+            "-p",
+            str(legacy),
+        ]
+    else:
+        assert Path(calls[0][0]).name == "micromamba"
+        assert Path(calls[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
+        assert calls[0][1:6] == [
+            "run",
+            "-r",
+            "../..",
+            "-p",
+            "./",
+        ]
+    _assert_pip_install_command(calls[0])
     assert inst.status.read_prefix_receipt(legacy) == spec.expected_receipt()
 
 
@@ -2251,8 +2605,105 @@ def test_run_redirects_stdout(monkeypatch, tmp_path):
     inst._run(["echo", "hi"])
     assert captured["stdout"] is inst.subprocess.PIPE
     assert captured["stderr"] is inst.subprocess.STDOUT
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
 
 
+def test_run_passes_a_snapshot_of_explicit_process_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    captured = {}
+
+    class P:
+        returncode = 0
+        stdout = "ok"
+
+    def fake_run(_cmd, **kwargs):
+        captured.update(kwargs)
+        return P()
+
+    monkeypatch.setattr(inst.subprocess, "run", fake_run)
+    supplied = {"SystemRoot": "C:\\Windows", "CONDA_PKGS_DIRS": "C:\\v"}
+    inst._run(["echo", "hi"], process_env=supplied)
+
+    assert captured["env"] == supplied
+    assert captured["env"] is not supplied
+    captured["env"]["CONDA_PKGS_DIRS"] = "changed"
+    assert supplied["CONDA_PKGS_DIRS"] == "C:\\v"
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows process isolation")
+def test_run_dispatches_windows_package_manager_through_assigned_job_gate(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    events = []
+    captured = {}
+
+    def guard():
+        events.append("guard")
+
+    def run_in_job(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        events.append("gate-assigned")
+        kwargs["before_dispatch"]()
+        events.append("command-dispatched")
+        return inst.subprocess.CompletedProcess(command, 0, stdout="ok", stderr=None)
+
+    monkeypatch.setattr(inst.windows_job_runner, "run_in_job", run_in_job)
+    monkeypatch.setattr(
+        inst,
+        "_spawn_process",
+        lambda *_args, **_kwargs: pytest.fail("guarded Windows command bypassed the job gate"),
+    )
+    supplied = {"SystemRoot": "C:\\Windows", "CONDA_PKGS_DIRS": "C:\\v"}
+
+    inst._run(
+        ["micromamba.exe", "create"],
+        generation_guard=guard,
+        process_env=supplied,
+        windows_kill_tree=True,
+    )
+
+    assert captured["command"] == ["micromamba.exe", "create"]
+    assert captured["environment"] == supplied
+    assert captured["environment"] is not supplied
+    assert events[:4] == ["guard", "gate-assigned", "guard", "command-dispatched"]
+
+
+@pytest.mark.windows_contract
+@pytest.mark.skipif(inst.sys.platform != "win32", reason="native Windows process isolation")
+def test_run_refuses_windows_job_gate_without_explicit_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        inst.windows_job_runner,
+        "run_in_job",
+        lambda *_args, **_kwargs: pytest.fail("unsafe request reached the job gate"),
+    )
+
+    with pytest.raises(inst.InstallError, match="explicit environment"):
+        inst._run(["micromamba.exe", "create"], windows_kill_tree=True)
+
+
+def test_run_replaces_invalid_utf8_in_child_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    records = []
+    monkeypatch.setattr(inst.status, "append_install_log", records.append)
+
+    inst._run(
+        [
+            inst.sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(bytes([0x94]))",
+        ]
+    )
+
+    assert records and "\ufffd" in records[0]
+
+
+@_POSIX_DIRECTORY_CAPABILITY
 def test_run_fd_spawn_uses_clean_helper_without_preexec(monkeypatch, tmp_path):
     directory = tmp_path / "pinned"
     directory.mkdir()
@@ -2284,6 +2735,7 @@ def test_run_fd_spawn_uses_clean_helper_without_preexec(monkeypatch, tmp_path):
     assert command[6:] == ["./runner", "argument"]
 
 
+@_POSIX_DIRECTORY_CAPABILITY
 def test_run_fd_helper_finishes_while_another_thread_holds_a_python_lock(monkeypatch, tmp_path):
     directory = tmp_path / "pinned"
     directory.mkdir()

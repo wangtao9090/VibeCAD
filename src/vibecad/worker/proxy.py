@@ -8,11 +8,13 @@ import hashlib
 import os
 import re
 import stat
+import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from vibecad._file_compat import WindowsPathCapability
 from vibecad.execution.results import (
     NormalizedToolOutcome,
     ToolDiagnosticClass,
@@ -37,6 +39,7 @@ from vibecad.validation import (
     InterferenceObservation,
     ShapeObservation,
 )
+from vibecad.worker import windows_files as _windows_files
 from vibecad.worker.generation import (
     WorkerError,
     WorkerErrorCode,
@@ -58,6 +61,19 @@ _STAGE_NAME = re.compile(r"\.(?:import|normalized|stage|work)\.[0-9a-f]{32}\.FCS
 _MAX_FILE_BYTES = 536_870_912
 _MAX_DIRECTORY_ENTRIES = 64
 _READ_CHUNK_BYTES = 1_048_576
+
+
+def _same_windows_object(
+    left: WindowsPathCapability,
+    right: WindowsPathCapability,
+) -> bool:
+    return (
+        os.path.normcase(left.path) == os.path.normcase(right.path)
+        and left.volume == right.volume
+        and left.file_id == right.file_id
+        and left.owner_sid == right.owner_sid
+        and left.security_sha256 == right.security_sha256
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +158,85 @@ def _entries(
     return _identity(model), _identity(step)
 
 
-def _stable_file_identity(value: _Identity) -> tuple[int, int, int, int, int]:
+def _stable_file_identity(
+    value: _Identity | _windows_files.WindowsEntryIdentity,
+) -> tuple[object, ...]:
+    if type(value) is _windows_files.WindowsEntryIdentity:
+        return _windows_files.stable_identity(value)
     return (value.dev, value.ino, value.mode, value.uid, value.nlink)
+
+
+def _windows_candidate_entries(
+    capability: WindowsPathCapability,
+) -> tuple[_windows_files.WindowsEntryIdentity, _windows_files.WindowsEntryIdentity]:
+    try:
+        entries = dict(
+            _windows_files.capture_entries(
+                capability,
+                maximum_entries=_MAX_DIRECTORY_ENTRIES,
+            )
+        )
+        if not {"model.FCStd", "model.step"}.issubset(entries) or not set(entries).issubset(
+            {
+                "model.FCStd",
+                "model.step",
+                "seed-intent.json",
+                "seed-binding.json",
+            }
+        ):
+            raise OSError
+        model = entries["model.FCStd"]
+        step = entries["model.step"]
+        if (
+            type(model) is not _windows_files.WindowsEntryIdentity
+            or type(step) is not _windows_files.WindowsEntryIdentity
+        ):
+            raise OSError
+        return model, step
+    except (OSError, TypeError, ValueError):
+        raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _windows_revision_files(
+    capability: WindowsPathCapability,
+    revision: RevisionRef,
+) -> tuple[tuple[str, str, int, _windows_files.WindowsEntryIdentity], ...]:
+    try:
+        entries = _windows_files.capture_entries(
+            capability,
+            maximum_entries=_MAX_DIRECTORY_ENTRIES,
+        )
+        expected = {"manifest.json": (revision.manifest_sha256, None)}
+        if revision.model is not None:
+            expected[revision.model.name] = (
+                revision.model.sha256,
+                revision.model.size_bytes,
+            )
+        for artifact in revision.artifacts:
+            expected[artifact.name] = (artifact.sha256, artifact.size_bytes)
+        if tuple(name for name, _entry in entries) != tuple(sorted(expected)):
+            raise OSError
+        result: list[
+            tuple[str, str, int, _windows_files.WindowsEntryIdentity]
+        ] = []
+        for name, identity in entries:
+            digest, size, hashed = _windows_files.hash_entry(
+                capability,
+                name,
+                maximum_bytes=_MAX_FILE_BYTES,
+                expected=identity,
+            )
+            expected_digest, expected_size = expected[name]
+            if (
+                hashed != identity
+                or digest != expected_digest
+                or (expected_size is not None and size != expected_size)
+            ):
+                raise OSError
+            result.append((name, digest, size, identity))
+        return tuple(result)
+    except (OSError, TypeError, ValueError):
+        raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
 
 
 def _hash_entry(directory_fd: int, name: str) -> tuple[str, int, _Identity]:
@@ -309,16 +402,18 @@ class _CandidateState:
     candidates_fd: int
     candidate_name: str
     directory_fd: int
-    candidates_identity: _DirectoryIdentity
-    directory_identity: _DirectoryIdentity
-    model_identity: _Identity
-    step_identity: _Identity
+    candidates_identity: _DirectoryIdentity | None
+    directory_identity: _DirectoryIdentity | None
+    model_identity: _Identity | _windows_files.WindowsEntryIdentity
+    step_identity: _Identity | _windows_files.WindowsEntryIdentity
     root_device: int
     store: LocalRevisionStore
     lease: ProjectWriteLease
     project_id: str
     revision_id: str
     base_head: ProjectHead
+    candidates_capability: WindowsPathCapability | None = None
+    directory_capability: WindowsPathCapability | None = None
 
 
 @dataclass(slots=True)
@@ -327,12 +422,17 @@ class _RevisionState:
     revisions_fd: int
     revision_name: str
     directory_fd: int
-    revisions_identity: _DirectoryIdentity
-    directory_identity: _DirectoryIdentity
-    files: tuple[tuple[str, str, int, _Identity], ...]
+    revisions_identity: _DirectoryIdentity | None
+    directory_identity: _DirectoryIdentity | None
+    files: tuple[
+        tuple[str, str, int, _Identity | _windows_files.WindowsEntryIdentity],
+        ...,
+    ]
     root_device: int
     store: LocalRevisionStore
     revision: RevisionRef
+    revisions_capability: WindowsPathCapability | None = None
+    directory_capability: WindowsPathCapability | None = None
 
 
 @dataclass(slots=True)
@@ -445,16 +545,20 @@ class FreeCadWorker(_Opaque):
         with self._lifecycle_lock:
             self._closing = True
             for state in tuple(self._candidates.values()):
-                with contextlib.suppress(OSError):
-                    os.close(state.directory_fd)
-                with contextlib.suppress(OSError):
-                    os.close(state.candidates_fd)
+                if state.directory_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(state.directory_fd)
+                if state.candidates_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(state.candidates_fd)
             self._candidates.clear()
             for state in tuple(self._revisions.values()):
-                with contextlib.suppress(OSError):
-                    os.close(state.directory_fd)
-                with contextlib.suppress(OSError):
-                    os.close(state.revisions_fd)
+                if state.directory_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(state.directory_fd)
+                if state.revisions_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(state.revisions_fd)
             self._revisions.clear()
             self._sessions.clear()
 
@@ -524,6 +628,26 @@ class FreeCadWorker(_Opaque):
                 revision_id=state.revision_id,
                 lease=state.lease,
             )
+            if sys.platform == "win32":
+                candidates_capability, directory_capability = opened[0], opened[1]
+                if (
+                    type(candidates_capability) is not WindowsPathCapability
+                    or type(directory_capability) is not WindowsPathCapability
+                    or state.candidates_capability is None
+                    or state.directory_capability is None
+                    or not _same_windows_object(
+                        candidates_capability,
+                        state.candidates_capability,
+                    )
+                    or not _same_windows_object(
+                        directory_capability,
+                        state.directory_capability,
+                    )
+                ):
+                    raise OSError
+                _windows_files.validate_directory(candidates_capability)
+                _windows_files.validate_directory(directory_capability)
+                return
             candidates_fd = opened[0]
             directory_fd = opened[1]
             os.close(directory_fd)
@@ -544,6 +668,25 @@ class FreeCadWorker(_Opaque):
         with self._lifecycle_lock:
             self._ensure_process()
             self._require_candidate_authority(state)
+            if state.directory_capability is not None:
+                try:
+                    if state.candidates_capability is None:
+                        raise OSError
+                    parent = _windows_files.validate_directory(state.candidates_capability)
+                    directory = _windows_files.validate_directory(state.directory_capability)
+                    if (
+                        os.path.normcase(os.fspath(directory.parent))
+                        != os.path.normcase(os.fspath(parent))
+                        or directory.name != state.candidate_name
+                        or state.directory_capability.volume != state.root_device
+                    ):
+                        raise OSError
+                    model, step = _windows_candidate_entries(state.directory_capability)
+                except (OSError, TypeError, ValueError, WorkerError):
+                    raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+                if model != state.model_identity or step != state.step_identity:
+                    raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+                return
             try:
                 candidates = os.fstat(state.candidates_fd)
                 descriptor = os.fstat(state.directory_fd)
@@ -572,6 +715,50 @@ class FreeCadWorker(_Opaque):
     def _require_live_revision(self, state: _RevisionState) -> None:
         with self._lifecycle_lock:
             self._ensure_process()
+            if state.directory_capability is not None:
+                try:
+                    (
+                        fresh_revisions,
+                        fresh_directory,
+                        fresh_name,
+                        fresh_root_device,
+                    ) = _open_worker_revision(
+                        state.store,
+                        expected_revision=state.revision,
+                    )
+                    if (
+                        type(fresh_revisions) is not WindowsPathCapability
+                        or type(fresh_directory) is not WindowsPathCapability
+                        or state.revisions_capability is None
+                        or not _same_windows_object(
+                            fresh_revisions,
+                            state.revisions_capability,
+                        )
+                        or not _same_windows_object(
+                            fresh_directory,
+                            state.directory_capability,
+                        )
+                        or fresh_name != state.revision_name
+                        or fresh_root_device != state.root_device
+                    ):
+                        raise OSError
+                    parent = _windows_files.validate_directory(fresh_revisions)
+                    directory = _windows_files.validate_directory(fresh_directory)
+                    if (
+                        os.path.normcase(os.fspath(directory.parent))
+                        != os.path.normcase(os.fspath(parent))
+                        or directory.name != fresh_name
+                    ):
+                        raise OSError
+                    files = _windows_revision_files(
+                        state.directory_capability,
+                        state.revision,
+                    )
+                    if files != state.files:
+                        raise OSError
+                    return
+                except (OSError, TypeError, ValueError, WorkerError):
+                    raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
             fresh_revisions = -1
             fresh_directory = -1
             try:
@@ -644,12 +831,16 @@ class FreeCadWorker(_Opaque):
             raise WorkerError(WorkerErrorCode.INVALID_INPUT)
         candidates_fd = -1
         descriptor = -1
+        candidates_capability: WindowsPathCapability | None = None
+        directory_capability: WindowsPathCapability | None = None
+        candidates_identity: _DirectoryIdentity | None = None
+        directory_identity: _DirectoryIdentity | None = None
         with self._operation_lock:
             self._ensure_process()
             try:
                 (
-                    candidates_fd,
-                    descriptor,
+                    parent_authority,
+                    directory_authority,
                     candidate_name,
                     root_device,
                 ) = _open_worker_candidate_staging(
@@ -658,23 +849,46 @@ class FreeCadWorker(_Opaque):
                     revision_id=revision_id,
                     lease=lease,
                 )
-                candidates = os.fstat(candidates_fd)
-                captured = os.fstat(descriptor)
-                live = os.stat(
-                    candidate_name,
-                    dir_fd=candidates_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    _directory_identity(captured) != _directory_identity(live)
-                    or not _private_directory(captured)
-                    or captured.st_dev != root_device
-                ):
-                    raise OSError
-                model, step = _entries(
-                    descriptor,
-                    root_device=root_device,
-                )
+                if sys.platform == "win32":
+                    if (
+                        type(parent_authority) is not WindowsPathCapability
+                        or type(directory_authority) is not WindowsPathCapability
+                    ):
+                        raise OSError
+                    candidates_capability = parent_authority
+                    directory_capability = directory_authority
+                    parent = _windows_files.validate_directory(candidates_capability)
+                    directory = _windows_files.validate_directory(directory_capability)
+                    if (
+                        directory.name != candidate_name
+                        or os.path.normcase(os.fspath(directory.parent))
+                        != os.path.normcase(os.fspath(parent))
+                        or directory_capability.volume != root_device
+                    ):
+                        raise OSError
+                    model, step = _windows_candidate_entries(directory_capability)
+                else:
+                    candidates_fd = parent_authority
+                    descriptor = directory_authority
+                    candidates = os.fstat(candidates_fd)
+                    captured = os.fstat(descriptor)
+                    live = os.stat(
+                        candidate_name,
+                        dir_fd=candidates_fd,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        _directory_identity(captured) != _directory_identity(live)
+                        or not _private_directory(captured)
+                        or captured.st_dev != root_device
+                    ):
+                        raise OSError
+                    model, step = _entries(
+                        descriptor,
+                        root_device=root_device,
+                    )
+                    candidates_identity = _directory_identity(candidates)
+                    directory_identity = _directory_identity(captured)
             except BaseException as error:
                 if descriptor >= 0:
                     with contextlib.suppress(OSError):
@@ -686,17 +900,20 @@ class FreeCadWorker(_Opaque):
                     raise
                 raise WorkerError(WorkerErrorCode.INVALID_CANDIDATE) from None
             candidate_id = f"worker_candidate_{os.urandom(16).hex()}"
+            bind_params: dict[str, object] = {
+                "candidate_id": candidate_id,
+                "project_id": base_head.project_id,
+                "revision_id": revision_id,
+                "base_revision_id": base_head.revision_id,
+            }
+            if directory_capability is not None:
+                bind_params["path_capability"] = directory_capability.to_mapping()
             try:
                 result = self._request(
                     "candidate.bind",
-                    {
-                        "candidate_id": candidate_id,
-                        "project_id": base_head.project_id,
-                        "revision_id": revision_id,
-                        "base_revision_id": base_head.revision_id,
-                    },
+                    bind_params,
                     timeout_ms=30_000,
-                    capability_fd=descriptor,
+                    capability_fd=(descriptor if descriptor >= 0 else None),
                 )
                 if set(result) != {"candidate_id"} or result["candidate_id"] != candidate_id:
                     self._protocol_loss()
@@ -715,8 +932,8 @@ class FreeCadWorker(_Opaque):
                 candidates_fd=candidates_fd,
                 candidate_name=candidate_name,
                 directory_fd=descriptor,
-                candidates_identity=_directory_identity(candidates),
-                directory_identity=_directory_identity(captured),
+                candidates_identity=candidates_identity,
+                directory_identity=directory_identity,
                 model_identity=model,
                 step_identity=step,
                 root_device=root_device,
@@ -725,6 +942,8 @@ class FreeCadWorker(_Opaque):
                 project_id=base_head.project_id,
                 revision_id=revision_id,
                 base_head=base_head,
+                candidates_capability=candidates_capability,
+                directory_capability=directory_capability,
             )
             try:
                 with self._lifecycle_lock:
@@ -752,32 +971,59 @@ class FreeCadWorker(_Opaque):
             raise WorkerError(WorkerErrorCode.INVALID_INPUT)
         revisions_fd = -1
         descriptor = -1
+        revisions_capability: WindowsPathCapability | None = None
+        directory_capability: WindowsPathCapability | None = None
+        revisions_identity: _DirectoryIdentity | None = None
+        directory_identity: _DirectoryIdentity | None = None
         with self._operation_lock:
             self._ensure_process()
             try:
                 (
-                    revisions_fd,
-                    descriptor,
+                    parent_authority,
+                    directory_authority,
                     revision_name,
                     root_device,
                 ) = _open_worker_revision(
                     store,
                     expected_revision=revision,
                 )
-                revisions_stat = os.fstat(revisions_fd)
-                directory_stat = os.fstat(descriptor)
-                live_stat = os.stat(
-                    revision_name,
-                    dir_fd=revisions_fd,
-                    follow_symlinks=False,
-                )
-                files = _revision_files(descriptor, revision)
-                if (
-                    _directory_identity(directory_stat) != _directory_identity(live_stat)
-                    or not _private_directory(directory_stat)
-                    or directory_stat.st_dev != root_device
-                ):
-                    raise OSError
+                if sys.platform == "win32":
+                    if (
+                        type(parent_authority) is not WindowsPathCapability
+                        or type(directory_authority) is not WindowsPathCapability
+                    ):
+                        raise OSError
+                    revisions_capability = parent_authority
+                    directory_capability = directory_authority
+                    parent = _windows_files.validate_directory(revisions_capability)
+                    directory = _windows_files.validate_directory(directory_capability)
+                    if (
+                        directory.name != revision_name
+                        or os.path.normcase(os.fspath(directory.parent))
+                        != os.path.normcase(os.fspath(parent))
+                        or directory_capability.volume != root_device
+                    ):
+                        raise OSError
+                    files = _windows_revision_files(directory_capability, revision)
+                else:
+                    revisions_fd = parent_authority
+                    descriptor = directory_authority
+                    revisions_stat = os.fstat(revisions_fd)
+                    directory_stat = os.fstat(descriptor)
+                    live_stat = os.stat(
+                        revision_name,
+                        dir_fd=revisions_fd,
+                        follow_symlinks=False,
+                    )
+                    files = _revision_files(descriptor, revision)
+                    if (
+                        _directory_identity(directory_stat) != _directory_identity(live_stat)
+                        or not _private_directory(directory_stat)
+                        or directory_stat.st_dev != root_device
+                    ):
+                        raise OSError
+                    revisions_identity = _directory_identity(revisions_stat)
+                    directory_identity = _directory_identity(directory_stat)
             except BaseException as error:
                 if descriptor >= 0:
                     with contextlib.suppress(OSError):
@@ -797,18 +1043,21 @@ class FreeCadWorker(_Opaque):
                 }
                 for name, digest, size, _identity_value in files
             ]
+            bind_params: dict[str, object] = {
+                "revision_id": capability_id,
+                "project_id": revision.project_id,
+                "store_revision_id": revision.id,
+                "model_name": (None if revision.model is None else revision.model.name),
+                "files": file_mappings,
+            }
+            if directory_capability is not None:
+                bind_params["path_capability"] = directory_capability.to_mapping()
             try:
                 result = self._request(
                     "revision.bind",
-                    {
-                        "revision_id": capability_id,
-                        "project_id": revision.project_id,
-                        "store_revision_id": revision.id,
-                        "model_name": (None if revision.model is None else revision.model.name),
-                        "files": file_mappings,
-                    },
+                    bind_params,
                     timeout_ms=30_000,
-                    capability_fd=descriptor,
+                    capability_fd=(descriptor if descriptor >= 0 else None),
                 )
                 if set(result) != {"revision_id"} or result["revision_id"] != capability_id:
                     self._protocol_loss()
@@ -827,12 +1076,14 @@ class FreeCadWorker(_Opaque):
                 revisions_fd=revisions_fd,
                 revision_name=revision_name,
                 directory_fd=descriptor,
-                revisions_identity=_directory_identity(revisions_stat),
-                directory_identity=_directory_identity(directory_stat),
+                revisions_identity=revisions_identity,
+                directory_identity=directory_identity,
                 files=files,
                 root_device=root_device,
                 store=store,
                 revision=revision,
+                revisions_capability=revisions_capability,
+                directory_capability=directory_capability,
             )
             try:
                 with self._lifecycle_lock:
@@ -951,7 +1202,9 @@ class FreeCadWorker(_Opaque):
         session: WorkerSession,
         artifact_snapshot: Mapping[str, object] | None = None,
         artifact_snapshot_fd: int | None = None,
+        artifact_snapshot_capability: Mapping[str, object] | None = None,
     ) -> tuple[NormalizedToolOutcome, ...]:
+        windows_artifact_capability: WindowsPathCapability | None = None
         try:
             if type(program) is ModelProgram:
                 validated = validate_model_program(program)
@@ -961,7 +1214,17 @@ class FreeCadWorker(_Opaque):
             else:
                 raise TypeError
             source = validated.program
-            if (artifact_snapshot is None) != (artifact_snapshot_fd is None):
+            if artifact_snapshot is None and (
+                artifact_snapshot_fd is not None or artifact_snapshot_capability is not None
+            ):
+                raise TypeError
+            if artifact_snapshot is not None and sys.platform == "win32" and (
+                artifact_snapshot_fd is not None or artifact_snapshot_capability is None
+            ):
+                raise TypeError
+            if artifact_snapshot is not None and sys.platform != "win32" and (
+                artifact_snapshot_fd is None or artifact_snapshot_capability is not None
+            ):
                 raise TypeError
             snapshot_mapping: dict[str, object] | None = None
             if artifact_snapshot is not None:
@@ -990,7 +1253,14 @@ class FreeCadWorker(_Opaque):
                     )
                 ):
                     raise TypeError
-                if (
+                if sys.platform == "win32":
+                    if type(artifact_snapshot_capability) is not dict:
+                        raise TypeError
+                    windows_artifact_capability = WindowsPathCapability.from_mapping(
+                        dict(artifact_snapshot_capability)
+                    )
+                    _windows_files.validate_directory(windows_artifact_capability)
+                elif (
                     type(artifact_snapshot_fd) is not int
                     or artifact_snapshot_fd < 0
                     or not _private_directory(os.fstat(artifact_snapshot_fd))
@@ -1020,12 +1290,22 @@ class FreeCadWorker(_Opaque):
             }
             if snapshot_mapping is not None:
                 begin_params["artifact_snapshot"] = snapshot_mapping
+            if windows_artifact_capability is not None:
+                _windows_files.validate_directory(windows_artifact_capability)
+                begin_params["artifact_path_capability"] = (
+                    windows_artifact_capability.to_mapping()
+                )
             begin = self._request(
                 "program.begin",
                 begin_params,
                 timeout_ms=30_000,
                 capability_fd=artifact_snapshot_fd,
             )
+            if windows_artifact_capability is not None:
+                try:
+                    _windows_files.validate_directory(windows_artifact_capability)
+                except (OSError, TypeError, ValueError):
+                    self._protocol_loss()
             expected_ids = [command.id for command in validated.commands]
             expected_deadlines = [
                 command.resource_budget.max_runtime_ms for command in validated.commands
@@ -1059,6 +1339,11 @@ class FreeCadWorker(_Opaque):
                     },
                     timeout_ms=runtime_limit,
                 )
+                if windows_artifact_capability is not None:
+                    try:
+                        _windows_files.validate_directory(windows_artifact_capability)
+                    except (OSError, TypeError, ValueError):
+                        self._protocol_loss()
                 expected_done = index + 1 == len(expected_ids)
                 if (
                     set(response)
@@ -1425,26 +1710,50 @@ class FreeCadWorker(_Opaque):
                 self._protocol_loss()
             try:
                 self._require_candidate_authority(state)
-                candidates = os.fstat(state.candidates_fd)
-                descriptor = os.fstat(state.directory_fd)
-                live = os.stat(
-                    state.candidate_name,
-                    dir_fd=state.candidates_fd,
-                    follow_symlinks=False,
-                )
-                model, step = _entries(
-                    state.directory_fd,
-                    root_device=state.root_device,
-                )
-                digest, size, hashed = _hash_entry(state.directory_fd, name)
-            except (OSError, WorkerError):
+                if state.directory_capability is not None:
+                    if state.candidates_capability is None:
+                        raise OSError
+                    parent = _windows_files.validate_directory(state.candidates_capability)
+                    directory = _windows_files.validate_directory(state.directory_capability)
+                    if (
+                        directory.name != state.candidate_name
+                        or os.path.normcase(os.fspath(directory.parent))
+                        != os.path.normcase(os.fspath(parent))
+                    ):
+                        raise OSError
+                    model, step = _windows_candidate_entries(state.directory_capability)
+                    target = model if name == "model.FCStd" else step
+                    digest, size, hashed = _windows_files.hash_entry(
+                        state.directory_capability,
+                        name,
+                        maximum_bytes=_MAX_FILE_BYTES,
+                        expected=target,
+                    )
+                    directory_matches = True
+                else:
+                    candidates = os.fstat(state.candidates_fd)
+                    descriptor = os.fstat(state.directory_fd)
+                    live = os.stat(
+                        state.candidate_name,
+                        dir_fd=state.candidates_fd,
+                        follow_symlinks=False,
+                    )
+                    model, step = _entries(
+                        state.directory_fd,
+                        root_device=state.root_device,
+                    )
+                    target = model if name == "model.FCStd" else step
+                    digest, size, hashed = _hash_entry(state.directory_fd, name)
+                    directory_matches = (
+                        _directory_identity(candidates) == state.candidates_identity
+                        and _directory_identity(descriptor) == state.directory_identity
+                        and _directory_identity(live) == state.directory_identity
+                    )
+            except (OSError, TypeError, ValueError, WorkerError):
                 self._protocol_loss()
-            target = model if name == "model.FCStd" else step
             if (
                 name not in {"model.FCStd", "model.step"}
-                or _directory_identity(candidates) != state.candidates_identity
-                or _directory_identity(descriptor) != state.directory_identity
-                or _directory_identity(live) != state.directory_identity
+                or not directory_matches
                 or hashed != target
                 or digest != result["sha256"]
                 or size != result["size_bytes"]
@@ -1453,9 +1762,10 @@ class FreeCadWorker(_Opaque):
             if name == "model.FCStd":
                 if step != state.step_identity:
                     self._protocol_loss()
-            elif model != state.model_identity or _stable_file_identity(
-                step
-            ) != _stable_file_identity(state.step_identity):
+            elif model != state.model_identity or (
+                state.directory_capability is None
+                and _stable_file_identity(step) != _stable_file_identity(state.step_identity)
+            ):
                 self._protocol_loss()
             try:
                 self._require_candidate_authority(state)
@@ -1467,11 +1777,22 @@ class FreeCadWorker(_Opaque):
     def _validate_import_at(
         self,
         *,
-        directory_fd: int,
+        directory_fd: int | None = None,
+        directory_capability: WindowsPathCapability | None = None,
         name: str,
         normalize: bool,
     ) -> ValidatedImportEvidence:
         if type(name) is not str or _STAGE_NAME.fullmatch(name) is None:
+            raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+        if sys.platform == "win32":
+            if directory_fd is not None or type(directory_capability) is not WindowsPathCapability:
+                raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+            return self._validate_import_at_windows(
+                directory_capability=directory_capability,
+                name=name,
+                normalize=normalize,
+            )
+        if type(directory_fd) is not int or directory_capability is not None:
             raise WorkerError(WorkerErrorCode.INVALID_INPUT)
         with self._operation_lock:
             self._ensure_process()
@@ -1526,14 +1847,86 @@ class FreeCadWorker(_Opaque):
                 with contextlib.suppress(OSError):
                     os.close(pinned)
 
+    def _validate_import_at_windows(
+        self,
+        *,
+        directory_capability: WindowsPathCapability,
+        name: str,
+        normalize: bool,
+    ) -> ValidatedImportEvidence:
+        with self._operation_lock:
+            self._ensure_process()
+            try:
+                before = _windows_files.capture_entries(
+                    directory_capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+                before_mapping = dict(before)
+                target_before = before_mapping.get(name)
+                if target_before is None or target_before.size <= 0:
+                    raise OSError
+            except (OSError, TypeError, ValueError):
+                raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+            result = self._request(
+                ("validation.validate_import" if normalize else "validation.revalidate_import"),
+                {
+                    "name": name,
+                    "path_capability": directory_capability.to_mapping(),
+                },
+                timeout_ms=30_000,
+            )
+            try:
+                after = _windows_files.capture_entries(
+                    directory_capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+                after_mapping = dict(after)
+                target_after = after_mapping.get(name)
+                if type(target_after) is not _windows_files.WindowsEntryIdentity:
+                    raise OSError
+                digest, size, hashed = _windows_files.hash_entry(
+                    directory_capability,
+                    name,
+                    maximum_bytes=_MAX_FILE_BYTES,
+                    expected=target_after,
+                )
+            except (OSError, TypeError, ValueError):
+                self._protocol_loss()
+            if (
+                hashed != target_after
+                or set(after_mapping) != set(before_mapping)
+                or any(
+                    after_mapping[entry_name] != entry_identity
+                    for entry_name, entry_identity in before
+                    if entry_name != name
+                )
+                or (not normalize and target_after != target_before)
+                or set(result) != {"sha256", "size_bytes"}
+                or type(result["sha256"]) is not str
+                or _DIGEST.fullmatch(result["sha256"]) is None
+                or type(result["size_bytes"]) is not int
+                or result["sha256"] != digest
+                or result["size_bytes"] != size
+            ):
+                self._protocol_loss()
+            try:
+                return ValidatedImportEvidence(
+                    sha256=digest,
+                    size_bytes=size,
+                )
+            except ValueError:
+                self._protocol_loss()
+
     def validate_import(
         self,
         *,
-        directory_fd: int,
+        directory_fd: int | None = None,
+        directory_capability: WindowsPathCapability | None = None,
         name: str,
     ) -> ValidatedImportEvidence:
         return self._validate_import_at(
             directory_fd=directory_fd,
+            directory_capability=directory_capability,
             name=name,
             normalize=True,
         )
@@ -1541,11 +1934,13 @@ class FreeCadWorker(_Opaque):
     def revalidate_normalized_import(
         self,
         *,
-        directory_fd: int,
+        directory_fd: int | None = None,
+        directory_capability: WindowsPathCapability | None = None,
         name: str,
     ) -> ValidatedImportEvidence:
         return self._validate_import_at(
             directory_fd=directory_fd,
+            directory_capability=directory_capability,
             name=name,
             normalize=False,
         )
@@ -1553,8 +1948,15 @@ class FreeCadWorker(_Opaque):
     def validate_materialization(
         self,
         *,
-        directory_fd: int,
+        directory_fd: int | None = None,
+        directory_capability: WindowsPathCapability | None = None,
     ) -> ValidatedMaterializationEvidence:
+        if sys.platform == "win32":
+            if directory_fd is not None or type(directory_capability) is not WindowsPathCapability:
+                raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+            return self._validate_materialization_windows(directory_capability)
+        if type(directory_fd) is not int or directory_capability is not None:
+            raise WorkerError(WorkerErrorCode.INVALID_INPUT)
         with self._operation_lock:
             self._ensure_process()
             pinned, directory_identity = _pin_private_directory(directory_fd)
@@ -1624,6 +2026,86 @@ class FreeCadWorker(_Opaque):
                 with contextlib.suppress(OSError):
                     os.close(pinned)
 
+    def _validate_materialization_windows(
+        self,
+        directory_capability: WindowsPathCapability,
+    ) -> ValidatedMaterializationEvidence:
+        with self._operation_lock:
+            self._ensure_process()
+            try:
+                before = _windows_files.capture_entries(
+                    directory_capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+                before_mapping = dict(before)
+                fcstd_before = before_mapping.get("model.FCStd")
+                step_before = before_mapping.get("model.step")
+                if (
+                    type(fcstd_before) is not _windows_files.WindowsEntryIdentity
+                    or type(step_before) is not _windows_files.WindowsEntryIdentity
+                    or fcstd_before.size <= 0
+                    or step_before.size <= 0
+                ):
+                    raise OSError
+            except (OSError, TypeError, ValueError):
+                raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+            result = self._request(
+                "validation.validate_materialization",
+                {"path_capability": directory_capability.to_mapping()},
+                timeout_ms=30_000,
+            )
+            try:
+                after = _windows_files.capture_entries(
+                    directory_capability,
+                    maximum_entries=_MAX_DIRECTORY_ENTRIES,
+                )
+                fcstd_sha256, fcstd_size, fcstd_identity = _windows_files.hash_entry(
+                    directory_capability,
+                    "model.FCStd",
+                    maximum_bytes=_MAX_FILE_BYTES,
+                    expected=fcstd_before,
+                )
+                step_sha256, step_size, step_identity = _windows_files.hash_entry(
+                    directory_capability,
+                    "model.step",
+                    maximum_bytes=_MAX_FILE_BYTES,
+                    expected=step_before,
+                )
+            except (OSError, TypeError, ValueError):
+                self._protocol_loss()
+            if (
+                after != before
+                or fcstd_identity != fcstd_before
+                or step_identity != step_before
+                or set(result)
+                != {
+                    "fcstd_sha256",
+                    "fcstd_size_bytes",
+                    "step_sha256",
+                    "step_size_bytes",
+                }
+                or type(result["fcstd_sha256"]) is not str
+                or _DIGEST.fullmatch(result["fcstd_sha256"]) is None
+                or type(result["fcstd_size_bytes"]) is not int
+                or type(result["step_sha256"]) is not str
+                or _DIGEST.fullmatch(result["step_sha256"]) is None
+                or type(result["step_size_bytes"]) is not int
+                or result["fcstd_sha256"] != fcstd_sha256
+                or result["fcstd_size_bytes"] != fcstd_size
+                or result["step_sha256"] != step_sha256
+                or result["step_size_bytes"] != step_size
+            ):
+                self._protocol_loss()
+            try:
+                return ValidatedMaterializationEvidence(
+                    fcstd_sha256=fcstd_sha256,
+                    fcstd_size_bytes=fcstd_size,
+                    step_sha256=step_sha256,
+                    step_size_bytes=step_size,
+                )
+            except ValueError:
+                self._protocol_loss()
+
     def close_session(self, session: WorkerSession) -> None:
         with self._operation_lock:
             self._ensure_process()
@@ -1671,6 +2153,8 @@ class FreeCadWorker(_Opaque):
                 close_failed = False
                 for name in ("directory_fd", "candidates_fd"):
                     descriptor = getattr(state, name)
+                    if descriptor < 0:
+                        continue
                     try:
                         os.close(descriptor)
                     except OSError:
@@ -1706,6 +2190,8 @@ class FreeCadWorker(_Opaque):
                 close_failed = False
                 for name in ("directory_fd", "revisions_fd"):
                     descriptor = getattr(state, name)
+                    if descriptor < 0:
+                        continue
                     try:
                         os.close(descriptor)
                     except OSError:

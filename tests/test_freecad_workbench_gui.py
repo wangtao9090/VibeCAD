@@ -26,6 +26,16 @@ from tests.test_freecad_workbench_bootstrap import (
     _DarwinProcessToken,
     _finalize_probe_cleanup,
     _safe_absent_or_empty_run_root,
+    _test_darwin_euid,
+)
+from vibecad._file_compat import (
+    WindowsExternalFileCapability,
+    capture_windows_external_fd,
+    capture_windows_path,
+    ensure_private_directory,
+    open_windows_external_file,
+    set_private_dacl,
+    validate_windows_external_file,
 )
 from vibecad.daemon.state import (
     DAEMON_ENDPOINT_NAME,
@@ -41,6 +51,7 @@ _CAMPAIGN_TIMEOUT_SECONDS = 60.0
 _CLEANUP_RESERVE_SECONDS = 12.0
 _DARWIN_TEMP_PARENT = Path("/private/tmp")
 _DARWIN_TEMP_PREFIX = "vc-g1m00-"
+_DARWIN_SIGKILL = getattr(signal, "SIGKILL", 9)
 
 
 def _load_gui_harness_module() -> ModuleType:
@@ -58,6 +69,7 @@ class _FileIdentity:
     target: Path
     entry: tuple[int, int, int, int, int, int, int, int]
     resolved: tuple[int, int, int, int, int, int, int, int]
+    windows_capability: WindowsExternalFileCapability | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +119,56 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int,
     )
 
 
-def _capture_gui_identity(binary: Path, prefix: Path) -> _FileIdentity:
+def _capture_gui_identity(
+    binary: Path,
+    prefix: Path,
+    *,
+    windows_generation_token: str | None = None,
+) -> _FileIdentity:
     if binary != paths.freecad_path() or not binary.is_absolute():
         raise ValueError("GUI binary is not the selected runtime path")
     prefix = prefix.resolve(strict=True)
+    if sys.platform == "win32":
+        descriptor = -1
+        try:
+            target = binary.resolve(strict=True)
+            target.relative_to(prefix)
+            if target != binary:
+                raise ValueError("GUI target is not one canonical executable")
+            descriptor, opened = open_windows_external_file(binary)
+            token = (
+                opened.generation_token
+                if windows_generation_token is None
+                else windows_generation_token
+            )
+            capability = capture_windows_external_fd(
+                descriptor,
+                generation_token=token,
+            )
+            entry_info = os.fstat(descriptor)
+            if (
+                Path(capability.path) != target
+                or not stat.S_ISREG(entry_info.st_mode)
+                or entry_info.st_nlink != 1
+                or entry_info.st_size <= 0
+                or validate_windows_external_file(capability) != target
+            ):
+                raise ValueError("GUI target is not one owner-controlled executable")
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("GUI binary identity is unavailable") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        identity = _stat_identity(entry_info)
+        return _FileIdentity(
+            path=binary,
+            target=target,
+            entry=identity,
+            resolved=identity,
+            windows_capability=capability,
+        )
     try:
         entry_info = binary.lstat()
         target = binary.resolve(strict=True)
@@ -140,13 +198,22 @@ def _capture_gui_identity(binary: Path, prefix: Path) -> _FileIdentity:
 
 
 def _revalidate_gui_identity(identity: _FileIdentity, prefix: Path) -> None:
-    current = _capture_gui_identity(identity.path, prefix)
+    current = _capture_gui_identity(
+        identity.path,
+        prefix,
+        windows_generation_token=(
+            None
+            if identity.windows_capability is None
+            else identity.windows_capability.generation_token
+        ),
+    )
     if current != identity:
         raise RuntimeError("GUI binary generation changed")
 
 
 def _freecad_module_root(repo: Path) -> Path:
     getuid = getattr(os, "geteuid", None)
+    windows = sys.platform == "win32"
 
     def admit_directory(path: Path) -> None:
         try:
@@ -154,13 +221,29 @@ def _freecad_module_root(repo: Path) -> Path:
             info = path.lstat()
         except OSError as exc:
             raise ValueError("FreeCAD module root execution chain is unavailable") from exc
+        if windows:
+            try:
+                capability = capture_windows_path(path, directory=True)
+            except (OSError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "FreeCAD module root execution chain is not canonical and owner-controlled"
+                ) from exc
+            if Path(capability.path) != canonical:
+                raise ValueError(
+                    "FreeCAD module root execution chain is not canonical and owner-controlled"
+                )
         if (
             path != canonical
             or not stat.S_ISDIR(info.st_mode)
-            or not info.st_mode & stat.S_IRUSR
-            or not info.st_mode & stat.S_IXUSR
-            or stat.S_IMODE(info.st_mode) & 0o022
-            or (getuid is not None and info.st_uid != getuid())
+            or (
+                not windows
+                and (
+                    not info.st_mode & stat.S_IRUSR
+                    or not info.st_mode & stat.S_IXUSR
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or (getuid is not None and info.st_uid != getuid())
+                )
+            )
         ):
             raise ValueError(
                 "FreeCAD module root execution chain is not canonical and owner-controlled"
@@ -183,15 +266,51 @@ def _freecad_module_root(repo: Path) -> Path:
             canonical_source = source.resolve(strict=True)
         except OSError as exc:
             raise ValueError("FreeCAD module root is missing a required source") from exc
+        if windows:
+            try:
+                capability = capture_windows_path(source, directory=False)
+            except (OSError, TypeError, ValueError) as exc:
+                raise ValueError("FreeCAD module root has an invalid required source") from exc
+            if Path(capability.path) != canonical_source:
+                raise ValueError("FreeCAD module root has an invalid required source")
         if (
             source != canonical_source
             or not stat.S_ISREG(source_info.st_mode)
-            or not source_info.st_mode & stat.S_IRUSR
-            or stat.S_IMODE(source_info.st_mode) & 0o022
-            or (getuid is not None and source_info.st_uid != getuid())
+            or (
+                not windows
+                and (
+                    not source_info.st_mode & stat.S_IRUSR
+                    or stat.S_IMODE(source_info.st_mode) & 0o022
+                    or (getuid is not None and source_info.st_uid != getuid())
+                )
+            )
         ):
             raise ValueError("FreeCAD module root has an invalid required source")
     return module_root
+
+
+def _protect_windows_module_fixture(repo: Path) -> None:
+    if sys.platform != "win32":
+        return
+    module_root = repo / "freecad" / "VibeCAD"
+    for path in (repo, repo / "freecad", module_root):
+        if path.exists():
+            set_private_dacl(path)
+    for name in ("Init.py", "InitGui.py", "package.xml"):
+        source = module_root / name
+        if source.exists():
+            set_private_dacl(source)
+
+
+def _make_windows_dacl_unsafe(path: Path) -> None:
+    result = subprocess.run(
+        ["icacls.exe", os.fspath(path), "/inheritance:e"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip("icacls could not alter the Workbench execution-chain DACL")
 
 
 def _gui_command(binary: Path, repo: Path) -> list[str]:
@@ -211,6 +330,27 @@ def _gui_command(binary: Path, repo: Path) -> list[str]:
 def _private_roots(root: Path) -> _PrivateRoots:
     if root != root.resolve(strict=True):
         raise ValueError("isolated root spelling is not canonical")
+    if sys.platform == "win32":
+        set_private_dacl(root)
+        root_capability = capture_windows_path(root, directory=True)
+        roots = _PrivateRoots(
+            root=root,
+            vibecad=root / "vibecad",
+            freecad_home=root / "freecad-home",
+            freecad_data=root / "freecad-data",
+            freecad_temp=root / "freecad-temp",
+            tmp=root / "tmp",
+        )
+        for child in (
+            roots.vibecad,
+            roots.freecad_home,
+            roots.freecad_data,
+            roots.freecad_temp,
+            roots.tmp,
+        ):
+            ensure_private_directory(child, expected_parent=root_capability)
+            capture_windows_path(child, directory=True)
+        return roots
     info = root.lstat()
     getuid = getattr(os, "geteuid", None)
     if (
@@ -399,8 +539,13 @@ def _reclaim_gui_process(
     deadline: float,
     *,
     capture: Callable[[int], _DarwinProcessToken] = _darwin_process_token,
-    killpg: Callable[[int, int], None] = os.killpg,
+    killpg: Callable[[int, int], None] | None = None,
 ) -> tuple[bool, bool]:
+    if killpg is None:
+        platform_killpg = getattr(os, "killpg", None)
+        if not callable(platform_killpg):
+            raise RuntimeError("Darwin process-group cleanup is unavailable")
+        killpg = platform_killpg
     if process.pid != token.pid:
         raise _GuiReclaimError(
             "GUI process token does not match child",
@@ -441,7 +586,7 @@ def _reclaim_gui_process(
             kill_sent=False,
         )
     try:
-        killpg(token.pgid, signal.SIGKILL)
+        killpg(token.pgid, _DARWIN_SIGKILL)
     except OSError as exc:
         raise _GuiReclaimError(
             "GUI SIGKILL failed",
@@ -466,8 +611,13 @@ def _recover_gui_child(
     token_capture_failed: bool,
     deadline: float,
     capture: Callable[[int], _DarwinProcessToken] = _darwin_process_token,
-    killpg: Callable[[int, int], None] = os.killpg,
+    killpg: Callable[[int, int], None] | None = None,
 ) -> _CleanupOutcome:
+    if killpg is None:
+        platform_killpg = getattr(os, "killpg", None)
+        if not callable(platform_killpg):
+            raise RuntimeError("Darwin process-group cleanup is unavailable")
+        killpg = platform_killpg
     if process is None:
         return _CleanupOutcome(True, False, False, False, "not_launched")
     if process.poll() is not None:
@@ -838,7 +988,14 @@ def test_gui_command_and_environment_are_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repo = Path(__file__).resolve().parent.parent
+    repo = (tmp_path / "repo").resolve()
+    addon = repo / "freecad" / "VibeCAD"
+    addon.mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "tests" / "fixtures" / "freecad_workbench").mkdir(parents=True)
+    for name in ("Init.py", "InitGui.py", "package.xml"):
+        (addon / name).write_text(name, encoding="utf-8")
+    _protect_windows_module_fixture(repo)
     prefix = tmp_path / "prefix"
     binary = prefix / "bin" / "FreeCAD"
     monkeypatch.setattr(paths, "freecad_path", lambda: binary)
@@ -875,6 +1032,7 @@ def test_freecad_module_root_is_the_canonical_direct_addon_directory(tmp_path: P
     addon.mkdir(parents=True)
     for name in ("Init.py", "InitGui.py", "package.xml"):
         (addon / name).write_text(name, encoding="utf-8")
+    _protect_windows_module_fixture(repo)
 
     observed = _freecad_module_root(repo)
 
@@ -893,6 +1051,7 @@ def test_freecad_module_root_rejects_missing_manifest_or_init(
     for name in ("Init.py", "InitGui.py", "package.xml"):
         if name != missing:
             (addon / name).write_text(name, encoding="utf-8")
+    _protect_windows_module_fixture(repo)
 
     with pytest.raises(ValueError, match="module root"):
         _freecad_module_root(repo)
@@ -904,6 +1063,7 @@ def test_freecad_module_root_rejects_alias_and_wrong_parent_level(tmp_path: Path
     addon.mkdir(parents=True)
     for name in ("Init.py", "InitGui.py", "package.xml"):
         (addon / name).write_text(name, encoding="utf-8")
+    _protect_windows_module_fixture(repo)
     alias = tmp_path / "repo-alias"
     alias.symlink_to(repo, target_is_directory=True)
 
@@ -923,6 +1083,10 @@ def test_freecad_module_root_rejects_alias_and_wrong_parent_level(tmp_path: Path
         "InitGui.py",
         "package.xml",
     ],
+)
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX mode-bit execution-chain contract",
 )
 def test_freecad_module_root_rejects_group_or_world_writable_execution_chain(
     tmp_path: Path,
@@ -947,6 +1111,10 @@ def test_freecad_module_root_rejects_group_or_world_writable_execution_chain(
         _freecad_module_root(repo)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner read/search mode-bit contract",
+)
 def test_freecad_module_root_directories_require_owner_read_and_search(tmp_path: Path) -> None:
     repo = (tmp_path / "repo").resolve()
     addon = repo / "freecad" / "VibeCAD"
@@ -960,6 +1128,45 @@ def test_freecad_module_root_directories_require_owner_read_and_search(tmp_path:
             _freecad_module_root(repo)
     finally:
         addon.chmod(0o700)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows protected-DACL execution-chain contract",
+)
+@pytest.mark.parametrize(
+    "target",
+    [
+        "repo",
+        "freecad",
+        "addon",
+        "Init.py",
+        "InitGui.py",
+        "package.xml",
+    ],
+)
+def test_freecad_module_root_rejects_unprotected_windows_execution_chain(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    repo = (tmp_path / "repo").resolve()
+    freecad_root = repo / "freecad"
+    addon = freecad_root / "VibeCAD"
+    addon.mkdir(parents=True)
+    sources = {name: addon / name for name in ("Init.py", "InitGui.py", "package.xml")}
+    for name, source in sources.items():
+        source.write_text(name, encoding="utf-8")
+    _protect_windows_module_fixture(repo)
+    selected = {
+        "repo": repo,
+        "freecad": freecad_root,
+        "addon": addon,
+        **sources,
+    }[target]
+    _make_windows_dacl_unsafe(selected)
+
+    with pytest.raises(ValueError, match="module root"):
+        _freecad_module_root(repo)
 
 
 def test_registration_failure_diagnostic_is_canonical_and_bounded(tmp_path: Path) -> None:
@@ -1621,21 +1828,30 @@ def test_gui_binary_identity_binds_entry_and_target(
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"binary")
     binary.chmod(0o700)
-    os.link(binary, prefix / "FreeCAD-hardlink")
+    if sys.platform != "win32":
+        os.link(binary, prefix / "FreeCAD-hardlink")
     monkeypatch.setattr(paths, "freecad_path", lambda: binary)
 
     identity = _capture_gui_identity(binary, prefix)
     assert identity.target == binary
     assert len(identity.entry) == 8
     assert len(identity.resolved) == 8
-    assert identity.entry[4] == 2
+    assert identity.entry[4] == (1 if sys.platform == "win32" else 2)
     _revalidate_gui_identity(identity, prefix)
     binary.write_bytes(b"replacement")
     with pytest.raises(RuntimeError, match="generation changed"):
         _revalidate_gui_identity(identity, prefix)
-    binary.chmod(0o722)
-    with pytest.raises(ValueError, match="owner-controlled"):
-        _capture_gui_identity(binary, prefix)
+    if sys.platform == "win32":
+        replacement_identity = _capture_gui_identity(binary, prefix)
+        replacement = binary.with_suffix(".replacement")
+        replacement.write_bytes(binary.read_bytes())
+        os.replace(replacement, binary)
+        with pytest.raises(RuntimeError, match="generation changed"):
+            _revalidate_gui_identity(replacement_identity, prefix)
+    else:
+        binary.chmod(0o722)
+        with pytest.raises(ValueError, match="owner-controlled"):
+            _capture_gui_identity(binary, prefix)
 
 
 def test_runtime_readiness_uses_authenticated_receipt_and_full_verify(tmp_path: Path) -> None:
@@ -2092,7 +2308,7 @@ def test_gui_result_requires_exactly_one_canonical_mapping(stdout: str) -> None:
 
 
 def test_reclaim_signals_only_the_exact_original_session() -> None:
-    token = _DarwinProcessToken(91, 2, 3, os.geteuid(), 91, 91)
+    token = _DarwinProcessToken(91, 2, 3, _test_darwin_euid(), 91, 91)
     signals: list[tuple[int, int]] = []
 
     class FakeProcess:
@@ -2108,7 +2324,7 @@ def test_reclaim_signals_only_the_exact_original_session() -> None:
             self.waits += 1
             if self.waits == 1:
                 raise subprocess.TimeoutExpired(["FreeCAD"], timeout)
-            return -signal.SIGKILL
+                return -_DARWIN_SIGKILL
 
     assert _reclaim_gui_process(
         FakeProcess(),
@@ -2117,17 +2333,24 @@ def test_reclaim_signals_only_the_exact_original_session() -> None:
         capture=lambda _pid: token,
         killpg=lambda pgid, sig: signals.append((pgid, sig)),
     ) == (True, True)
-    assert signals == [(91, signal.SIGTERM), (91, signal.SIGKILL)]
+    assert signals == [(91, signal.SIGTERM), (91, _DARWIN_SIGKILL)]
 
     with pytest.raises(RuntimeError, match="signaling forbidden"):
         _reclaim_gui_process(
             FakeProcess(),
             token,
             time.monotonic() + 5,
-            capture=lambda _pid: _DarwinProcessToken(91, 9, 9, os.geteuid(), 91, 91),
+            capture=lambda _pid: _DarwinProcessToken(
+                91,
+                9,
+                9,
+                _test_darwin_euid(),
+                91,
+                91,
+            ),
             killpg=lambda pgid, sig: signals.append((pgid, sig)),
         )
-    assert signals == [(91, signal.SIGTERM), (91, signal.SIGKILL)]
+    assert signals == [(91, signal.SIGTERM), (91, _DARWIN_SIGKILL)]
 
     capture_calls = 0
 
@@ -2136,7 +2359,7 @@ def test_reclaim_signals_only_the_exact_original_session() -> None:
         capture_calls += 1
         if capture_calls == 1:
             return token
-        return _DarwinProcessToken(91, 9, 9, os.geteuid(), 91, 91)
+        return _DarwinProcessToken(91, 9, 9, _test_darwin_euid(), 91, 91)
 
     with pytest.raises(_GuiReclaimError, match="SIGKILL forbidden") as captured:
         _reclaim_gui_process(
@@ -2150,7 +2373,7 @@ def test_reclaim_signals_only_the_exact_original_session() -> None:
     assert not captured.value.kill_sent
     assert signals == [
         (91, signal.SIGTERM),
-        (91, signal.SIGKILL),
+        (91, _DARWIN_SIGKILL),
         (91, signal.SIGTERM),
     ]
 

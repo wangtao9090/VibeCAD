@@ -46,17 +46,19 @@ schema、execution profile、预算和版本范围为准。
 
 ## 3. 安装 MCP 服务
 
-当前 MCPB 产品声明仅覆盖 macOS（Darwin）。拿到 `VibeCAD.mcpb` 后，在支持 MCPB 的宿主中安装并
-启用它，然后重启或重新加载宿主连接。不同宿主的安装入口可能不同，以宿主当前界面为准。
+当前 MCPB 产品声明覆盖 macOS（Darwin）和 Windows x86-64。拿到 `VibeCAD.mcpb` 后，在支持
+MCPB 的宿主中安装并启用它，然后重启或重新加载宿主连接。不同宿主的安装入口可能不同，以宿主
+当前界面为准。Linux 与 Windows on ARM 当前不在支持声明内。
 
 第一次启动时，扩展会准备隔离 Python 环境，并按需下载约 2–3 GB 的 FreeCAD 运行时。可以让宿主
 调用 `get_runtime_status` 查看阶段；需要显式启动或重试时调用 `ensure_runtime`。运行时 ready 后，
 `ping` 应返回当前 VibeCAD 版本。
 
-macOS 默认数据根通常位于：
+默认数据根按平台分别位于：
 
 ```text
-~/Library/Application Support/VibeCAD/
+macOS:  ~/Library/Application Support/VibeCAD/
+Windows: %LOCALAPPDATA%\VibeCAD\
 ```
 
 其中 runtime 与 data 分开。卸载受管引擎时先调用 `uninstall_runtime(confirm=false)` 查看范围，再
@@ -104,6 +106,11 @@ Skill，也不会替宿主修改 Skill 目录。
 WorkBuddy 5.3.5 + GLM-5.2 已完成真实多轮、重启恢复、Release 摘要批准以及 PDF/ZIP Blob 取回，
 因此该精确 Profile 可以描述为 `host-verified`；不要把它扩展为 Claude/Codex 或所有 WorkBuddy
 模型都已认证。
+
+Windows 下的 WorkBuddy 5.3.13 / CLI 2.115.0 也已完成真实 task -> committed HEAD -> FCStd/STEP
+原生资源读取闭环，资源大小与 SHA-256 均和 VibeCAD manifest 一致。该精确宿主的严格 schema
+不接受 committed artifact 的 `draft_id: null`，因此可传 `draft_id: "committed"`；服务端只在
+公开解析边界把它归一化为规范的 committed scope，其他字符串仍会失败关闭。
 
 当前 39-tool visual 开发分支还对 GLM-5V-Turbo 完成了完整尺寸单孔板和三视图 L 型支架 outcome；
 L 型支架包含同平面两个 Ø6 通孔及另一平面一个 Ø6 通孔，最终 Task 停在

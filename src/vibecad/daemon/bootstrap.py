@@ -16,6 +16,11 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from vibecad._file_compat import (
+    close_windows_handle,
+    open_windows_directory_handle,
+    validate_windows_handle_path,
+)
 from vibecad.daemon.client import LocalKernelClient
 from vibecad.daemon.state import (
     DAEMON_AUTHORITY,
@@ -24,6 +29,7 @@ from vibecad.daemon.state import (
     daemon_run_root,
     read_boot_state,
 )
+from vibecad.daemon.windows_ipc import process_is_same_or_direct_child, process_start_ns
 from vibecad.interaction.protocol_v2 import V2_HANDSHAKE_TIMEOUT_SECONDS
 from vibecad.runtime import paths, status
 from vibecad.runtime import platform as runtime_platform
@@ -32,19 +38,29 @@ DAEMON_BOOTSTRAP_TIMEOUT_SECONDS = 15.0
 DAEMON_BOOTSTRAP_POLL_SECONDS = 0.02
 DAEMON_RETIRE_TIMEOUT_SECONDS = 8.0
 _DAEMON_ID_RE = re.compile(r"daemon_[0-9a-f]{32}\Z")
+_WINDOWS_STARTUP_LOCK_HANDLE_ENV = "VIBECAD_STARTUP_LOCK_HANDLE"
+_WINDOWS_SPAWN_LOCK = threading.Lock()
 
 _SAFE_ENVIRONMENT_NAMES = frozenset(
     {
         "HOME",
+        "APPDATA",
+        "COMSPEC",
         "LANG",
         "LC_ALL",
+        "LOCALAPPDATA",
         "LOGNAME",
         "PATH",
         "QT_QPA_PLATFORM",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
         "TMPDIR",
         "USER",
+        "USERPROFILE",
         "VIBECAD_FREECAD_ENV",
         "VIBECAD_HOME",
+        "WINDIR",
     }
 )
 
@@ -386,22 +402,55 @@ def _daemon_python() -> str:
     return daemon_python_spelling
 
 
-def _spawn_daemon(*, startup_lock_fd: int) -> subprocess.Popen[bytes]:
+def _spawn_daemon(
+    *,
+    startup_lock_fd: int | None = None,
+    startup_lock_handle: int | None = None,
+) -> subprocess.Popen[bytes]:
     package_root = Path(__file__).resolve().parents[2]
     environment = _daemon_environment()
-    environment[status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV] = str(startup_lock_fd)
-    return subprocess.Popen(
-        [_daemon_python(), "-B", "-m", "vibecad.daemon"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=True,
+    command = [_daemon_python(), "-B", "-m", "vibecad.daemon"]
+    common = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
         # Resolve from the already imported package location instead of a
         # caller-controlled CWD or PYTHONPATH. This also keeps checkout tests
         # honest before C14 installs the wheel into a fresh environment.
-        cwd=str(package_root),
-        env=environment,
+        "cwd": str(package_root),
+        "env": environment,
+    }
+    if startup_lock_handle is not None:
+        if (
+            not runtime_platform.is_windows()
+            or type(startup_lock_handle) is not int
+            or startup_lock_handle <= 0
+            or startup_lock_fd is not None
+        ):
+            raise ValueError("Windows daemon startup requires one exact lock handle")
+        environment[_WINDOWS_STARTUP_LOCK_HANDLE_ENV] = str(startup_lock_handle)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.lpAttributeList = {"handle_list": [startup_lock_handle]}
+        with _WINDOWS_SPAWN_LOCK:
+            os.set_handle_inheritable(startup_lock_handle, True)
+            try:
+                return subprocess.Popen(
+                    command,
+                    **common,
+                    startupinfo=startupinfo,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NO_WINDOW,
+                )
+            finally:
+                os.set_handle_inheritable(startup_lock_handle, False)
+    if type(startup_lock_fd) is not int or startup_lock_fd < 0:
+        raise ValueError("POSIX daemon startup requires one exact lock descriptor")
+    environment[status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV] = str(startup_lock_fd)
+    return subprocess.Popen(
+        command,
+        **common,
+        start_new_session=True,
         pass_fds=(startup_lock_fd,),
     )
 
@@ -414,7 +463,7 @@ def _stop_losing_process(process: object) -> bool:
         if poll() is not None:
             return True
         pid = getattr(process, "pid", None)
-        if type(pid) is int and pid > 1:
+        if type(pid) is int and pid > 1 and not runtime_platform.is_windows():
             with contextlib.suppress(OSError):
                 os.killpg(pid, signal.SIGTERM)
         else:
@@ -428,7 +477,7 @@ def _stop_losing_process(process: object) -> bool:
                 return True
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        if type(pid) is int and pid > 1:
+        if type(pid) is int and pid > 1 and not runtime_platform.is_windows():
             with contextlib.suppress(OSError):
                 os.killpg(pid, signal.SIGKILL)
         else:
@@ -528,6 +577,32 @@ def _clean_absent_run_root(root: Path) -> bool:
         return True
     except OSError:
         return False
+    if runtime_platform.is_windows():
+        handle = None
+        try:
+            handle = open_windows_directory_handle(
+                root,
+                inheritable=False,
+                deny_delete=True,
+            )
+            capability = validate_windows_handle_path(
+                handle,
+                root,
+                directory=True,
+            )
+            empty = not os.listdir(root)
+            return empty and validate_windows_handle_path(
+                handle,
+                root,
+                directory=True,
+                expected=capability,
+            ) == capability
+        except (OSError, TypeError, ValueError):
+            return False
+        finally:
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(handle)
     if (
         not stat.S_ISDIR(value.st_mode)
         or value.st_uid != os.geteuid()
@@ -548,7 +623,14 @@ def _clean_absent_run_root(root: Path) -> bool:
         return False
 
 
-def _process_alive(pid: int) -> bool:
+def _process_alive(pid: int, *, started_ns: int | None = None) -> bool:
+    if runtime_platform.is_windows():
+        if type(started_ns) is not int or started_ns <= 0:
+            return False
+        try:
+            return process_start_ns(pid) == started_ns
+        except OSError:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -573,7 +655,26 @@ def _daemon_authority_unclaimed(run_root: Path) -> bool:
         return not os.path.lexists(run_root)
     except OSError:
         return False
-    if (
+    if runtime_platform.is_windows():
+        handle = None
+        try:
+            handle = open_windows_directory_handle(
+                lock_root,
+                inheritable=False,
+                deny_delete=True,
+            )
+            validate_windows_handle_path(
+                handle,
+                lock_root,
+                directory=True,
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+        finally:
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    close_windows_handle(handle)
+    elif (
         not stat.S_ISDIR(info.st_mode)
         or info.st_uid != os.geteuid()
         or stat.S_IMODE(info.st_mode) & 0o077
@@ -724,6 +825,7 @@ def retire_local_kernel(
         if expected_daemon_id is not None and client.daemon_id != expected_daemon_id:
             return False
         retired_pid = getattr(client, "daemon_pid", None)
+        retired_started_ns = getattr(client, "daemon_started_ns", None)
         if type(retired_pid) is not int or retired_pid <= 1:
             raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
         remaining = deadline - _clock()
@@ -748,7 +850,10 @@ def retire_local_kernel(
         with contextlib.suppress(BaseException):
             client.close()
     while _clock() < deadline:
-        if _clean_absent_run_root(selected_root) and not _process_alive(retired_pid):
+        if _clean_absent_run_root(selected_root) and not _process_alive(
+            retired_pid,
+            started_ns=retired_started_ns,
+        ):
             return True
         _sleep(
             min(
@@ -756,7 +861,10 @@ def retire_local_kernel(
                 max(0.0, deadline - _clock()),
             )
         )
-    if _clean_absent_run_root(selected_root) and not _process_alive(retired_pid):
+    if _clean_absent_run_root(selected_root) and not _process_alive(
+        retired_pid,
+        started_ns=retired_started_ns,
+    ):
         return True
     raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
 
@@ -827,14 +935,24 @@ def _connect_or_start_local_kernel_locked(
 
     try:
         if _spawn is None:
-            claim_descriptor = getattr(
-                _maintenance_claim,
-                "inheritable_claim_fd",
-                None,
-            )
-            if not callable(claim_descriptor):
-                raise RuntimeError
-            process = spawner(startup_lock_fd=claim_descriptor())
+            if runtime_platform.is_windows():
+                claim_handle = getattr(
+                    _maintenance_claim,
+                    "inheritable_claim_handle",
+                    None,
+                )
+                if not callable(claim_handle):
+                    raise RuntimeError
+                process = spawner(startup_lock_handle=claim_handle())
+            else:
+                claim_descriptor = getattr(
+                    _maintenance_claim,
+                    "inheritable_claim_fd",
+                    None,
+                )
+                if not callable(claim_descriptor):
+                    raise RuntimeError
+                process = spawner(startup_lock_fd=claim_descriptor())
         else:
             process = spawner()
     except (OSError, RuntimeError, ValueError):
@@ -869,7 +987,7 @@ def _connect_or_start_local_kernel_locked(
     # If another starter won, do not leave our contended child behind. The
     # authenticated receipt is the authority for that distinction.
     try:
-        published_pid = read_boot_state(selected_root).receipt.pid
+        published = read_boot_state(selected_root).receipt
     except DaemonError:
         connected.close()
         _stop_spawned_process(
@@ -879,7 +997,24 @@ def _connect_or_start_local_kernel_locked(
         )
         raise DaemonError(DaemonErrorCode.AUTHENTICATION_FAILED) from None
     spawned_pid = getattr(process, "pid", None)
-    if type(spawned_pid) is int and spawned_pid > 1 and spawned_pid != published_pid:
+    spawned_generation_matches = spawned_pid == published.pid
+    if (
+        runtime_platform.is_windows()
+        and type(spawned_pid) is int
+        and spawned_pid > 1
+    ):
+        try:
+            spawned_started_ns = process_start_ns(spawned_pid)
+        except OSError:
+            spawned_generation_matches = False
+        else:
+            spawned_generation_matches = process_is_same_or_direct_child(
+                published.pid,
+                started_ns=published.started_ns,
+                spawned_pid=spawned_pid,
+                spawned_started_ns=spawned_started_ns,
+            )
+    if type(spawned_pid) is int and spawned_pid > 1 and not spawned_generation_matches:
         _stop_spawned_process(
             process,
             maintenance_claim=_maintenance_claim,

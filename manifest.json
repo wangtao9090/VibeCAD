@@ -4,7 +4,7 @@
   "display_name": "VibeCAD",
   "version": "0.10.0",
   "description": "Agent-first FreeCAD：可编辑参数化零件、可验证任务与受控机械交付包",
-  "long_description": "VibeCAD 在 macOS 上提供持久化项目和任务、显式 ModelProgram、草案接受/拒绝、经验证的 FCStd/STEP 资源，以及绑定已验收 Revision 的 PDF/BOM/ZIP Release 审批。尺寸完整的单视图、2–16 张干净互补视图，或经过拍摄质量、尺度和完整性门禁且补齐关键尺寸的普通照片，可由宿主多模态 Agent 转换为一个受控的可编辑 Sketcher/PartDesign 拉伸件或回转件；缺尺度、冲突、遮挡和隐藏结构会澄清或安全停止。当前可直接调用 create_box、create_cylinder、inspect_model、modify_parameter、move_part 和 rotate_part；这六类操作也可通过受约束的 ModelProgram 执行。运行时位于扩展目录外；不再使用时，先调用 uninstall_runtime，按预览和确认两段式流程清理引擎，再在设置中移除扩展本体；项目数据保留。",
+  "long_description": "VibeCAD 在 macOS 和 Windows x86-64 上提供持久化项目和任务、显式 ModelProgram、草案接受/拒绝、经验证的 FCStd/STEP 资源，以及绑定已验收 Revision 的 PDF/BOM/ZIP Release 审批。尺寸完整的单视图、2–16 张干净互补视图，或经过拍摄质量、尺度和完整性门禁且补齐关键尺寸的普通照片，可由宿主多模态 Agent 转换为一个受控的可编辑 Sketcher/PartDesign 拉伸件或回转件；缺尺度、冲突、遮挡和隐藏结构会澄清或安全停止。当前可直接调用 create_box、create_cylinder、inspect_model、modify_parameter、move_part 和 rotate_part；这六类操作也可通过受约束的 ModelProgram 执行。运行时位于扩展目录外；不再使用时，先调用 uninstall_runtime，按预览和确认两段式流程清理引擎，再在设置中移除扩展本体；项目数据保留。",
   "author": { "name": "Wang Tao", "email": "wangtao9090@gmail.com" },
   "license": "MIT",
   "icon": "icon.png",
@@ -20,7 +20,7 @@
     }
   },
   "compatibility": {
-    "platforms": ["darwin"],
+    "platforms": ["darwin", "win32"],
     "runtimes": { "python": ">=3.12" }
   },
   "tools": [

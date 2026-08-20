@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import secrets
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from tests.test_mcp_transport import (
 from tests.test_p0b_acceptance import _ReviewCadPort
 from tests.test_visual_preflight import _save, _seal
 from vibecad import mcp_transport, server
+from vibecad._file_compat import ensure_private_directory
 from vibecad.application.agent import AgentApplication
 from vibecad.application.proposal_admission import admit_proposal_evidence
 from vibecad.daemon import LocalAgentClient, LocalKernelDaemon, LocalKernelState
@@ -48,8 +51,8 @@ from vibecad.visual.reconstruction import (
 )
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="the authenticated local daemon is currently a macOS capability",
+    sys.platform not in {"darwin", "win32"},
+    reason="the authenticated local daemon requires Darwin or Windows",
 )
 
 _CREATE_KEY = "reconstruction_create_" + "a" * 32
@@ -57,8 +60,12 @@ _CREATE_KEY = "reconstruction_create_" + "a" * 32
 
 @pytest.fixture
 def short_case_root() -> Path:
-    root = Path(tempfile.mkdtemp(prefix="vc-a11-", dir="/private/tmp"))
-    root.chmod(0o700)
+    if sys.platform == "win32":
+        root = Path(tempfile.gettempdir()) / f"vc-a11-{secrets.token_hex(8)}"
+        ensure_private_directory(root)
+    else:
+        root = Path(tempfile.mkdtemp(prefix="vc-a11-", dir="/private/tmp"))
+        root.chmod(0o700)
     try:
         yield root
     finally:
@@ -83,11 +90,19 @@ class _ApplicationSlot:
         return self.client
 
 
+class _PersistentChunkSource(_ChunkSource):
+    """Model a real stdin stream, which does not become EOF while idle."""
+
+    def read(self, maximum: int) -> bytes:
+        assert maximum == 65_536
+        return self._chunks.get()  # noqa: SLF001 - specialize the test transport fixture
+
+
 class _RawMcpSession:
     def __init__(self) -> None:
-        self.source = _ChunkSource()
+        self.source = _PersistentChunkSource()
         self.sink = _FrameSink()
-        self.runner, self.thread, _lifecycle, _exits = _run_owned(
+        self.runner, self.thread, self.lifecycle, self.exits = _run_owned(
             mcp_transport,
             server._owned_dispatch_descriptor,  # noqa: SLF001
             self.source,
@@ -115,7 +130,13 @@ class _RawMcpSession:
                 "params": {} if params is None else params,
             }
         )
-        response = self.sink.wait_for(expected)[-1]
+        deadline = time.monotonic() + (20 if sys.platform == "win32" else 5)
+        with self.sink._condition:  # noqa: SLF001 - deterministic cross-platform gate
+            while len(self.sink.messages) < expected:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, self.sink.messages
+                self.sink._condition.wait(remaining)  # noqa: SLF001
+            response = self.sink.messages[-1]
         assert response["id"] == self._request_id
         return response
 
@@ -156,7 +177,10 @@ class _RawMcpSession:
 
 def _prepare_case(tmp_path: Path, *, mutation: str | None = None) -> _PreparedCase:
     home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        ensure_private_directory(home)
+    else:
+        home.mkdir(mode=0o700)
     data_root = home / "data"
     application = AgentApplication.open(
         data_root=data_root,
@@ -480,7 +504,7 @@ def test_raw_mcp_initialize_failure_closes_source_and_joins_runner(
     module = sys.modules[__name__]
     sources = []
     threads = []
-    original_source = _ChunkSource
+    original_source = _PersistentChunkSource
     original_run = _run_owned
 
     class ObservedSource(original_source):
@@ -502,7 +526,7 @@ def test_raw_mcp_initialize_failure_closes_source_and_joins_runner(
     def fail_initialize(*_args, **_kwargs):
         raise RuntimeError("injected initialize failure")
 
-    monkeypatch.setattr(module, "_ChunkSource", ObservedSource)
+    monkeypatch.setattr(module, "_PersistentChunkSource", ObservedSource)
     monkeypatch.setattr(module, "_run_owned", capture_run)
     monkeypatch.setattr(module, "_initialize_owned", fail_initialize)
 

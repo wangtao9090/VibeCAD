@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -44,6 +45,7 @@ def test_describe_shape_keys_and_values():
 
 def test_describe_shape_center_of_mass_is_json_list():
     import json
+
     d = text.describe_shape(_FakeShape())
     json.dumps(d)  # 不抛 = 可序列化（center_of_mass 是 list 非 Vector）
     assert isinstance(d["center_of_mass"], list)
@@ -84,6 +86,15 @@ def test_describe_shape_real_box(runtime_env):
         + "assert d['solid_count'] == 1\n"
         + "print('DESCRIBE_OK')\n"
     )
-    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    environment = (
+        status.freecad_process_environment(os.environ) if sys.platform == "win32" else None
+    )
+    p = subprocess.run(
+        [runtime_env, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=environment,
+    )
     assert p.returncode == 0, p.stderr
     assert "DESCRIBE_OK" in p.stdout

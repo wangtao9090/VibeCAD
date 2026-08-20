@@ -37,6 +37,7 @@ from tests.test_reviewed_artifact_family_integration import (
     _unregistered_route,
 )
 from tests.test_reviewed_intent_program import reviewed_box_program
+from vibecad import _file_compat
 from vibecad.engine.document_assets import DocumentAssetWorkspace
 from vibecad.execution.executor import InProcessCadExecutor
 from vibecad.execution.freecad_imageplane_reviewed_execution import (
@@ -176,6 +177,8 @@ def _managed_image_case(
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700, parents=True)
     staging.chmod(0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(staging)
     token = object()
     resolver, source, stagers = _resolver(
         artifact=artifact,
@@ -191,6 +194,8 @@ def _managed_image_case(
     assets_root = tmp_path / "assets"
     assets_root.mkdir(mode=0o700, parents=True)
     assets_root.chmod(0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(assets_root)
     assets = DocumentAssetWorkspace(assets_root)
     assets.attach(session.doc)
     session._document_assets = assets  # noqa: SLF001
@@ -309,6 +314,8 @@ def test_registered_import_executes_from_public_model_program_with_exact_resolve
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700)
     staging.chmod(0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(staging)
     token = object()
     resolver, source, stagers = _resolver(
         artifact=artifact,

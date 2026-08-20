@@ -6,12 +6,16 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import vibecad.execution.revisions as revisions_module
+import vibecad.execution.revisions_windows as revisions_windows
+from vibecad._file_compat import capture_windows_path, set_private_dacl
 from vibecad.application.revision_discovery import (
     RevisionDiscoveryError,
     RevisionDiscoveryErrorCode,
@@ -142,7 +146,38 @@ def _replace_directory(path: Path) -> Path:
     moved = path.with_name(path.name + ".moved")
     path.rename(moved)
     shutil.copytree(moved, path, copy_function=shutil.copy2)
+    if sys.platform == "win32":
+        for directory, _names, files in os.walk(path):
+            current = Path(directory)
+            set_private_dacl(current)
+            for name in files:
+                set_private_dacl(current / name)
     return moved
+
+
+def _windows_capability_identity(path: Path) -> tuple[int, int]:
+    raw = os.fspath(path)
+    if raw.startswith("\\\\?\\UNC\\"):
+        path = Path("\\\\" + raw[8:])
+    elif raw.startswith("\\\\?\\"):
+        path = Path(raw[4:])
+    capability = capture_windows_path(path, directory=True)
+    return capability.volume, capability.file_id
+
+
+def _windows_matches_directory(capability, identity: tuple[int, int]) -> bool:
+    return (capability.volume, capability.file_id) == identity
+
+
+def _make_windows_dacl_unsafe(path: Path) -> None:
+    changed = subprocess.run(
+        ["icacls.exe", os.fspath(path), "/inheritance:e"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if changed.returncode != 0:
+        pytest.skip("icacls could not alter the test DACL")
 
 
 def _assert_error(error: RevisionDiscoveryError, code: RevisionDiscoveryErrorCode):
@@ -538,11 +573,17 @@ def test_unknown_temp_unsafe_and_inconsistent_reservation_fail_closed(
     with manager.acquire_project_write(PROJECT_A) as lease:
         revision_id = store.begin_revision(PROJECT_A, head, lease)
         candidate = store.candidate_model_path(PROJECT_A, revision_id, lease)
-        os.chmod(candidate, 0o622)
+        if sys.platform == "win32":
+            _make_windows_dacl_unsafe(candidate)
+        else:
+            os.chmod(candidate, 0o622)
         with pytest.raises(RevisionDiscoveryError) as captured:
             service.list_projects()
         _assert_error(captured.value, RevisionDiscoveryErrorCode.STORE_FAILURE)
-        os.chmod(candidate, 0o600)
+        if sys.platform == "win32":
+            set_private_dacl(candidate)
+        else:
+            os.chmod(candidate, 0o600)
 
         reservation_path = (
             root
@@ -613,6 +654,19 @@ def test_discovery_release_and_root_close_faults_are_store_failures(
             "_release_quota_lease",
             lambda _lease: RevisionStoreErrorCode.IO_ERROR,
         )
+    elif sys.platform == "win32":
+        root_identity = _windows_capability_identity(root)
+        original_verify = revisions_windows._verify_snapshot
+
+        def verify_with_root_fault(verification):
+            original_verify(verification)
+            if any(
+                _windows_matches_directory(capability, root_identity)
+                for capability, _names, _identity in verification["directories"]
+            ):
+                revisions_windows._raise(RevisionStoreErrorCode.IO_ERROR)
+
+        monkeypatch.setattr(revisions_windows, "_verify_snapshot", verify_with_root_fault)
     else:
         original_close = revisions_module._close_fd
         root_identity = (root.stat().st_dev, root.stat().st_ino)
@@ -647,6 +701,29 @@ def test_discovery_rejects_same_name_directory_replacement_races(
         "revision": revision_path,
         "root": root,
     }[target]
+    if sys.platform == "win32":
+        selected_identity = _windows_capability_identity(selected)
+        original_snapshot = revisions_windows._snapshot_directory
+        replaced = False
+
+        def replace_after_snapshot(capability, verification):
+            nonlocal replaced
+            result = original_snapshot(capability, verification)
+            if not replaced and _windows_matches_directory(capability, selected_identity):
+                replaced = True
+                _replace_directory(selected)
+            return result
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_snapshot_directory",
+            replace_after_snapshot,
+        )
+        with pytest.raises(RevisionDiscoveryError) as captured:
+            RevisionDiscoveryService(store=store).list_projects()
+        _assert_error(captured.value, RevisionDiscoveryErrorCode.STORE_FAILURE)
+        assert replaced
+        return
     selected_identity = (selected.stat().st_dev, selected.stat().st_ino)
     original_entries = revisions_module._discovery_entries
     replaced = False
@@ -680,6 +757,29 @@ def test_discovery_pins_quota_reservations_across_full_snapshot(
     with manager.acquire_project_write(PROJECT_A) as lease:
         store.begin_revision(PROJECT_A, head, lease)
     reservations_path = root / ".revision-quota" / "reservations"
+    if sys.platform == "win32":
+        original_snapshot = revisions_windows._snapshot_reservations
+        replaced = False
+
+        def replace_after_snapshot(*args, **kwargs):
+            nonlocal replaced
+            result = original_snapshot(*args, **kwargs)
+            if not replaced:
+                replaced = True
+                moved = _replace_directory(reservations_path)
+                shutil.rmtree(moved)
+            return result
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_snapshot_reservations",
+            replace_after_snapshot,
+        )
+        with pytest.raises(RevisionDiscoveryError) as captured:
+            RevisionDiscoveryService(store=store).list_projects()
+        _assert_error(captured.value, RevisionDiscoveryErrorCode.STORE_FAILURE)
+        assert replaced
+        return
     original_load = revisions_module._load_reservations
     replaced = False
 
@@ -744,6 +844,31 @@ def test_discovery_rejects_same_inode_member_insertion_after_scan(
         "project": _project_dir(root, PROJECT_A),
         "revision": _revision_dir(root, PROJECT_A, head.revision_id),
     }[target]
+    if sys.platform == "win32":
+        selected_identity = _windows_capability_identity(selected)
+        original_snapshot = revisions_windows._snapshot_directory
+        inserted = False
+
+        def insert_after_snapshot(capability, verification):
+            nonlocal inserted
+            result = original_snapshot(capability, verification)
+            if not inserted and _windows_matches_directory(capability, selected_identity):
+                inserted = True
+                late = selected / "late-unvalidated.bin"
+                late.write_bytes(b"late")
+                set_private_dacl(late)
+            return result
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_snapshot_directory",
+            insert_after_snapshot,
+        )
+        with pytest.raises(RevisionDiscoveryError) as captured:
+            RevisionDiscoveryService(store=store).list_projects()
+        _assert_error(captured.value, RevisionDiscoveryErrorCode.STORE_FAILURE)
+        assert inserted
+        return
     selected_identity = (selected.stat().st_dev, selected.stat().st_ino)
     original_entries = revisions_module._discovery_entries
     inserted = False
@@ -780,6 +905,28 @@ def test_candidate_payload_write_during_scan_does_not_change_directory_pin(
         revision_id = store.begin_revision(PROJECT_A, head, lease)
         candidate_path = store.candidate_model_path(PROJECT_A, revision_id, lease)
     candidate_directory = candidate_path.parent
+    if sys.platform == "win32":
+        candidate_identity = _windows_capability_identity(candidate_directory)
+        original_snapshot = revisions_windows._snapshot_directory
+        changed = False
+
+        def write_payload_after_snapshot(capability, verification):
+            nonlocal changed
+            result = original_snapshot(capability, verification)
+            if not changed and _windows_matches_directory(capability, candidate_identity):
+                changed = True
+                candidate_path.write_bytes(b"draft payload may change")
+            return result
+
+        monkeypatch.setattr(
+            revisions_windows,
+            "_snapshot_directory",
+            write_payload_after_snapshot,
+        )
+        result = RevisionDiscoveryService(store=store).list_projects()
+        assert [item["project_id"] for item in result["projects"]] == [PROJECT_A]
+        assert changed
+        return
     candidate_identity = (
         candidate_directory.stat().st_dev,
         candidate_directory.stat().st_ino,

@@ -19,7 +19,9 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -27,6 +29,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Self
 
+from vibecad import _file_compat
 from vibecad.intent_bridge.contracts import DocumentRef, IntentBridgeError
 from vibecad.intent_bridge.ports import ArtifactReader, read_verified_document
 from vibecad.parametric.freecad_reviewed_transaction import (
@@ -455,6 +458,12 @@ def _validate_staging_parent(path: object) -> tuple[Path, int, int]:
         info = path.lstat()
     except (OSError, ValueError, RuntimeError):
         _fail(PartFileImportRuleErrorCode.PRECONDITION_FAILED, "/stager/root")
+    if sys.platform == "win32":
+        try:
+            capability = _file_compat.capture_windows_path(path, directory=True)
+        except (OSError, TypeError, ValueError):
+            _fail(PartFileImportRuleErrorCode.PRECONDITION_FAILED, "/stager/root")
+        return path, capability.volume, capability.file_id
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISDIR(info.st_mode)
@@ -466,12 +475,38 @@ def _validate_staging_parent(path: object) -> tuple[Path, int, int]:
 
 
 class _StagedImportLease:
-    __slots__ = ("_active", "_directory", "_path")
+    __slots__ = (
+        "_active",
+        "_directory",
+        "_directory_capability",
+        "_path",
+        "_path_capability",
+        "_root_capability",
+    )
 
     def __init__(self, directory: Path, path: Path) -> None:
         self._directory = directory
         self._path = path
         self._active = True
+        self._root_capability = None
+        self._directory_capability = None
+        self._path_capability = None
+        if sys.platform == "win32":
+            try:
+                self._root_capability = _file_compat.capture_windows_path(
+                    directory.parent,
+                    directory=True,
+                )
+                self._directory_capability = _file_compat.capture_windows_path(
+                    directory,
+                    directory=True,
+                )
+                self._path_capability = _file_compat.capture_windows_path(
+                    path,
+                    directory=False,
+                )
+            except (OSError, TypeError, ValueError):
+                _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
 
     @property
     def path(self) -> Path:
@@ -482,6 +517,30 @@ class _StagedImportLease:
     def verify(self) -> None:
         if not self._active:
             _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
+        if sys.platform == "win32":
+            try:
+                root = _file_compat.validate_windows_path(
+                    self._root_capability,
+                    directory=True,
+                )
+                directory = _file_compat.validate_windows_path(
+                    self._directory_capability,
+                    directory=True,
+                )
+                path = _file_compat.validate_windows_path(
+                    self._path_capability,
+                    directory=False,
+                )
+            except (OSError, TypeError, ValueError):
+                _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            if (
+                directory.parent != root
+                or path.parent != directory
+                or path != self._path
+                or directory != self._directory
+            ):
+                _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/lease")
+            return
         try:
             info = self._path.lstat()
             directory_info = self._directory.lstat()
@@ -504,8 +563,20 @@ class _StagedImportLease:
             return
         self.verify()
         try:
-            self._path.unlink()
-            self._directory.rmdir()
+            if sys.platform == "win32":
+                _file_compat.delete_windows_file(
+                    self._path,
+                    parent=self._directory_capability,
+                    expected=self._path_capability,
+                )
+                _file_compat.delete_windows_directory(
+                    self._directory,
+                    parent=self._root_capability,
+                    expected=self._directory_capability,
+                )
+            else:
+                self._path.unlink()
+                self._directory.rmdir()
         except OSError:
             _fail(PartFileImportRuleErrorCode.STAGING_FAILED, "/stager/cleanup")
         self._active = False
@@ -562,15 +633,46 @@ class HostOwnedImportStager:
         directory: Path | None = None
         staged: Path | None = None
         descriptor: int | None = None
+        root_capability: _file_compat.WindowsPathCapability | None = None
+        directory_capability: _file_compat.WindowsPathCapability | None = None
+        staged_capability: _file_compat.WindowsPathCapability | None = None
         transferred = False
         try:
-            directory = Path(tempfile.mkdtemp(prefix=".vibecad-import-", dir=root))
-            os.chmod(directory, 0o700)
+            if sys.platform == "win32":
+                root_capability = _file_compat.capture_windows_path(
+                    root,
+                    directory=True,
+                )
+                for _attempt in range(32):
+                    directory = root / (".vibecad-import-" + secrets.token_hex(16))
+                    try:
+                        directory_capability = _file_compat.ensure_private_directory(
+                            directory,
+                            expected_parent=root_capability,
+                            exclusive=True,
+                        )
+                    except FileExistsError:
+                        continue
+                    break
+                if directory_capability is None:
+                    raise OSError("private staging namespace exhausted")
+            else:
+                directory = Path(tempfile.mkdtemp(prefix=".vibecad-import-", dir=root))
+                os.chmod(directory, 0o700)
             staged = directory / f"artifact{suffix}"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            descriptor = os.open(staged, flags, 0o600)
+            if sys.platform == "win32":
+                descriptor, staged_capability = _file_compat.open_private_file(
+                    staged,
+                    create=True,
+                    read_write=True,
+                    exclusive=True,
+                    expected_parent=directory_capability,
+                )
+            else:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(staged, flags, 0o600)
             offset = 0
             while offset < len(payload):
                 written = os.write(descriptor, payload[offset:])
@@ -596,12 +698,34 @@ class HostOwnedImportStager:
                     pass
             if not transferred and staged is not None and staged.exists():
                 try:
-                    staged.unlink()
+                    if (
+                        sys.platform == "win32"
+                        and staged_capability is not None
+                        and directory_capability is not None
+                    ):
+                        _file_compat.delete_windows_file(
+                            staged,
+                            parent=directory_capability,
+                            expected=staged_capability,
+                        )
+                    else:
+                        staged.unlink()
                 except OSError:
                     pass
             if not transferred and directory is not None and directory.exists():
                 try:
-                    directory.rmdir()
+                    if (
+                        sys.platform == "win32"
+                        and directory_capability is not None
+                        and root_capability is not None
+                    ):
+                        _file_compat.delete_windows_directory(
+                            directory,
+                            parent=root_capability,
+                            expected=directory_capability,
+                        )
+                    else:
+                        directory.rmdir()
                 except OSError:
                     pass
 

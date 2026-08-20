@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import vibecad.application.artifacts as artifacts_module
+from vibecad import _file_compat
 from vibecad.application.agent import AgentApplication
 from vibecad.application.artifacts import (
     ARTIFACT_COPY_CHUNK_BYTES,
@@ -300,9 +301,22 @@ class _Authority:
             if cursor is not None:
                 assert cursor.sha256 == hashlib.sha256(content[:offset]).hexdigest()
             flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(name, flags, 0o600, dir_fd=destination_directory_fd)
+            if sys.platform == "win32":
+                parent = _file_compat.capture_windows_fd(
+                    destination_directory_fd,
+                    directory=True,
+                )
+                fd, _capability = _file_compat.open_private_file(
+                    Path(parent.path) / name,
+                    create=True,
+                    read_write=True,
+                    expected_parent=parent,
+                )
+            else:
+                fd = os.open(name, flags, 0o600, dir_fd=destination_directory_fd)
             try:
-                os.fchmod(fd, 0o600)
+                if sys.platform != "win32":
+                    os.fchmod(fd, 0o600)
                 os.lseek(fd, offset, os.SEEK_SET)
                 os.ftruncate(fd, offset)
                 remaining = memoryview(content[offset:])
@@ -395,7 +409,13 @@ def test_export_materializes_exact_pair_then_replays_without_ports(tmp_path: Pat
         "load_revision",
         "gate_exit",
     ]
-    assert cad.calls == [(Path("model.FCStd"), Path("model.step"))]
+    if sys.platform == "win32":
+        assert len(cad.calls) == 1
+        assert tuple(item.name for item in cad.calls[0]) == ("model.FCStd", "model.step")
+        assert cad.calls[0][0].is_absolute()
+        assert cad.calls[0][0].parent == cad.calls[0][1].parent
+    else:
+        assert cad.calls == [(Path("model.FCStd"), Path("model.step"))]
     record = next((store.root / "requests").iterdir())
     assert json.loads(record.read_text())["body"]["phase"] == ArtifactRequestPhase.PUBLISHED
 
@@ -414,6 +434,15 @@ def test_export_materializes_exact_pair_then_replays_without_ports(tmp_path: Pat
     assert second == first
     assert authority.calls == []
     assert cad.calls == []
+
+
+def test_export_committed_scope_alias_preserves_committed_authority(tmp_path: Path) -> None:
+    api, _service, _store, _authority, _cad = _composition(tmp_path)
+
+    response = api.export_task_artifacts({**_request(), "draft_id": "committed"})
+
+    assert response["ok"] is True
+    assert response["result"]["source_kind"] == "committed"
 
 
 def test_resource_requires_published_binding_and_returns_canonical_bounded_content(
@@ -517,7 +546,14 @@ def test_resource_reader_rejects_missing_or_unsafe_root_without_creating_it(
     if kind != "missing":
         root.mkdir(mode=0o700)
         if kind == "unsafe":
-            root.chmod(0o755)
+            if sys.platform == "win32":
+                # Windows authority is SID/DACL/FileID based, not a synthetic
+                # POSIX mode projection.  A wrong object type is an equivalent
+                # fail-closed unsafe-root contract.
+                root.rmdir()
+                root.write_bytes(b"not a directory")
+            else:
+                root.chmod(0o755)
         else:
             value = root.stat()
             expected = (value.st_dev, value.st_ino + 1)
@@ -1401,7 +1437,11 @@ def test_materialize_never_overwrites_preexisting_empty_collision(tmp_path: Path
     real_validate = cad.validate_materialization
 
     def collide_then_validate(**kwargs):
-        collision.mkdir(mode=0o700)
+        if sys.platform == "win32":
+            parent = _file_compat.capture_windows_path(collision.parent, directory=True)
+            _file_compat.ensure_private_directory(collision, expected_parent=parent)
+        else:
+            collision.mkdir(mode=0o700)
         observed_inode.append(collision.stat().st_ino)
         return real_validate(**kwargs)
 
@@ -1424,8 +1464,8 @@ def test_reserved_exact_temporary_is_adopted_before_global_slot_n_plus_one(
     eligibility = _eligibility_with_sizes(1024, 1024)
     with store._lock():
         record = store._reserve(request, eligibility)
-    os.mkdir(record.temporary_name, 0o700, dir_fd=store._root_fd)
-    os.fsync(store._root_fd)
+    artifacts_module.os.mkdir(record.temporary_name, 0o700, dir_fd=store._root_fd)
+    artifacts_module.os.fsync(store._root_fd)
     monkeypatch.setattr(artifacts_module, "MAX_ARTIFACT_TEMPORARIES", 1)
 
     with store._lock():
@@ -1575,10 +1615,14 @@ def _expired_orphan(store: ArtifactStore, suffix: str) -> tuple[str, Path]:
     name = f".{artifacts_module._materialization_id(eligibility)}.{suffix * 32}.tmp"
     orphan = store.root / name
     orphan.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(orphan)
     created_ns = time.time_ns() - (86_400 + 1) * 1_000_000_000
     marker = orphan / ".creation.json"
     marker.write_bytes(_orphan_marker_bytes(name, created_ns, orphan.stat()))
     marker.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(marker)
     return name, orphan
 
 
@@ -1624,10 +1668,14 @@ def test_expired_unbound_marker_orphan_and_record_remnant_converge(tmp_path: Pat
     orphan_name = f".{materialization}.{'d' * 32}.tmp"
     orphan = store.root / orphan_name
     orphan.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(orphan)
     created_ns = time.time_ns() - (86_400 + 1) * 1_000_000_000
     marker = orphan / ".creation.json"
     marker.write_bytes(_orphan_marker_bytes(orphan_name, created_ns, orphan.stat()))
     marker.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(marker)
 
     request = _request_value()
     record = artifacts_module._RequestRecord(
@@ -1643,8 +1691,13 @@ def test_expired_unbound_marker_orphan_and_record_remnant_converge(tmp_path: Pat
     remnant = store.root / "requests" / f".{request_name}.{'b' * 32}.tmp"
     remnant.write_bytes(artifacts_module._record_envelope(record))
     remnant.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(remnant)
     old = time.time() - 86_401
-    os.utime(remnant, (old, old), follow_symlinks=False)
+    if sys.platform == "win32":
+        os.utime(remnant, (old, old))
+    else:
+        os.utime(remnant, (old, old), follow_symlinks=False)
 
     assert store.lookup_terminal(request=request) is None
     assert not orphan.exists()
@@ -1661,6 +1714,8 @@ def test_orphan_cleanup_requires_valid_expired_durable_creation_identity(
     name = f".{artifacts_module._materialization_id(eligibility)}.{'a' * 32}.tmp"
     orphan = store.root / name
     orphan.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(orphan)
     if marker_kind != "missing":
         created_ns = (
             time.time_ns() + 1_000_000_000
@@ -1673,6 +1728,8 @@ def test_orphan_cleanup_requires_valid_expired_durable_creation_identity(
         marker = orphan / ".creation.json"
         marker.write_bytes(raw)
         marker.chmod(0o600)
+        if sys.platform == "win32":
+            _file_compat.set_private_dacl(marker)
 
     with pytest.raises(ArtifactStoreError) as captured:
         store.lookup_terminal(request=_request_value())
@@ -1839,6 +1896,8 @@ def test_cleanup_receipt_publish_race_reaches_but_never_exceeds_admitted_peak(
         destination = root / destination_name
         destination.write_bytes(raw)
         destination.chmod(0o600)
+        if sys.platform == "win32":
+            _file_compat.set_private_dacl(destination)
         temporary_entries = sum(
             entry.name not in {"requests", "materializations", ".artifact-mutation.lock"}
             for entry in root.iterdir()
@@ -1870,6 +1929,8 @@ def test_corrupt_request_record_stops_scanner_before_orphan_cleanup(
     request_path = root / "requests" / store._request_name(_request_value().export_key)
     request_path.write_bytes(b"{")
     request_path.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(request_path)
     before = _artifact_tree_snapshot(root)
     creates = _observe_cleanup_receipt_creates(monkeypatch)
 
@@ -1893,10 +1954,14 @@ def test_orphan_marker_unlink_then_rmdir_failure_resumes_from_durable_receipt(
     name = f".{artifacts_module._materialization_id(eligibility)}.{'9' * 32}.tmp"
     orphan = root / name
     orphan.mkdir(mode=0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(orphan)
     created_ns = time.time_ns() - (86_400 + 1) * 1_000_000_000
     marker = orphan / ".creation.json"
     marker.write_bytes(_orphan_marker_bytes(name, created_ns, orphan.stat()))
     marker.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(marker)
     real_rmdir = artifacts_module.os.rmdir
 
     def fail_target(path, *, dir_fd=None):
@@ -2118,6 +2183,8 @@ def test_cleanup_receipt_corrupt_mismatch_and_future_states_fail_closed(
     receipt_path = root / artifacts_module._cleanup_receipt_name(name)
     receipt_path.write_bytes(raw)
     receipt_path.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(receipt_path)
 
     with pytest.raises(ArtifactStoreError) as captured:
         store.lookup_terminal(request=_request_value())
@@ -2196,6 +2263,14 @@ class AuthorityExplosiveInput:
 def _authority_mkdir(path: Path) -> None:
     path.mkdir(mode=0o700)
     os.chmod(path, 0o700)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
+
+
+def _open_authority_directory(path: Path) -> int:
+    if sys.platform == "win32":
+        return artifacts_module.os.open(path, os.O_RDONLY)
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
 
 
 @pytest.fixture
@@ -2651,7 +2726,7 @@ def test_real_revision_store_copy_supports_committed_and_sealed_draft_authority(
     )
     destination = tmp_path / "delivery"
     _authority_mkdir(destination)
-    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = _open_authority_directory(destination)
     try:
         assert (
             authority.copy_authoritative(
@@ -2708,7 +2783,7 @@ def test_copy_authoritative_reloads_exact_revision_converts_cursors_and_borrows_
     monkeypatch.setattr(LocalRevisionStore, "copy_revision_artifacts_at", copy)
     destination = tmp_path / "destination"
     _authority_mkdir(destination)
-    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = _open_authority_directory(destination)
     cursors = (
         ArtifactCopyCursor(
             name="model.FCStd",
@@ -2800,7 +2875,7 @@ def test_copy_authoritative_rejects_loaded_revision_binding_drift(
     )
     destination = tmp_path / "destination"
     _authority_mkdir(destination)
-    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = _open_authority_directory(destination)
     try:
         result = authority.copy_authoritative(
             eligibility=_authority_eligibility(),
@@ -2987,7 +3062,7 @@ def test_copy_store_error_taxonomy_and_borrowed_fd(
     )
     destination = tmp_path / "destination"
     _authority_mkdir(destination)
-    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = _open_authority_directory(destination)
     try:
         result = authority.copy_authoritative(
             eligibility=_authority_eligibility(),
@@ -3020,7 +3095,7 @@ def test_copy_unknown_throwables_are_internal_and_fd_remains_borrowed(
     )
     destination = tmp_path / "destination"
     _authority_mkdir(destination)
-    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = _open_authority_directory(destination)
     try:
         assert authority.copy_authoritative(
             eligibility=_authority_eligibility(),

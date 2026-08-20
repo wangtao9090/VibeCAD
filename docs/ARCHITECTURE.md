@@ -48,10 +48,10 @@ VibeCAD 是一个由 Claude、Codex 等外部宿主调用的本地 FreeCAD 专�
 - 公共主路径是 Agent-first 项目与任务协议，不再公开旧版 31 个 module-global Session 工具。
 - 模型不能提交 Python、FreeCAD 脚本、handler 名、shell 命令或任意输出路径。
 - 所有 CAD 修改都发生在 committed revision 的隔离副本中，并由确定性 verifier 决定能否发布。
-- 当前真实 CAD 执行 profile 是 macOS 上的 managed `headless` Worker；same-user authenticated
-  daemon、session-bound file grant、Worker crash/hang recovery 和 G1 FreeCAD Qt Workbench Alpha
-  已实现。Workbench 仍不是 interactive GUI CAD execution profile，所有 CAD mutation 继续由受管
-  Worker 执行。
+- 当前真实 CAD 执行 profile 是 macOS 和 Windows x86-64 上的 managed `headless` Worker；
+  same-user authenticated daemon、session-bound file grant、Worker crash/hang recovery 和 G1
+  FreeCAD Qt Workbench Alpha 已实现。Workbench 仍不是 interactive GUI CAD execution profile，
+  所有 CAD mutation 继续由受管 Worker 执行。
 - 当前项目可从空模型或只含 `Part::Box` / `Part::Cylinder` 的受支持 FCStd 信封开始；公开交付格式为
   FCStd 和 STEP，通用 FCStd 导入仍属 P1。
 
@@ -172,8 +172,9 @@ VIBECAD_HOME/
 └── .runtime-removal.json
 ```
 
-macOS 默认根目录为 `~/Library/Application Support/VibeCAD`。Stage 3 的 durable Application data opener
-当前只在 Darwin 上声明可用；Windows/Linux 虽保留部分 runtime 兼容代码，但不是当前 Agent-first
+macOS 默认根目录为 `~/Library/Application Support/VibeCAD`，Windows 默认根目录为
+`%LOCALAPPDATA%\VibeCAD`。Stage 3 的 durable Application data opener 在 Darwin 与 Windows x86-64
+使用各自的原生 capability、身份和访问控制实现；Linux 与 Windows on ARM 不是当前 Agent-first
 产品支持声明。
 
 `uninstall_runtime` 采用预览/确认两段式，只能删除 `runtime/` 身份绑定的受管目标；`data/` 中项目、
@@ -553,7 +554,8 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带
   同一 skill tree，wheel/受管 Python 环境刻意不携带 skill；
-- MCPB 只声明已验证的 Darwin 产品路径；`uv.lock` 随包，tests/docs/runtime/cache 不进入产品包；
+- MCPB 声明已验证的 Darwin 与 Windows x86-64 产品路径；`uv.lock` 随包，tests/docs/runtime/cache
+  不进入产品包；
 - C13 已证明 MCP 与 public Workbench client 经同一 Application/Task Kernel 共享 draft、verdict 和
   HEAD，client EOF/重连不改变 durable truth；发布门把同一 39-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。

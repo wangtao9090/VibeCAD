@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vibecad._file_compat import capture_windows_path, set_private_dacl
 from vibecad.daemon.state import (
     DAEMON_ENDPOINT_NAME,
     DAEMON_RECEIPT_NAME,
@@ -32,6 +33,14 @@ _MAX_UNIX_ENDPOINT_BYTES = 103
 _EVIDENCE_TAIL_CHARACTERS = 2_000
 _DARWIN_TEMP_PARENT = Path("/private/tmp")
 _DARWIN_TEMP_PREFIX = "vc-c00b-"
+_DARWIN_SIGKILL = getattr(signal, "SIGKILL", 9)
+
+
+def _test_darwin_euid() -> int:
+    """Return a real Darwin EUID or a sample value for injected contract tests."""
+
+    getuid = getattr(os, "geteuid", None)
+    return getuid() if callable(getuid) else 501
 
 
 class _ProcBSDInfo(ctypes.Structure):
@@ -69,6 +78,42 @@ class _DarwinProcessToken:
     euid: int
     pgid: int
     sid: int
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowsProcessToken:
+    pid: int
+    started_ns: int
+    sid: str
+
+
+def _windows_process_token(pid: int) -> _WindowsProcessToken:
+    if sys.platform != "win32":
+        raise OSError("Win32 process identity is unavailable")
+    from vibecad.daemon.windows_ipc import current_user_sid, process_start_ns
+
+    try:
+        first = process_start_ns(pid)
+    except OSError as error:
+        if getattr(error, "winerror", None) in {87, 1168}:
+            raise ProcessLookupError(pid) from error
+        raise
+    sid = current_user_sid()
+    try:
+        second = process_start_ns(pid)
+    except OSError as error:
+        if getattr(error, "winerror", None) in {87, 1168}:
+            raise ProcessLookupError(pid) from error
+        raise
+    if first != second:
+        raise RuntimeError("Win32 process generation changed during capture")
+    return _WindowsProcessToken(pid=pid, started_ns=first, sid=sid)
+
+
+def _platform_process_token(pid: int) -> _DarwinProcessToken | _WindowsProcessToken:
+    if sys.platform == "win32":
+        return _windows_process_token(pid)
+    return _darwin_process_token(pid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,9 +243,16 @@ def _darwin_process_token(
     pid: int,
     *,
     _read_info: Callable[[int], tuple[int, int, int, int, int]] = _read_proc_bsd_info,
-    _getsid: Callable[[int], int] = os.getsid,
-    _geteuid: Callable[[], int] = os.geteuid,
+    _getsid: Callable[[int], int] | None = None,
+    _geteuid: Callable[[], int] | None = None,
 ) -> _DarwinProcessToken:
+    if _getsid is None or _geteuid is None:
+        platform_getsid = getattr(os, "getsid", None)
+        platform_geteuid = getattr(os, "geteuid", None)
+        if not callable(platform_getsid) or not callable(platform_geteuid):
+            raise RuntimeError("Darwin process identity is unavailable")
+        _getsid = platform_getsid
+        _geteuid = platform_geteuid
     if type(pid) is not int or pid <= 1:
         raise ValueError("daemon PID is invalid")
     first = _read_info(pid)
@@ -232,13 +284,19 @@ def _safe_absent_or_empty_run_root(run_root: Path) -> bool:
         return True
     except OSError:
         return False
-    getuid = getattr(os, "geteuid", None)
-    if (
-        not stat.S_ISDIR(before.st_mode)
-        or stat.S_IMODE(before.st_mode) & 0o077
-        or (getuid is not None and before.st_uid != getuid())
-    ):
-        return False
+    if sys.platform == "win32":
+        try:
+            capability = capture_windows_path(run_root, directory=True)
+        except (OSError, TypeError, ValueError):
+            return False
+    else:
+        getuid = getattr(os, "geteuid", None)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or stat.S_IMODE(before.st_mode) & 0o077
+            or (getuid is not None and before.st_uid != getuid())
+        ):
+            return False
     try:
         with os.scandir(run_root) as entries:
             if next(entries, None) is not None:
@@ -246,7 +304,7 @@ def _safe_absent_or_empty_run_root(run_root: Path) -> bool:
         after = os.lstat(run_root)
     except OSError:
         return False
-    return (
+    unchanged = (
         before.st_dev,
         before.st_ino,
         before.st_mode,
@@ -257,6 +315,21 @@ def _safe_absent_or_empty_run_root(run_root: Path) -> bool:
         after.st_mode,
         after.st_uid,
     )
+    if not unchanged:
+        return False
+    if sys.platform == "win32":
+        try:
+            return (
+                capture_windows_path(
+                    run_root,
+                    directory=True,
+                    generation_token=capability.generation_token,
+                )
+                == capability
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+    return True
 
 
 class _DaemonCleanupGuard:
@@ -266,8 +339,12 @@ class _DaemonCleanupGuard:
         *,
         _read_state: Callable[[Path], object] | None = None,
         _retire: Callable[..., bool] | None = None,
-        _capture_token: Callable[[int], _DarwinProcessToken] = _darwin_process_token,
-        _killpg: Callable[[int, int], None] = os.killpg,
+        _capture_token: Callable[
+            [int],
+            _DarwinProcessToken | _WindowsProcessToken,
+        ]
+        | None = None,
+        _killpg: Callable[[int, int], None] | None = None,
         _clock: Callable[[], float] = time.monotonic,
         _sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -277,13 +354,18 @@ class _DaemonCleanupGuard:
         self.run_root = run_root
         self._read_state = read_boot_state if _read_state is None else _read_state
         self._retire = retire_local_kernel if _retire is None else _retire
-        self._capture_token = _capture_token
+        self._capture_token = _platform_process_token if _capture_token is None else _capture_token
+        if _killpg is None:
+            platform_killpg = getattr(os, "killpg", None)
+            if not callable(platform_killpg) and sys.platform != "win32":
+                raise RuntimeError("Darwin process-group cleanup is unavailable")
+            _killpg = platform_killpg if callable(platform_killpg) else None
         self._killpg = _killpg
         self._clock = _clock
         self._sleep = _sleep
         self._cold = False
         self._receipt = None
-        self._token: _DarwinProcessToken | None = None
+        self._token: _DarwinProcessToken | _WindowsProcessToken | None = None
         self._token_error = False
         self._ambiguity_latched = False
         self._outcome: _CleanupOutcome | None = None
@@ -299,7 +381,7 @@ class _DaemonCleanupGuard:
         return value if type(value) is int else None
 
     @property
-    def process_token(self) -> _DarwinProcessToken | None:
+    def process_token(self) -> _DarwinProcessToken | _WindowsProcessToken | None:
         return self._token
 
     @property
@@ -447,14 +529,19 @@ class _DaemonCleanupGuard:
             )
         except Exception:
             retired = False
-        if retired and self._proof():
+        if retired and self._wait_for_proof(1.0):
             self._outcome = _CleanupOutcome(True, True, False, False, "retired")
             return self._outcome
-        if self._proof():
+        if (
+            type(self._token) is _WindowsProcessToken and self._wait_for_proof(1.0)
+        ) or self._proof():
             self._outcome = _CleanupOutcome(True, True, False, False, "retire_removed")
             return self._outcome
         if not self._eligible_for_signal():
             self._outcome = _CleanupOutcome(False, True, False, False, "signal_forbidden")
+            return self._outcome
+        if self._killpg is None:
+            self._outcome = _CleanupOutcome(False, True, False, False, "signal_unavailable")
             return self._outcome
 
         term_sent = False
@@ -472,7 +559,7 @@ class _DaemonCleanupGuard:
             self._outcome = _CleanupOutcome(False, True, True, False, "kill_forbidden")
             return self._outcome
         try:
-            self._killpg(self._token.pgid, signal.SIGKILL)
+            self._killpg(self._token.pgid, _DARWIN_SIGKILL)
             kill_sent = True
         except OSError:
             self._outcome = _CleanupOutcome(False, True, True, False, "kill_failed")
@@ -507,7 +594,11 @@ def _exact_managed_runtime(
     try:
         evidence = status.capture_runtime_generation_evidence(prefix)
         receipt = json.loads((prefix / ".vibecad_ready").read_text(encoding="utf-8"))
-        freecadcmd = prefix / "bin" / "freecadcmd"
+        freecadcmd = (
+            prefix / "Library" / "bin" / "FreeCADCmd.exe"
+            if sys.platform == "win32"
+            else prefix / "bin" / "freecadcmd"
+        )
         freecadcmd_info = freecadcmd.stat()
         resolved_freecadcmd = freecadcmd.resolve(strict=True)
         resolved_freecadcmd.relative_to(prefix.resolve(strict=True))
@@ -723,6 +814,22 @@ def _finalize_probe_cleanup(
 
 
 def _preflight_daemon_endpoint(endpoint: object) -> int:
+    if sys.platform == "win32":
+        from vibecad.daemon.windows_ipc import named_pipe_name
+
+        try:
+            endpoint_path = Path(os.path.abspath(os.fspath(endpoint)))
+        except (TypeError, UnicodeError, ValueError) as error:
+            raise ValueError("daemon endpoint path is invalid") from error
+        if not endpoint_path.is_absolute():
+            raise ValueError("daemon endpoint path is invalid")
+        try:
+            pipe = named_pipe_name(endpoint_path.parent)
+        except OSError as error:
+            raise ValueError("daemon named-pipe endpoint is invalid") from error
+        if not pipe.startswith(r"\\.\pipe\vibecad-kernel-"):
+            raise ValueError("daemon named-pipe endpoint is invalid")
+        return len(pipe)
     try:
         encoded = os.fsencode(endpoint)
     except (TypeError, UnicodeError) as error:
@@ -746,6 +853,17 @@ def _invoke_after_endpoint_preflight(
     ownership: _CleanupAssertionOwnership | None = None,
 ) -> object:
     _preflight_daemon_endpoint(endpoint)
+    if sys.platform == "win32":
+        try:
+            requested = os.path.normcase(os.path.abspath(os.fspath(endpoint)))
+            expected = os.path.normcase(os.path.abspath(_runtime_daemon_endpoint()))
+        except (TypeError, UnicodeError, ValueError) as error:
+            raise ValueError("daemon endpoint path is invalid") from error
+        if requested != expected:
+            raise ValueError("daemon endpoint does not match runtime endpoint")
+        if ownership is not None:
+            ownership.mark_launch_attempted()
+        return invoke()
     try:
         requested = os.fsencode(endpoint)
         expected = os.fsencode(_runtime_daemon_endpoint())
@@ -764,9 +882,17 @@ def _admit_canonical_private_root(spelling: Path) -> Path:
         info = spelling.lstat()
     except OSError as error:
         raise ValueError("isolated root is unavailable") from error
-    getuid = getattr(os, "geteuid", None)
     if spelling != resolved:
         raise ValueError("isolated root spelling is not canonical")
+    if sys.platform == "win32":
+        try:
+            capability = capture_windows_path(spelling, directory=True)
+        except (OSError, TypeError, ValueError) as error:
+            raise ValueError("isolated root is not owner-private") from error
+        if capability.path != str(resolved):
+            raise ValueError("isolated root spelling is not canonical")
+        return resolved
+    getuid = getattr(os, "geteuid", None)
     if (
         not stat.S_ISDIR(info.st_mode)
         or stat.S_IMODE(info.st_mode) != 0o700
@@ -820,15 +946,48 @@ def test_canonical_private_temp_root_admission_rejects_alias(
         dir=str(canonical_temp_parent),
     ) as spelling:
         root = Path(spelling)
+        if sys.platform == "win32":
+            set_private_dacl(root)
         assert _admit_canonical_private_root(root) == root
 
     real_root = tmp_path.resolve() / "real-root"
     real_root.mkdir(mode=0o700)
     real_root.chmod(0o700)
+    if sys.platform == "win32":
+        set_private_dacl(real_root)
     alias = tmp_path.resolve() / "root-alias"
     alias.symlink_to(real_root, target_is_directory=True)
     with pytest.raises(ValueError, match="spelling is not canonical"):
         _admit_canonical_private_root(alias)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows named-pipe endpoint contract")
+def test_windows_endpoint_preflight_binds_the_sid_scoped_named_pipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecad.daemon.windows_ipc import named_pipe_name
+
+    home = (tmp_path / "vibecad-home").resolve()
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    endpoint = _runtime_daemon_endpoint()
+    expected_pipe = named_pipe_name(endpoint.parent)
+    invoked: list[bool] = []
+
+    assert _preflight_daemon_endpoint(endpoint) == len(expected_pipe)
+    assert (
+        _invoke_after_endpoint_preflight(
+            endpoint,
+            lambda: invoked.append(True) or "invoked",
+        )
+        == "invoked"
+    )
+    assert invoked == [True]
+    with pytest.raises(ValueError, match="does not match runtime endpoint"):
+        _invoke_after_endpoint_preflight(
+            endpoint.with_name("untrusted.sock"),
+            lambda: None,
+        )
 
 
 def test_darwin_process_token_layout_and_stable_capture() -> None:
@@ -856,13 +1015,23 @@ def test_darwin_process_token_layout_and_stable_capture() -> None:
         raise ProcessLookupError
 
     with pytest.raises(ProcessLookupError):
-        _darwin_process_token(9_001, _read_info=absent)
+        _darwin_process_token(
+            9_001,
+            _read_info=absent,
+            _getsid=lambda _pid: 9_001,
+            _geteuid=lambda: 501,
+        )
 
     def incomplete(_pid: int) -> tuple[int, int, int, int, int]:
         raise RuntimeError("short proc_pidinfo read")
 
     with pytest.raises(RuntimeError, match="short proc_pidinfo"):
-        _darwin_process_token(9_001, _read_info=incomplete)
+        _darwin_process_token(
+            9_001,
+            _read_info=incomplete,
+            _getsid=lambda _pid: 9_001,
+            _geteuid=lambda: 501,
+        )
 
     samples = iter((sample, (*sample[:-1], 9_002)))
     with pytest.raises(RuntimeError, match="changed during capture"):
@@ -901,10 +1070,13 @@ def test_safe_absent_or_empty_run_root_rejects_unsafe_state(tmp_path: Path) -> N
     assert _safe_absent_or_empty_run_root(run_root)
     run_root.mkdir(mode=0o700)
     run_root.chmod(0o700)
+    if sys.platform == "win32":
+        set_private_dacl(run_root)
     assert _safe_absent_or_empty_run_root(run_root)
-    run_root.chmod(0o755)
-    assert not _safe_absent_or_empty_run_root(run_root)
-    run_root.chmod(0o700)
+    if sys.platform != "win32":
+        run_root.chmod(0o755)
+        assert not _safe_absent_or_empty_run_root(run_root)
+        run_root.chmod(0o700)
     (run_root / "unexpected").write_bytes(b"x")
     assert not _safe_absent_or_empty_run_root(run_root)
     (run_root / "unexpected").unlink()
@@ -1015,7 +1187,7 @@ def test_cleanup_guard_retires_once_and_is_idempotent(tmp_path: Path) -> None:
     state = SimpleNamespace(receipt=receipt)
     current_state: list[object | None] = [None]
     current_token: list[_DarwinProcessToken | None] = [
-        _DarwinProcessToken(9_101, 100, 1, os.geteuid(), 9_101, 9_101)
+        _DarwinProcessToken(9_101, 100, 1, _test_darwin_euid(), 9_101, 9_101)
     ]
     retire_calls: list[dict[str, object]] = []
     signals: list[tuple[int, int]] = []
@@ -1068,7 +1240,7 @@ def test_cleanup_guard_uses_one_bounded_exact_generation_signal(
     run_root = tmp_path / "daemon"
     receipt = SimpleNamespace(daemon_id="daemon_" + "2" * 32, pid=9_102)
     current_state: list[object | None] = [None]
-    token = _DarwinProcessToken(9_102, 101, 2, os.geteuid(), 9_102, 9_102)
+    token = _DarwinProcessToken(9_102, 101, 2, _test_darwin_euid(), 9_102, 9_102)
     current_token: list[_DarwinProcessToken | None] = [token]
     signals: list[tuple[int, int]] = []
     now = [0.0]
@@ -1088,7 +1260,7 @@ def test_cleanup_guard_uses_one_bounded_exact_generation_signal(
         if sig == signal.SIGTERM and escalation == "term":
             current_state[0] = None
             current_token[0] = None
-        if sig == signal.SIGKILL:
+        if sig == _DARWIN_SIGKILL:
             current_state[0] = None
             current_token[0] = None
 
@@ -1112,7 +1284,7 @@ def test_cleanup_guard_uses_one_bounded_exact_generation_signal(
 
     expected_signals = [(9_102, signal.SIGTERM)]
     if escalation == "kill":
-        expected_signals.append((9_102, signal.SIGKILL))
+        expected_signals.append((9_102, _DARWIN_SIGKILL))
     assert signals == expected_signals
     assert outcome.clean
     assert outcome.term_sent
@@ -1137,7 +1309,7 @@ def test_cleanup_guard_never_signals_replacement_removal_or_pid_reuse(
         9_103,
         102,
         3,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_103,
         9_103,
     )
@@ -1145,7 +1317,7 @@ def test_cleanup_guard_never_signals_replacement_removal_or_pid_reuse(
         9_103,
         103,
         4,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_103,
         9_103,
     )
@@ -1228,7 +1400,7 @@ def test_cleanup_guard_latches_one_post_auth_token_ambiguity(
         9_106,
         106,
         7,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_106,
         9_106,
     )
@@ -1294,7 +1466,7 @@ def test_cleanup_guard_latches_one_post_auth_publication_ambiguity(
         9_107,
         107,
         8,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_107,
         9_107,
     )
@@ -1372,7 +1544,7 @@ def test_cleanup_guard_revalidates_publication_and_token_before_kill(
         9_105,
         104,
         5,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_105,
         9_105,
     )
@@ -1380,7 +1552,7 @@ def test_cleanup_guard_revalidates_publication_and_token_before_kill(
         9_105,
         105,
         6,
-        os.geteuid(),
+        _test_darwin_euid(),
         9_105,
         9_105,
     )
@@ -1482,6 +1654,7 @@ class _SyntheticEvidenceError(RuntimeError):
     pass
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin AF_UNIX path budget")
 def test_c00b_darwin_socket_layout_and_preflight_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1511,6 +1684,7 @@ def test_c00b_darwin_socket_layout_and_preflight_bound(
         _preflight_daemon_endpoint("")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin AF_UNIX path budget")
 def test_c00b_real_harness_preflight_fails_closed_before_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1529,6 +1703,7 @@ def test_c00b_real_harness_preflight_fails_closed_before_invocation(
     assert launched == []
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin AF_UNIX endpoint contract")
 def test_c00b_endpoint_preflight_rejects_non_runtime_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2164,8 +2339,8 @@ def test_evidence_failure_keeps_cleanup_at_most_once(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="the real cleanup proof uses Darwin PROC_PIDTBSDINFO",
+    sys.platform not in {"darwin", "win32"},
+    reason="the real cleanup proof requires Darwin or Win32 process-generation identity",
 )
 @pytest.mark.slow
 def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
@@ -2181,19 +2356,30 @@ def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
     prefix, freecadcmd, runtime_evidence = _exact_managed_runtime(prefix_value)
     repo = Path(__file__).resolve().parent.parent
     source_root = (repo / "src").resolve()
-    canonical_temp_parent = _canonical_darwin_temp_parent()
+    canonical_temp_parent = (
+        Path(tempfile.gettempdir()).resolve(strict=True)
+        if sys.platform == "win32"
+        else _canonical_darwin_temp_parent()
+    )
     isolated = tempfile.TemporaryDirectory(
         prefix=_DARWIN_TEMP_PREFIX,
         dir=str(canonical_temp_parent),
     )
     request.addfinalizer(isolated.cleanup)
-    isolated_root = _admit_c00b_isolated_root(Path(isolated.name))
+    isolated_path = Path(isolated.name).resolve(strict=True)
+    if sys.platform == "win32":
+        set_private_dacl(isolated_path)
+        isolated_root = _admit_canonical_private_root(isolated_path)
+    else:
+        isolated_root = _admit_c00b_isolated_root(isolated_path)
     isolated_home = isolated_root / "vibecad-home"
     freecad_user_home = isolated_root / "freecad-user"
     isolated_tmp = isolated_root / "tmp"
     for private_root in (isolated_home, freecad_user_home, isolated_tmp):
         private_root.mkdir(mode=0o700)
         private_root.chmod(0o700)
+        if sys.platform == "win32":
+            set_private_dacl(private_root)
         _admit_canonical_private_root(private_root)
 
     monkeypatch.setenv("VIBECAD_HOME", str(isolated_home))
@@ -2224,12 +2410,51 @@ def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
     environment = os.environ.copy()
     environment.update(
         {
+            "FREECAD_USER_DATA": str(freecad_user_home),
             "FREECAD_USER_HOME": str(freecad_user_home),
+            "FREECAD_USER_TEMP": str(isolated_tmp),
             "PYTHONDONTWRITEBYTECODE": "1",
             "QT_QPA_PLATFORM": "offscreen",
+            "TEMP": str(isolated_tmp),
+            "TMP": str(isolated_tmp),
             "TMPDIR": str(isolated_tmp),
         }
     )
+    if sys.platform == "win32":
+        system_root_value = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if not system_root_value:
+            pytest.fail("Windows system root is unavailable")
+        system_root = Path(system_root_value)
+        appdata = isolated_root / "appdata"
+        localappdata = isolated_root / "localappdata"
+        for private_root in (appdata, localappdata):
+            private_root.mkdir(mode=0o700)
+            set_private_dacl(private_root)
+            _admit_canonical_private_root(private_root)
+        path_entries = (
+            prefix,
+            prefix / "Library" / "bin",
+            prefix / "Scripts",
+            system_root / "System32",
+            system_root,
+        )
+        environment.update(
+            {
+                "APPDATA": str(appdata),
+                "CONDA_PREFIX": str(prefix),
+                "HOME": str(freecad_user_home),
+                "LOCALAPPDATA": str(localappdata),
+                "PATH": os.pathsep.join(str(entry) for entry in path_entries),
+                "PYTHONNOUSERSITE": "1",
+                "SystemRoot": str(system_root),
+                "USERPROFILE": str(freecad_user_home),
+                "WINDIR": str(system_root),
+            }
+        )
+        for name in ("COMSPEC", "PATHEXT"):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
     command = _freecad_probe_command(freecadcmd, repo)
 
     process_command = ""
@@ -2258,47 +2483,65 @@ def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
         published = cleanup_guard.observe_publication()
         if published is not None:
             receipt = published.receipt
-            try:
-                process = subprocess.run(
-                    ["ps", "-p", str(receipt.pid), "-o", "command="],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            except subprocess.TimeoutExpired as error:
-                raise _AuthenticatedInspectionTimeout(
-                    error.cmd,
-                    error.timeout,
-                    output=error.stdout,
-                    stderr=error.stderr,
-                ) from error
-            if process.returncode != 0:
-                raise _AuthenticatedInspectionError(
-                    f"authenticated process inspection returned {process.returncode}"
-                )
-            process_command = process.stdout.strip()
+            if sys.platform == "win32":
+                token = cleanup_guard.process_token
+                if (
+                    type(token) is not _WindowsProcessToken
+                    or token.pid != receipt.pid
+                    or token.started_ns != receipt.started_ns
+                ):
+                    raise _AuthenticatedInspectionError(
+                        "authenticated Win32 process generation does not match the receipt"
+                    )
+                process_command = f"sid={token.sid};started_ns={token.started_ns}"
+            else:
+                try:
+                    process = subprocess.run(
+                        ["ps", "-p", str(receipt.pid), "-o", "command="],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise _AuthenticatedInspectionTimeout(
+                        error.cmd,
+                        error.timeout,
+                        output=error.stdout,
+                        stderr=error.stderr,
+                    ) from error
+                if process.returncode != 0:
+                    raise _AuthenticatedInspectionError(
+                        f"authenticated process inspection returned {process.returncode}"
+                    )
+                process_command = process.stdout.strip()
 
     def parent_identity(
         _attempt: _ProbeAttempt,
         _cleanup: _CleanupOutcome,
     ) -> dict[str, object]:
         process_token = cleanup_guard.process_token
+        if type(process_token) is _WindowsProcessToken:
+            token_payload: dict[str, object] | None = {
+                "pid": process_token.pid,
+                "sid": process_token.sid,
+                "started_ns": process_token.started_ns,
+            }
+        elif type(process_token) is _DarwinProcessToken:
+            token_payload = {
+                "birth_sec": process_token.birth_sec,
+                "birth_usec": process_token.birth_usec,
+                "euid": process_token.euid,
+                "pgid": process_token.pgid,
+                "sid": process_token.sid,
+            }
+        else:
+            token_payload = None
         return {
             "daemon_id": cleanup_guard.daemon_id,
             "daemon_pid": cleanup_guard.daemon_pid,
             "daemon_process": _bounded_tail(process_command),
-            "daemon_token": (
-                None
-                if process_token is None
-                else {
-                    "birth_sec": process_token.birth_sec,
-                    "birth_usec": process_token.birth_usec,
-                    "euid": process_token.euid,
-                    "pgid": process_token.pgid,
-                    "sid": process_token.sid,
-                }
-            ),
-            "endpoint_bytes": len(os.fsencode(expected_socket)),
+            "daemon_token": token_payload,
+            "endpoint_length": _preflight_daemon_endpoint(expected_socket),
             "managed_python": str(launch_evidence.python),
             "prefix_identity": list(runtime_evidence.prefix_identity),
             "python_entry_identity": list(runtime_evidence.python_entry_identity),
@@ -2316,7 +2559,17 @@ def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
         run_root_value = result.get("run_root")
         socket_value = result.get("socket")
         assert all(runtime_checks.values()), runtime_checks
-        assert len(os.fsencode(expected_socket)) == 66
+        if sys.platform == "win32":
+            from vibecad.daemon.windows_ipc import current_user_sid, named_pipe_name
+
+            token = cleanup_guard.process_token
+            assert type(token) is _WindowsProcessToken
+            assert token.sid == current_user_sid()
+            assert _preflight_daemon_endpoint(expected_socket) == len(
+                named_pipe_name(expected_run_root)
+            )
+        else:
+            assert len(os.fsencode(expected_socket)) == 66
         assert cleanup_outcome.clean, cleanup_outcome
         assert cleanup_outcome.retire_attempted
         assert type(daemon_id) is str
@@ -2351,7 +2604,10 @@ def test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon(
         assert result["status"] == "ok"
         assert result["sys_prefix"] == str(prefix)
         assert os.path.samefile(os.fspath(result["sys_executable"]), freecadcmd)
-        assert process_command == f"{launch_evidence.python} -B -m vibecad.daemon"
+        if sys.platform == "win32":
+            assert process_command.startswith("sid=S-1-")
+        else:
+            assert process_command == f"{launch_evidence.python} -B -m vibecad.daemon"
 
     _run_probe_lifecycle(
         action=invoke_probe,

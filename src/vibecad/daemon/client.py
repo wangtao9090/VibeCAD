@@ -13,7 +13,27 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
+from vibecad._file_compat import (
+    WindowsExternalFileCapability,
+    WindowsPathCapability,
+    capture_windows_external_fd,
+    capture_windows_fd,
+    delete_windows_directory,
+    delete_windows_directory_capability,
+    delete_windows_file,
+    ensure_private_directory,
+    open_private_file,
+    open_windows_directory_fd,
+    open_windows_external_file,
+    validate_windows_external_file,
+    validate_windows_path,
+    windows_extended_path,
+)
+from vibecad._file_compat import (
+    pread as portable_pread,
+)
 from vibecad.application.visual_ingress import (
     VisualIngressError,
     bind_visual_staging_locator,
@@ -27,6 +47,14 @@ from vibecad.daemon.state import (
     DaemonErrorCode,
     PublishedDaemonState,
     read_boot_state,
+)
+from vibecad.daemon.windows_ipc import (
+    HANDLE_ENVELOPE_BYTES,
+    WindowsNamedPipeConnection,
+    connect_named_pipe,
+    encode_handle_envelope,
+    named_pipe_name,
+    require_expected_peer,
 )
 from vibecad.interaction.protocol_v2 import (
     MAX_V2_FRAME_PAYLOAD_BYTES,
@@ -44,7 +72,7 @@ from vibecad.visual.contracts import MAX_IMAGE_SET_SOURCE_BYTES, MAX_IMAGE_SOURC
 
 _MAX_IMPORT_BYTES = 512 * 1024 * 1024
 _MAX_ANCILLARY_DESCRIPTORS = 8
-_CMSG_SPACE = socket.CMSG_SPACE
+_CMSG_SPACE = getattr(socket, "CMSG_SPACE", None)
 _MSG_CTRUNC = getattr(socket, "MSG_CTRUNC", 0)
 _SCM_RIGHTS = getattr(socket, "SCM_RIGHTS", None)
 _SOL_SOCKET = socket.SOL_SOCKET
@@ -109,13 +137,31 @@ class _FrameReader:
 
     @staticmethod
     def _part(
-        connection: socket.socket,
+        connection: socket.socket | WindowsNamedPipeConnection,
         size: int,
         *,
         deadline: float | None,
         fragment_idle_seconds: float | None,
     ) -> bytes:
         result = bytearray()
+        if isinstance(connection, WindowsNamedPipeConnection):
+            while len(result) < size:
+                if deadline is None:
+                    connection.settimeout(None)
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    connection.settimeout(remaining)
+                fragment = connection.recv(size - len(result))
+                if not fragment:
+                    raise _ConnectionClosed
+                result.extend(fragment)
+                if fragment_idle_seconds is not None:
+                    deadline = time.monotonic() + fragment_idle_seconds
+            return bytes(result)
+        if _CMSG_SPACE is None or not hasattr(connection, "recvmsg"):
+            raise DaemonError(DaemonErrorCode.UNSUPPORTED_PLATFORM)
         ancillary_size = _CMSG_SPACE(_MAX_ANCILLARY_DESCRIPTORS * array.array("i").itemsize)
         while len(result) < size:
             if deadline is None:
@@ -145,7 +191,7 @@ class _FrameReader:
 
     def receive(
         self,
-        connection: socket.socket,
+        connection: socket.socket | WindowsNamedPipeConnection,
         *,
         deadline: float | None,
         fragment_idle_seconds: float | None = None,
@@ -172,7 +218,12 @@ class _FrameReader:
         )
 
 
-def _send(connection: socket.socket, payload: bytes, *, deadline: float) -> None:
+def _send(
+    connection: socket.socket | WindowsNamedPipeConnection,
+    payload: bytes,
+    *,
+    deadline: float,
+) -> None:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
@@ -181,12 +232,22 @@ def _send(connection: socket.socket, payload: bytes, *, deadline: float) -> None
 
 
 def _send_descriptor(
-    connection: socket.socket,
+    connection: socket.socket | WindowsNamedPipeConnection,
     payload: bytes,
     descriptor: int,
     *,
     deadline: float,
 ) -> None:
+    if isinstance(connection, WindowsNamedPipeConnection):
+        wrapped = encode_handle_envelope(payload, descriptor)
+        if len(wrapped) > MAX_V2_FRAME_PAYLOAD_BYTES + HANDLE_ENVELOPE_BYTES:
+            raise V2ProtocolError(V2ErrorCode.FRAME_TOO_LARGE)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        connection.settimeout(remaining)
+        connection.sendall(len(wrapped).to_bytes(V2_FRAME_HEADER_BYTES, "big") + wrapped)
+        return
     if sys.platform != "darwin" or _SCM_RIGHTS is None:
         raise DaemonError(DaemonErrorCode.UNSUPPORTED_PLATFORM)
     remaining = deadline - time.monotonic()
@@ -320,11 +381,114 @@ class _PinnedImportSource:
         _close_descriptors([self.fd, *reversed(self.ancestor_fds)])
 
 
+class _PinnedWindowsImportSource:
+    __slots__ = ("before", "capability", "fd", "managed_path")
+
+    def __init__(
+        self,
+        *,
+        fd: int,
+        before: os.stat_result,
+        capability: WindowsExternalFileCapability,
+        managed_path: Path,
+    ) -> None:
+        self.fd = fd
+        self.before = before
+        self.capability = capability
+        self.managed_path = managed_path
+
+    @staticmethod
+    def _identity(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(value.st_dev),
+            int(value.st_ino),
+            int(value.st_mode),
+            int(value.st_nlink),
+            int(value.st_size),
+            int(value.st_mtime_ns),
+            int(getattr(value, "st_birthtime_ns", value.st_ctime_ns)),
+        )
+
+    @staticmethod
+    def _safe_file(value: os.stat_result) -> bool:
+        attributes = int(getattr(value, "st_file_attributes", 0) or 0)
+        return (
+            stat.S_ISREG(value.st_mode)
+            and not stat.S_ISLNK(value.st_mode)
+            and not bool(attributes & 0x400)
+            and value.st_nlink == 1
+            and 0 < value.st_size <= _MAX_IMPORT_BYTES
+        )
+
+    def verify(self) -> None:
+        try:
+            current_capability = capture_windows_external_fd(
+                self.fd,
+                generation_token=self.capability.generation_token,
+            )
+            validate_windows_external_file(self.capability)
+            current = os.fstat(self.fd)
+        except (OSError, TypeError, ValueError):
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+        if (
+            current_capability != self.capability
+            or not self._safe_file(current)
+            or self._identity(current) != self._identity(self.before)
+            or _windows_path_within(Path(self.capability.path), self.managed_path)
+        ):
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+
+    def close(self) -> None:
+        _close_descriptors([self.fd])
+
+
+def _windows_path_within(path: Path, parent: Path) -> bool:
+    try:
+        child_value = os.path.normcase(os.path.abspath(path))
+        parent_value = os.path.normcase(os.path.abspath(parent))
+        return os.path.commonpath((child_value, parent_value)) == parent_value
+    except (OSError, TypeError, ValueError):
+        return True
+
+
 def _open_import_source(
     source_path: object,
     *,
     managed_identity: tuple[int, int],
-) -> _PinnedImportSource:
+    managed_path: Path | None = None,
+) -> _PinnedImportSource | _PinnedWindowsImportSource:
+    if sys.platform == "win32":
+        if type(source_path) is not str or not source_path or "\0" in source_path:
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+        if not isinstance(managed_path, Path):
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+        path = Path(os.path.abspath(source_path))
+        if not path.is_absolute() or os.path.normcase(os.fspath(path)) != os.path.normcase(
+            os.path.abspath(source_path)
+        ):
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+        fd = -1
+        succeeded = False
+        try:
+            fd, capability = open_windows_external_file(path)
+            before = os.fstat(fd)
+            opened = _PinnedWindowsImportSource(
+                fd=fd,
+                before=before,
+                capability=capability,
+                managed_path=managed_path,
+            )
+            opened.verify()
+            succeeded = True
+            return opened
+        except DaemonError:
+            raise
+        except (OSError, TypeError, ValueError):
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+        finally:
+            if not succeeded and fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
     if sys.platform != "darwin":
         raise DaemonError(DaemonErrorCode.UNSUPPORTED_PLATFORM)
     if type(source_path) is not str or not source_path.startswith("/"):
@@ -410,6 +574,42 @@ def _same_boot_state(left: PublishedDaemonState, right: PublishedDaemonState) ->
     )
 
 
+def _create_windows_visual_stage(
+    _run_root: Path,
+) -> tuple[Path, None, WindowsPathCapability, int]:
+    """Create one isolated private stage without mutating daemon state."""
+
+    parent_path = Path(os.path.abspath(tempfile.gettempdir()))
+    for _attempt in range(16):
+        path = parent_path / (".vibecad_visual_" + secrets.token_hex(16))
+        try:
+            stage = ensure_private_directory(
+                path,
+                exclusive=True,
+            )
+        except FileExistsError:
+            continue
+        descriptor = -1
+        try:
+            descriptor = open_windows_directory_fd(path)
+            opened = capture_windows_fd(
+                descriptor,
+                directory=True,
+                generation_token=stage.generation_token,
+            )
+            if opened != stage:
+                raise OSError("Windows visual stage identity changed")
+            return path, None, stage, descriptor
+        except BaseException:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            with contextlib.suppress(OSError):
+                delete_windows_directory_capability(stage)
+            raise
+    raise OSError("unable to reserve a private Windows visual stage")
+
+
 class LocalKernelClient:
     """One PID-bound authenticated connection; product adapters arrive in C13."""
 
@@ -427,7 +627,7 @@ class LocalKernelClient:
         self,
         *,
         boot_state: PublishedDaemonState,
-        connection: socket.socket,
+        connection: socket.socket | WindowsNamedPipeConnection,
         protocol: V2ClientConnection,
         reader: _FrameReader,
     ) -> None:
@@ -447,6 +647,12 @@ class LocalKernelClient:
     def daemon_pid(self) -> int:
         return self._boot_state.receipt.pid
 
+    @property
+    def daemon_started_ns(self) -> int:
+        """Published process-generation identity used to reject PID reuse."""
+
+        return self._boot_state.receipt.started_ns
+
     @classmethod
     def connect(
         cls,
@@ -464,19 +670,33 @@ class LocalKernelClient:
             boot_state = read_boot_state(run_root)
         except DaemonError:
             raise DaemonError(DaemonErrorCode.AUTHENTICATION_FAILED) from None
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection: socket.socket | WindowsNamedPipeConnection | None = None
         protocol = None
         connected = False
         reader = _FrameReader()
         try:
+            if sys.platform == "win32":
+                connection = connect_named_pipe(
+                    named_pipe_name(boot_state.root.path),
+                    timeout=float(timeout_seconds),
+                )
+            else:
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.set_inheritable(False)
             deadline = time.monotonic() + float(timeout_seconds)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError
             connection.settimeout(remaining)
-            connection.connect(str(boot_state.root.path / DAEMON_ENDPOINT_NAME))
-            require_same_user_peer(connection)
+            if sys.platform == "win32":
+                require_expected_peer(
+                    connection,
+                    pid=boot_state.receipt.pid,
+                    started_ns=boot_state.receipt.started_ns,
+                )
+            else:
+                connection.connect(str(boot_state.root.path / DAEMON_ENDPOINT_NAME))
+                require_same_user_peer(connection)
             current = read_boot_state(boot_state.root.path)
             if not _same_boot_state(boot_state, current):
                 raise DaemonError(DaemonErrorCode.AUTHENTICATION_FAILED)
@@ -511,7 +731,7 @@ class LocalKernelClient:
         ):
             raise DaemonError(DaemonErrorCode.AUTHENTICATION_FAILED) from None
         finally:
-            if not connected:
+            if not connected and connection is not None:
                 try:
                     connection.close()
                 except OSError:
@@ -552,16 +772,23 @@ class LocalKernelClient:
             or not 0 < float(timeout_seconds) <= V2_IDLE_TIMEOUT_SECONDS
         ):
             raise DaemonError(DaemonErrorCode.INVALID_STATE)
-        return self._call(
-            "kernel.retire",
-            {
-                "daemon_id": self.daemon_id,
-                "reason": reason,
-            },
-            request_id=request_id,
-            descriptor=None,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            return self._call(
+                "kernel.retire",
+                {
+                    "daemon_id": self.daemon_id,
+                    "reason": reason,
+                },
+                request_id=request_id,
+                descriptor=None,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            if sys.platform == "win32":
+                # The server uses this one-shot close as native proof that the
+                # Named Pipe retirement response was consumed before it calls
+                # DisconnectNamedPipe during daemon teardown.
+                self.close()
 
     def _call(
         self,
@@ -644,6 +871,7 @@ class LocalKernelClient:
             pinned = _open_import_source(
                 source_path,
                 managed_identity=(managed.st_dev, managed.st_ino),
+                managed_path=Path(self._boot_state.root.path.parent),
             )
         except DaemonError as error:
             if error.code is DaemonErrorCode.UNSUPPORTED_PLATFORM:
@@ -691,6 +919,12 @@ class LocalKernelClient:
         paths = tuple(source_paths)
         if len(paths) != len(canonical_request.inputs):
             raise LocalVisualSourceError
+        if sys.platform == "win32":
+            return self._seal_visual_image_set_windows(
+                canonical_request,
+                paths,
+                request_id=request_id,
+            )
         try:
             managed = os.stat(
                 self._boot_state.root.path.parent,
@@ -712,6 +946,7 @@ class LocalKernelClient:
                     pinned = _open_import_source(
                         path,
                         managed_identity=(managed.st_dev, managed.st_ino),
+                        managed_path=Path(self._boot_state.root.path.parent),
                     )
                 except DaemonError as error:
                     if error.code is DaemonErrorCode.UNSUPPORTED_PLATFORM:
@@ -862,6 +1097,200 @@ class LocalKernelClient:
                     if (path_info.st_dev, path_info.st_ino) == stage_identity:
                         with contextlib.suppress(OSError):
                             os.rmdir(stage_path)
+            if cleanup_failed and not active_error:
+                raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+
+    def _seal_visual_image_set_windows(
+        self,
+        canonical_request,
+        paths: tuple[str, ...],
+        *,
+        request_id: object | None,
+    ) -> V2Response:
+        """Win32 visual ingress using File-ID-pinned sources and a private stage."""
+
+        managed_path = Path(os.path.abspath(self._boot_state.root.path.parent))
+        try:
+            managed = os.stat(managed_path, follow_symlinks=False)
+        except OSError:
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+
+        pinned_sources: list[_PinnedWindowsImportSource] = []
+        stage_path: Path | None = None
+        stage_parent: WindowsPathCapability | None = None
+        stage_capability: WindowsPathCapability | None = None
+        stage_fd = -1
+        staged: list[tuple[Path, WindowsPathCapability]] = []
+        try:
+            total_bytes = 0
+            identities: set[tuple[int, int]] = set()
+            for path in paths:
+                try:
+                    pinned = _open_import_source(
+                        path,
+                        managed_identity=(managed.st_dev, managed.st_ino),
+                        managed_path=managed_path,
+                    )
+                except DaemonError as error:
+                    if error.code is DaemonErrorCode.UNSUPPORTED_PLATFORM:
+                        raise
+                    raise LocalVisualSourceError from None
+                if type(pinned) is not _PinnedWindowsImportSource:
+                    raise LocalVisualSourceError
+                pinned_sources.append(pinned)
+                identity = (pinned.capability.volume, pinned.capability.file_id)
+                if identity in identities or pinned.before.st_size > MAX_IMAGE_SOURCE_BYTES:
+                    raise LocalVisualSourceError
+                identities.add(identity)
+                total_bytes += pinned.before.st_size
+                if total_bytes > MAX_IMAGE_SET_SOURCE_BYTES:
+                    raise LocalVisualSourceError
+
+            try:
+                stage_path, stage_parent, stage_capability, stage_fd = _create_windows_visual_stage(
+                    Path(self._boot_state.root.path.parent)
+                )
+                staged_stats: list[os.stat_result] = []
+                source_digests: list[str] = []
+                for index, pinned in enumerate(pinned_sources):
+                    pinned.verify()
+                    name = f"source_{index}"
+                    target_path = stage_path / name
+                    target = -1
+                    target_capability = None
+                    try:
+                        target, target_capability = open_private_file(
+                            target_path,
+                            create=True,
+                            read_write=True,
+                            exclusive=True,
+                            expected_parent=stage_capability,
+                        )
+                        remaining = pinned.before.st_size
+                        offset = 0
+                        digest = hashlib.sha256()
+                        while remaining:
+                            chunk = portable_pread(
+                                pinned.fd,
+                                min(64 * 1024, remaining),
+                                offset,
+                            )
+                            if not chunk or len(chunk) > remaining:
+                                raise LocalVisualSourceError
+                            digest.update(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(target, view)
+                                if written <= 0:
+                                    raise OSError
+                                view = view[written:]
+                            remaining -= len(chunk)
+                            offset += len(chunk)
+                        pinned.verify()
+                        os.fsync(target)
+                        staged_stat = os.fstat(target)
+                        recaptured = capture_windows_fd(
+                            target,
+                            directory=False,
+                            generation_token=target_capability.generation_token,
+                        )
+                        attributes = int(getattr(staged_stat, "st_file_attributes", 0) or 0)
+                        if (
+                            recaptured != target_capability
+                            or not stat.S_ISREG(staged_stat.st_mode)
+                            or stat.S_ISLNK(staged_stat.st_mode)
+                            or bool(attributes & 0x400)
+                            or staged_stat.st_nlink != 1
+                            or staged_stat.st_size != pinned.before.st_size
+                        ):
+                            raise LocalVisualSourceError
+                        staged_stats.append(staged_stat)
+                        source_digests.append(digest.hexdigest())
+                        staged.append((target_path, target_capability))
+                    finally:
+                        if target >= 0:
+                            with contextlib.suppress(OSError):
+                                os.close(target)
+                validate_windows_path(stage_capability, directory=True)
+                observed_names = tuple(
+                    entry.name for entry in os.scandir(windows_extended_path(stage_capability.path))
+                )
+                expected_names = tuple(f"source_{index}" for index in range(len(staged)))
+                if len(observed_names) != len(expected_names) or set(observed_names) != set(
+                    expected_names
+                ):
+                    raise LocalVisualSourceError
+                locator = bind_visual_staging_locator(
+                    canonical_request,
+                    os.fstat(stage_fd),
+                    tuple(staged_stats),
+                    tuple(source_digests),
+                )
+            except LocalVisualSourceError:
+                raise
+            except (OSError, TypeError, ValueError, VisualIngressError):
+                raise LocalVisualSourceError from None
+
+            response = self._call(
+                "visual_inputs.seal",
+                {
+                    "request": canonical_request.to_mapping(),
+                    "locator": locator,
+                },
+                request_id=request_id,
+                descriptor=stage_fd,
+            )
+            if response.error is None:
+                try:
+                    validate_seal_result(response.result)
+                except VisualIngressError:
+                    self.close()
+                    raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+            return response
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            cleanup_failed = False
+            for pinned in reversed(pinned_sources):
+                pinned.close()
+            if stage_capability is not None:
+                for path, capability in reversed(staged):
+                    try:
+                        delete_windows_file(
+                            path,
+                            parent=stage_capability,
+                            expected=capability,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    except (OSError, TypeError, ValueError):
+                        cleanup_failed = True
+                try:
+                    remaining_names = tuple(
+                        entry.name
+                        for entry in os.scandir(windows_extended_path(stage_capability.path))
+                    )
+                except (OSError, TypeError, ValueError):
+                    cleanup_failed = True
+                else:
+                    if remaining_names:
+                        cleanup_failed = True
+            if stage_fd >= 0:
+                try:
+                    os.close(stage_fd)
+                except OSError:
+                    cleanup_failed = True
+            if stage_path is not None and stage_capability is not None and not cleanup_failed:
+                try:
+                    if stage_parent is None:
+                        delete_windows_directory_capability(stage_capability)
+                    else:
+                        delete_windows_directory(
+                            stage_path,
+                            parent=stage_parent,
+                            expected=stage_capability,
+                        )
+                except (OSError, TypeError, ValueError):
+                    cleanup_failed = True
             if cleanup_failed and not active_error:
                 raise DaemonError(DaemonErrorCode.UNAVAILABLE)
 

@@ -6,7 +6,6 @@ import ctypes
 import errno
 import hashlib
 import json
-import os
 import re
 import secrets
 import sys
@@ -16,7 +15,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from vibecad import _file_compat
 from vibecad.interaction.storage import SafeRoot, StorageFailure
+from vibecad.interaction.storage import os as _storage_os
 from vibecad.visual.admission_inputs import (
     MAX_VISUAL_ADMISSION_INPUT_BYTES,
     VisualAdmissionInputBundle,
@@ -42,6 +43,8 @@ from vibecad.visual.drafts import (
 from vibecad.visual.reconstruction import ReconstructionStatus
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.lease import LeaseError, LeaseErrorCode, ResourceLease, ResourceLeaseManager
+
+os = _storage_os
 
 MAX_RECONSTRUCTION_DRAFT_INVOCATIONS = MAX_RECONSTRUCTION_PROVIDER_INVOCATIONS
 
@@ -285,12 +288,33 @@ def _stat_at(parent_fd: int, name: str) -> os.stat_result | None:
         return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except PermissionError:
+        _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
     except (OSError, StorageFailure):
         _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
+
+
+def _stable_file_observation(info: os.stat_result) -> tuple[int, ...]:
+    common = (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+    )
+    if sys.platform == "win32":
+        # CRT fstat and name-based stat derive ChangeTime through different
+        # Win32 information classes and can legitimately differ by one clock
+        # quantum.  Identity, protected DACL and reparse safety are already
+        # validated by the storage adapter on both observations.
+        return common
+    return common + (info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _hash_fd(fd: int, expected: os.stat_result, *, size: int) -> str:
@@ -300,7 +324,7 @@ def _hash_fd(fd: int, expected: os.stat_result, *, size: int) -> str:
     offset = 0
     while offset < size:
         try:
-            chunk = os.pread(fd, min(64 * 1024, size - offset), offset)
+            chunk = _file_compat.pread(fd, min(64 * 1024, size - offset), offset)
         except OSError:
             _raise(ReconstructionDraftStoreErrorCode.IO_ERROR)
         if not chunk:
@@ -308,27 +332,7 @@ def _hash_fd(fd: int, expected: os.stat_result, *, size: int) -> str:
         digest.update(chunk)
         offset += len(chunk)
     after = os.fstat(fd)
-    if (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_uid,
-        after.st_gid,
-        after.st_nlink,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ) != (
-        expected.st_dev,
-        expected.st_ino,
-        expected.st_mode,
-        expected.st_uid,
-        expected.st_gid,
-        expected.st_nlink,
-        expected.st_size,
-        expected.st_mtime_ns,
-        expected.st_ctime_ns,
-    ):
+    if _stable_file_observation(after) != _stable_file_observation(expected):
         _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
     return digest.hexdigest()
 
@@ -374,21 +378,7 @@ def _write_exclusive(
                 or _hash_fd(fd, after, size=len(raw)) != hashlib.sha256(raw).hexdigest()
             ):
                 _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
-            if (
-                current.st_mode,
-                current.st_uid,
-                current.st_gid,
-                current.st_nlink,
-                current.st_mtime_ns,
-                current.st_ctime_ns,
-            ) != (
-                after.st_mode,
-                after.st_uid,
-                after.st_gid,
-                after.st_nlink,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            ):
+            if _stable_file_observation(current) != _stable_file_observation(after):
                 _raise(ReconstructionDraftStoreErrorCode.UNSAFE_STORE)
             succeeded = True
         except ReconstructionDraftStoreError as error:
@@ -456,6 +446,14 @@ def _unlink_exact(
 
 
 def _rename_directory_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    if sys.platform == "win32":
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        return
     try:
         library = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":

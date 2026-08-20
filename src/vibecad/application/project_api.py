@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import math
+import ntpath
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -363,12 +365,29 @@ def _source_path(value: object) -> str:
         _raise(ProjectApiErrorCode.BUDGET_EXCEEDED, "/source_path")
     if _utf8_length(value, "/source_path") > _MAX_SOURCE_PATH_BYTES:
         _raise(ProjectApiErrorCode.BUDGET_EXCEEDED, "/source_path")
-    if not value.startswith("/") or value == "/" or value.endswith("/"):
-        _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
     if "\x00" in value:
         _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
-    components = value.split("/")[1:]
-    if not components or any(item in {"", ".", ".."} for item in components):
+    if value.startswith("/"):
+        if value == "/" or value.endswith("/"):
+            _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
+        components = value.split("/")[1:]
+        if not components or any(item in {"", ".", ".."} for item in components):
+            _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
+    elif sys.platform == "win32":
+        drive, tail = ntpath.splitdrive(value)
+        if (
+            not drive
+            or not tail.startswith("\\")
+            or tail == "\\"
+            or value.endswith(("/", "\\"))
+            or "/" in value
+            or ntpath.normpath(value) != value
+        ):
+            _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
+        components = tail.split("\\")[1:]
+        if not components or any(item in {"", ".", ".."} for item in components):
+            _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
+    else:
         _raise(ProjectApiErrorCode.INVALID_VALUE, "/source_path")
     return value
 

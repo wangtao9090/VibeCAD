@@ -6,10 +6,12 @@ import hashlib
 import importlib
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
+from vibecad import _file_compat
 from vibecad.execution.revisions import LocalRevisionStore, RevisionStoreRootTrust
 from vibecad.workflow.catalog import TaskCatalogService
 from vibecad.workflow.contracts import AcceptanceSpec, ModelProgram
@@ -25,6 +27,12 @@ from vibecad.workflow.store import TaskRunStore, TaskStoreRootTrust
 
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 STORE_KEY_DOMAIN = b"vibecad-task-store-key-v1\0"
+
+
+def _protect_private_file(path: Path) -> None:
+    os.chmod(path, 0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
 
 
 def _stores(tmp_path: Path):
@@ -201,7 +209,7 @@ def test_list_cursor_survives_reopen_but_conflicts_in_an_identical_other_store(
     for source in (tmp_path / "tasks").iterdir():
         target = other / "tasks" / source.name
         shutil.copyfile(source, target)
-        os.chmod(target, 0o600)
+        _protect_private_file(target)
     foreign = _service(
         TaskCatalogService(
             task_store=other_tasks,
@@ -258,7 +266,7 @@ def test_event_cursor_is_bound_to_task_and_store_namespace(tmp_path: Path):
     for source in (tmp_path / "tasks").iterdir():
         target = other / "tasks" / source.name
         shutil.copyfile(source, target)
-        os.chmod(target, 0o600)
+        _protect_private_file(target)
     foreign = _service(
         TaskCatalogService(
             task_store=other_tasks,

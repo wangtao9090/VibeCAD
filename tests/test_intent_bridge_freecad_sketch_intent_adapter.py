@@ -476,8 +476,9 @@ def test_real_freecad_geometry_batch_create_save_reopen_and_metadata_gate(
     target = tmp_path / "reviewed-sketch-geometries.FCStd"
     code = f"""
 import hashlib, os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import REVIEWED_SKETCH_FAMILY_MANIFEST
 from vibecad.parametric.freecad_sketch_intent_rules import (
@@ -571,8 +572,9 @@ def test_real_freecad_slot_point_tangent_batch_stress_is_deterministic() -> None
     source_root = Path(__file__).parents[1] / "src"
     code = f"""
 import hashlib, math, os, random, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import REVIEWED_SKETCH_FAMILY_MANIFEST
 from vibecad.parametric.freecad_sketch_intent_rules import (
@@ -664,8 +666,9 @@ def test_real_freecad_constraint_batch_solver_roundtrip_and_late_rollback(
     target = tmp_path / "reviewed-sketch-constraints.FCStd"
     code = f"""
 import hashlib, math, os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import REVIEWED_SKETCH_FAMILY_MANIFEST
 from vibecad.parametric.freecad_sketch_intent_rules import (

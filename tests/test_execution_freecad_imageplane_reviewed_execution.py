@@ -18,6 +18,7 @@ from tests.test_intent_bridge_freecad_imageplane_adapter import (
     _request,
     _Sink,
 )
+from vibecad import _file_compat
 from vibecad.engine.document_assets import DocumentAssetWorkspace
 from vibecad.execution.freecad_reviewed_intent_execution import (
     ReviewedIntentExecutionError,
@@ -163,6 +164,8 @@ def _roots(tmp_path: Path) -> tuple[Path, Path]:
     for path in (assets, staging):
         path.mkdir(mode=0o700)
         os.chmod(path, 0o700)
+        if os.name == "nt":
+            _file_compat.set_private_dacl(path)
     return assets, staging
 
 
@@ -213,6 +216,8 @@ def _fake_native_apply(
         retained = Path(bindings.document.TransientDir) / alias
         retained.write_bytes(payload)
         os.chmod(retained, 0o600)
+        if os.name == "nt":
+            _file_compat.set_private_dacl(retained)
         feature = bindings.document.getObject(imageplane_rules._object_name(plan))  # noqa: SLF001
         disposition = "updated"
         configured = _Feature(document=bindings.document, plan=plan, image_file=retained)

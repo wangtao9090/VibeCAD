@@ -135,11 +135,21 @@ def test_real_managed_freecad_wave_d_seven_by_seven_receipt_batch(
         pytest.fail("this slow gate must execute inside the managed FreeCAD process")
 
     native_root = tmp_path / "freecad-native-cache"
-    native_root.mkdir(mode=0o700)
-    native_root.chmod(0o700)
+    if sys.platform == "win32":
+        from vibecad._file_compat import ensure_private_directory
+
+        ensure_private_directory(native_root)
+    else:
+        native_root.mkdir(mode=0o700)
+        native_root.chmod(0o700)
     monkeypatch.setenv("FREECAD_USER_TEMP", str(native_root))
     assert "FreeCAD" not in sys.modules
-    sys.path.insert(0, str(Path(sys.prefix) / "lib"))
+    if sys.platform == "win32":
+        from vibecad.freecad_env import prepare_freecad_import
+
+        prepare_freecad_import()
+    else:
+        sys.path.insert(0, str(Path(sys.prefix) / "lib"))
     import FreeCAD  # type: ignore[import-not-found]  # noqa: PLC0415
 
     assert FreeCAD.GuiUp == 0

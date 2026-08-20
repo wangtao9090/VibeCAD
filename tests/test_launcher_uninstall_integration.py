@@ -5,27 +5,67 @@
 （只 mock Supervisor.run 阻断真 spawn，并在其中固化当时的解释器选择）。
 """
 
+import os
 import sys
 
 import pytest
 
 from vibecad import launcher, supervisor
-from vibecad.runtime import status
+from vibecad._file_compat import ensure_private_directory, open_private_file
+from vibecad.runtime import paths, status
 
 
 def test_pending_uninstall_real_delete_then_bootstrap(monkeypatch, tmp_path):
     home = tmp_path / "home"
     env = home / "runtime" / "mamba" / "envs" / "vibecad"
-    (env / "bin").mkdir(parents=True)
-    (env / "bin" / "python").write_text("")
     data = home / "data" / "projects"
-    data.mkdir(parents=True)
     durable = data / "HEAD"
-    durable.write_bytes(b"do not delete")
+    if sys.platform == "win32":
+        home_capability = ensure_private_directory(home)
+        current = home
+        current_capability = home_capability
+        for part in ("runtime", "mamba", "envs", "vibecad"):
+            current /= part
+            current_capability = ensure_private_directory(
+                current,
+                expected_parent=current_capability,
+            )
+        python = paths.env_python_for(env)
+        python_fd, _python_capability = open_private_file(
+            python,
+            expected_parent=current_capability,
+        )
+        os.close(python_fd)
+        current = home
+        current_capability = home_capability
+        for part in ("data", "projects"):
+            current /= part
+            current_capability = ensure_private_directory(
+                current,
+                expected_parent=current_capability,
+            )
+        durable_fd, _durable_capability = open_private_file(
+            durable,
+            expected_parent=current_capability,
+        )
+        os.write(durable_fd, b"do not delete")
+        os.close(durable_fd)
+    else:
+        paths.env_python_for(env).parent.mkdir(parents=True)
+        paths.env_python_for(env).write_text("")
+        data.mkdir(parents=True)
+        durable.write_bytes(b"do not delete")
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
     status.write_runtime_receipt()  # 删除前精确就绪：不删则 _server_cmd 必选 conda
-    (home / ".uninstall_requested").touch()
+    if sys.platform == "win32":
+        marker_fd, _marker_capability = open_private_file(
+            home / ".uninstall_requested",
+            expected_parent=home_capability,
+        )
+        os.close(marker_fd)
+    else:
+        (home / ".uninstall_requested").touch()
     monkeypatch.delenv("VIBECAD_SUPERVISOR_TEST_CMD", raising=False)
     monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
     routed = {}

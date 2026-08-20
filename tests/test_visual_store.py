@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 import stat
 from pathlib import Path
 
 import pytest
 
+from vibecad._file_compat import capture_windows_path, set_private_dacl
 from vibecad.application.data import ApplicationDataLayout
 from vibecad.runtime.contracts import RuntimeBudget, RuntimeLifecycleState
 from vibecad.visual.drafts import (
@@ -165,8 +167,12 @@ def test_create_load_replay_restart_and_private_permissions(tmp_path: Path) -> N
     assert _store(layout).load(draft.reconstruction_id) == draft
 
     directory = layout.reconstruction_drafts / draft.reconstruction_id
-    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
-    assert stat.S_IMODE((directory / "record.json").stat().st_mode) == 0o600
+    if os.name == "nt":
+        capture_windows_path(directory, directory=True)
+        capture_windows_path(directory / "record.json", directory=False)
+    else:
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE((directory / "record.json").stat().st_mode) == 0o600
 
 
 def test_load_payload_succeeds_after_restart_and_rejects_nonmembers(tmp_path: Path) -> None:
@@ -317,7 +323,10 @@ def test_generation_cas_publishes_and_cleans_immutable_payloads(tmp_path: Path) 
     )
     payload_path = layout.reconstruction_drafts / ready.reconstruction_id / payload.ref.filename
     assert payload_path.read_bytes() == payload.raw
-    assert stat.S_IMODE(payload_path.stat().st_mode) == 0o600
+    if os.name == "nt":
+        capture_windows_path(payload_path, directory=False)
+    else:
+        assert stat.S_IMODE(payload_path.stat().st_mode) == 0o600
 
     rejected = dataclasses.replace(
         completed,
@@ -488,6 +497,8 @@ def test_reserved_old_recovery_and_payload_tamper_fail_closed(tmp_path: Path) ->
     journal_path = directory / store_module._JOURNAL_NAME
     journal_path.write_bytes(journal.to_line())
     journal_path.chmod(0o600)
+    if os.name == "nt":
+        set_private_dacl(journal_path)
     assert store.load(ready.reconstruction_id) == ready
     assert not journal_path.exists()
 
@@ -554,9 +565,9 @@ def test_symlink_record_and_captured_root_swap_fail_closed(tmp_path: Path) -> No
     store.create(draft)
     directory = layout.reconstruction_drafts / draft.reconstruction_id
     record = directory / "record.json"
-    moved = directory / "moved.json"
+    moved = tmp_path / "moved.json"
     record.rename(moved)
-    record.symlink_to(moved.name)
+    record.symlink_to(moved)
     with pytest.raises(ReconstructionDraftStoreError) as error:
         store.load(draft.reconstruction_id)
     assert error.value.code is ReconstructionDraftStoreErrorCode.UNSAFE_STORE

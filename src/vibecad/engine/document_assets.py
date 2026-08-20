@@ -17,15 +17,26 @@ workspace is the bounded live-document extraction area.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from vibecad._file_compat import (
+    WindowsPathCapability,
+    capture_windows_path,
+    ensure_private_directory,
+    set_private_dacl,
+    validate_windows_path,
+)
+
 _MAX_CLEANUP_ENTRIES = 4096
 _MAX_CLEANUP_DEPTH = 16
 _MAX_ERROR_PATH_BYTES = 384
+_WINDOWS = sys.platform == "win32" and os.name == "nt"
 
 
 class DocumentAssetWorkspaceErrorCode(StrEnum):
@@ -71,6 +82,7 @@ class _DirectoryIdentity:
     path: Path
     device: int
     inode: int
+    windows_capability: WindowsPathCapability | None = None
 
 
 class _WorkspaceOwnership(StrEnum):
@@ -94,6 +106,20 @@ def _private_directory_identity(
 ) -> _DirectoryIdentity:
     if not isinstance(value, Path) or not value.is_absolute():
         _fail(DocumentAssetWorkspaceErrorCode.INVALID_INPUT, path)
+    if _WINDOWS:
+        absolute = Path(os.path.abspath(value))
+        if absolute != value:
+            _fail(error_code, path)
+        try:
+            capability = capture_windows_path(absolute, directory=True)
+        except (OSError, TypeError, ValueError, RuntimeError):
+            _fail(error_code, path)
+        return _DirectoryIdentity(
+            absolute,
+            capability.volume,
+            capability.file_id,
+            capability,
+        )
     try:
         info = value.lstat()
     except (OSError, ValueError, RuntimeError):
@@ -109,6 +135,20 @@ def _private_directory_identity(
 
 
 def _same_directory(identity: _DirectoryIdentity, path: str) -> bool:
+    if _WINDOWS:
+        capability = identity.windows_capability
+        if capability is None:
+            return False
+        try:
+            actual = Path(os.path.abspath(path))
+            expected = Path(capability.path)
+            if os.path.normcase(os.fspath(actual)) != os.path.normcase(
+                os.fspath(expected)
+            ):
+                return False
+            return validate_windows_path(capability, directory=True) == expected
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return False
     try:
         actual = Path(path)
         info = actual.lstat()
@@ -128,6 +168,25 @@ def _same_directory(identity: _DirectoryIdentity, path: str) -> bool:
 def _same_owned_directory(identity: _DirectoryIdentity, path: str) -> bool:
     """Match one owner-held inode after an allowed native rename."""
 
+    if _WINDOWS:
+        expected = identity.windows_capability
+        if expected is None:
+            return False
+        try:
+            actual_path = Path(os.path.abspath(path))
+            actual = capture_windows_path(
+                actual_path,
+                directory=True,
+                generation_token=expected.generation_token,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return False
+        return (
+            actual.volume == expected.volume
+            and actual.file_id == expected.file_id
+            and actual.owner_sid == expected.owner_sid
+            and actual.security_sha256 == expected.security_sha256
+        )
     try:
         actual = Path(path)
         info = actual.lstat()
@@ -160,6 +219,23 @@ def _empty_owned_directory_identity(
             empty = next(entries, None) is None
     except (OSError, TypeError, ValueError, RuntimeError):
         _fail(error_code, path)
+    if _WINDOWS:
+        attributes = int(getattr(info, "st_file_attributes", 0))
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or not empty
+        ):
+            _fail(error_code, path)
+        try:
+            # FreeCAD creates this empty child below an already-authenticated
+            # process-private root.  Make its inherited ACL explicit before it
+            # becomes a durable capability boundary.
+            set_private_dacl(directory)
+        except OSError:
+            _fail(error_code, path)
+        return _private_directory_identity(directory, path, error_code=error_code)
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISDIR(info.st_mode)
@@ -185,6 +261,28 @@ def _identity_exists_below_private_root(
                 if index > _MAX_CLEANUP_ENTRIES:
                     _fail(DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED, "/document/native_root")
                 info = entry.stat(follow_symlinks=False)
+                if _WINDOWS and int(
+                    getattr(info, "st_file_attributes", 0)
+                ) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    continue
+                if _WINDOWS:
+                    expected = identity.windows_capability
+                    if expected is None:
+                        continue
+                    try:
+                        actual = capture_windows_path(
+                            Path(entry.path),
+                            directory=True,
+                            generation_token=expected.generation_token,
+                        )
+                    except OSError:
+                        continue
+                    if (
+                        actual.volume == expected.volume
+                        and actual.file_id == expected.file_id
+                    ):
+                        return True
+                    continue
                 if info.st_dev == identity.device and info.st_ino == identity.inode:
                     return True
     except DocumentAssetWorkspaceError:
@@ -202,6 +300,47 @@ def _lexists(path: Path) -> bool:
     except OSError:
         return True
     return True
+
+
+def _create_private_directory(
+    parent: Path,
+    prefix: str,
+    *,
+    expected_parent: WindowsPathCapability | None,
+    error_code: DocumentAssetWorkspaceErrorCode,
+    error_path: str,
+) -> _DirectoryIdentity:
+    """Create one unguessable private directory without an ACL exposure window."""
+
+    if not _WINDOWS:
+        try:
+            directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+            os.chmod(directory, 0o700)
+        except (OSError, ValueError, RuntimeError):
+            _fail(error_code, error_path)
+        return _private_directory_identity(
+            directory,
+            error_path,
+            error_code=error_code,
+        )
+    for _ in range(16):
+        directory = parent / f"{prefix}{secrets.token_hex(16)}"
+        try:
+            capability = ensure_private_directory(
+                directory,
+                expected_parent=expected_parent,
+            )
+        except FileExistsError:
+            continue
+        except (OSError, TypeError, ValueError, RuntimeError):
+            _fail(error_code, error_path)
+        return _DirectoryIdentity(
+            directory,
+            capability.volume,
+            capability.file_id,
+            capability,
+        )
+    _fail(error_code, error_path)
 
 
 def _remove_private_tree(identity: _DirectoryIdentity) -> None:
@@ -229,15 +368,38 @@ def _remove_private_tree(identity: _DirectoryIdentity) -> None:
             child = Path(entry.path)
             try:
                 info = child.lstat()
+                if _WINDOWS and int(
+                    getattr(info, "st_file_attributes", 0)
+                ) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    _fail(
+                        DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED,
+                        "/workspace/cleanup",
+                    )
                 if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-                    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    if not _WINDOWS and (
+                        info.st_uid != os.geteuid() or info.st_mode & 0o077
+                    ):
                         _fail(
                             DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED,
                             "/workspace/cleanup",
                         )
+                    if _WINDOWS:
+                        set_private_dacl(child)
+                        child_identity = capture_windows_path(child, directory=True)
                     remove(child, depth + 1)
+                    if _WINDOWS:
+                        validate_windows_path(child_identity, directory=True)
                     child.rmdir()
                 else:
+                    if _WINDOWS:
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                            _fail(
+                                DocumentAssetWorkspaceErrorCode.CLEANUP_FAILED,
+                                "/workspace/cleanup",
+                            )
+                        set_private_dacl(child)
+                        child_identity = capture_windows_path(child, directory=False)
+                        validate_windows_path(child_identity, directory=False)
                     child.unlink()
             except DocumentAssetWorkspaceError:
                 raise
@@ -289,23 +451,14 @@ class DocumentAssetWorkspace:
             return configured
         owned = self._owned_root
         if owned is None:
-            try:
-                path = Path(tempfile.mkdtemp(prefix=".vibecad-document-assets-"))
-                os.chmod(path, 0o700)
-            except (OSError, ValueError, RuntimeError):
-                _fail(DocumentAssetWorkspaceErrorCode.ATTACH_FAILED, "/workspace/root")
-            try:
-                owned = _private_directory_identity(
-                    path,
-                    "/workspace/root",
-                    error_code=DocumentAssetWorkspaceErrorCode.ATTACH_FAILED,
-                )
-            except DocumentAssetWorkspaceError:
-                try:
-                    path.rmdir()
-                except OSError:
-                    pass
-                raise
+            parent = Path(os.path.abspath(tempfile.gettempdir()))
+            owned = _create_private_directory(
+                parent,
+                ".vibecad-document-assets-",
+                expected_parent=None,
+                error_code=DocumentAssetWorkspaceErrorCode.ATTACH_FAILED,
+                error_path="/workspace/root",
+            )
             self._owned_root = owned
         elif not _same_directory(owned, str(owned.path)):
             _fail(DocumentAssetWorkspaceErrorCode.PRECONDITION_FAILED, "/workspace/root")
@@ -378,6 +531,12 @@ class DocumentAssetWorkspace:
                 "/document/native_root",
                 error_code=DocumentAssetWorkspaceErrorCode.PRECONDITION_FAILED,
             )
+            native_path = Path(os.path.abspath(current)) if _WINDOWS else Path(current)
+            if native_path.parent != native_root.path:
+                _fail(
+                    DocumentAssetWorkspaceErrorCode.PRECONDITION_FAILED,
+                    "/document/transient_dir",
+                )
             native_directory = _empty_owned_directory_identity(
                 current,
                 "/document/transient_dir",
@@ -402,13 +561,14 @@ class DocumentAssetWorkspace:
         directory: Path | None = None
         identity: _DirectoryIdentity | None = None
         try:
-            directory = Path(tempfile.mkdtemp(prefix=".document-", dir=root.path))
-            os.chmod(directory, 0o700)
-            identity = _private_directory_identity(
-                directory,
-                "/workspace/directory",
+            identity = _create_private_directory(
+                root.path,
+                ".document-",
+                expected_parent=root.windows_capability,
                 error_code=DocumentAssetWorkspaceErrorCode.ATTACH_FAILED,
+                error_path="/workspace/directory",
             )
+            directory = identity.path
             document.TransientDir = str(directory)
             if not _same_directory(identity, document.TransientDir):
                 _fail(DocumentAssetWorkspaceErrorCode.ATTACH_FAILED, "/document/transient_dir")

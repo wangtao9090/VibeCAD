@@ -6,6 +6,7 @@ import contextlib
 import copy
 import dataclasses
 import hashlib
+import io
 import json
 import math
 import os
@@ -40,6 +41,7 @@ from tests.test_execution_freecad_partdesign_primitive_reviewed_execution import
 from tests.test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
 from tests.test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
 from tests.test_reviewed_part_csg_product import reviewed_csg_program
+from vibecad import _file_compat
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
@@ -1148,6 +1150,15 @@ def _checkpointed(session: object, root: Path) -> CheckpointedCandidate:
     )
 
 
+def _prepare_empty_private_artifact(path: Path) -> None:
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path.parent)
+    path.touch(mode=0o600)
+    path.chmod(0o600)
+    if sys.platform == "win32":
+        _file_compat.set_private_dacl(path)
+
+
 def _artifact(path: Path, artifact_id: str, artifact_format: str) -> RevisionArtifactRef:
     import hashlib
 
@@ -1759,6 +1770,231 @@ def test_create_load_checkpoint_and_close_use_public_session_surface(
     assert made[1].close_calls == 1
 
 
+def test_long_windows_load_keeps_the_short_bridge_until_executor_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.FCStd"
+    short = tmp_path / "bridge.FCStd"
+    for path in (source, short):
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("Document.xml", "<Document />")
+    session = _FakeSession()
+    manager = SimpleNamespace()
+    owner = executor_module._WindowsCadBridgeOwner(
+        manager=manager,
+        directory_capability=object(),
+        source_directory_capability=object(),
+        source_identity=object(),
+        staged_identity=object(),
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+    monkeypatch.setattr(executor_module, "_windows_cad_path_needs_bridge", lambda _path: True)
+    monkeypatch.setattr(
+        executor_module,
+        "_stage_windows_cad_input",
+        lambda path: (short, owner) if path == source else pytest.fail("unexpected source"),
+    )
+    monkeypatch.setattr(
+        executor_module._WindowsCadBridgeOwner,
+        "validate_after_load",
+        lambda self: events.append("validate"),
+    )
+
+    def close_bridge(self) -> None:
+        events.append("bridge-close")
+        self.closed = True
+
+    monkeypatch.setattr(executor_module._WindowsCadBridgeOwner, "close", close_bridge)
+    executor = InProcessCadExecutor(store=_store())
+
+    loaded = executor.load_fcstd(source)
+
+    assert loaded is session
+    assert session.loaded == [short]
+    assert events == ["validate"]
+    assert getattr(session, executor_module._WINDOWS_CAD_BRIDGE_ATTRIBUTE) is owner
+
+    executor.close(session)
+
+    assert session.close_calls == 1
+    assert events == ["validate", "bridge-close"]
+    assert not hasattr(session, executor_module._WINDOWS_CAD_BRIDGE_ATTRIBUTE)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows path capabilities")
+@pytest.mark.windows_contract
+def test_windows_cad_bridge_accepts_verbatim_source_and_revalidates_private_file_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_directory = tmp_path / "source"
+    bridge_parent = tmp_path / "bridge-parent"
+    _file_compat.ensure_private_directory(source_directory, exclusive=True)
+    _file_compat.ensure_private_directory(bridge_parent, exclusive=True)
+    source = source_directory / "model.FCStd"
+    payload_buffer = io.BytesIO()
+    with zipfile.ZipFile(payload_buffer, "w") as archive:
+        archive.writestr("Document.xml", "<Document />")
+    payload = payload_buffer.getvalue()
+    descriptor, _capability = _file_compat.open_private_file(
+        source,
+        create=True,
+        read_write=True,
+        exclusive=True,
+    )
+    try:
+        assert os.write(descriptor, payload) == len(payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    monkeypatch.setenv("FREECAD_USER_TEMP", str(bridge_parent))
+
+    verbatim_source = Path(_file_compat.windows_extended_path(source))
+    assert os.fspath(verbatim_source).startswith("\\\\?\\")
+
+    staged, owner = executor_module._stage_windows_cad_input(verbatim_source)
+    staged_directory = staged.parent
+
+    assert staged != source
+    assert staged.read_bytes() == payload
+    assert executor_module._windows_path_units(staged) < (
+        executor_module._WINDOWS_CAD_LEGACY_PATH_BUDGET
+    )
+    owner.validate_after_load()
+    assert source.read_bytes() == payload
+    _file_compat.delete_windows_file(
+        source,
+        parent=owner.source_directory_capability,
+        expected=owner.source_identity.capability,
+    )
+    owner.close()
+
+    assert not source.exists()
+    assert not staged_directory.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows path capabilities")
+@pytest.mark.windows_contract
+def test_windows_checkpoint_uses_short_bridge_for_verbatim_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bridge_parent = tmp_path / "bridge-parent"
+    _file_compat.ensure_private_directory(bridge_parent, exclusive=True)
+    parent = tmp_path / ("destination-" + "a" * 72)
+    parent_capability = _file_compat.ensure_private_directory(parent, exclusive=True)
+    while executor_module._windows_path_units(parent / "model.FCStd") < 230:
+        child = parent / ("nested-" + "b" * 72)
+        parent_capability = _file_compat.ensure_private_directory(
+            child,
+            expected_parent=parent_capability,
+            exclusive=True,
+        )
+        parent = child
+    destination = parent / "model.FCStd"
+    descriptor, _destination_capability = _file_compat.open_private_file(
+        destination,
+        create=True,
+        read_write=True,
+        exclusive=True,
+        expected_parent=parent_capability,
+    )
+    os.close(descriptor)
+    verbatim_destination = Path(_file_compat.windows_extended_path(destination))
+    monkeypatch.setenv("FREECAD_USER_TEMP", str(bridge_parent))
+    session = _FakeSession()
+
+    InProcessCadExecutor(store=_store()).checkpoint_fcstd(
+        session,
+        verbatim_destination,
+    )
+
+    assert executor_module._read_artifact(verbatim_destination, "fcstd").size_bytes > 0
+    assert len(session.doc.save_calls) == 1
+    assert executor_module._windows_path_units(Path(session.doc.save_calls[0])) < (
+        executor_module._WINDOWS_CAD_LEGACY_PATH_BUDGET
+    )
+    assert tuple(bridge_parent.iterdir()) == ()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows path capabilities")
+@pytest.mark.windows_contract
+def test_windows_step_export_uses_short_bridge_for_verbatim_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bridge_parent = tmp_path / "bridge-parent"
+    _file_compat.ensure_private_directory(bridge_parent, exclusive=True)
+    parent = tmp_path / ("destination-" + "a" * 72)
+    parent_capability = _file_compat.ensure_private_directory(parent, exclusive=True)
+    while executor_module._windows_path_units(parent / "model.step") < 230:
+        child = parent / ("nested-" + "b" * 72)
+        parent_capability = _file_compat.ensure_private_directory(
+            child,
+            expected_parent=parent_capability,
+            exclusive=True,
+        )
+        parent = child
+    step_path = parent / "model.step"
+    descriptor, _step_capability = _file_compat.open_private_file(
+        step_path,
+        create=True,
+        read_write=True,
+        exclusive=True,
+        expected_parent=parent_capability,
+    )
+    os.close(descriptor)
+    model_path = parent / "model.FCStd"
+    verbatim_step = Path(_file_compat.windows_extended_path(step_path))
+    verbatim_model = Path(_file_compat.windows_extended_path(model_path))
+    monkeypatch.setenv("FREECAD_USER_TEMP", str(bridge_parent))
+    session = _FakeSession()
+
+    executor_module._export_session_step(
+        session=session,
+        model_path=verbatim_model,
+        step_path=verbatim_step,
+    )
+
+    assert executor_module._read_artifact(verbatim_step, "step").size_bytes > 0
+    assert len(session.shape.export_calls) == 1
+    assert executor_module._windows_path_units(Path(session.shape.export_calls[0])) < (
+        executor_module._WINDOWS_CAD_LEGACY_PATH_BUDGET
+    )
+    assert tuple(bridge_parent.iterdir()) == ()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows path capabilities")
+@pytest.mark.windows_contract
+def test_windows_failed_checkpoint_cleanup_requires_exact_private_file_id(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "private"
+    parent_capability = _file_compat.ensure_private_directory(parent, exclusive=True)
+    partial = parent / ".vibecad-checkpoint-partial.FCStd"
+    descriptor, _partial_capability = _file_compat.open_private_file(
+        partial,
+        create=True,
+        read_write=True,
+        exclusive=True,
+        expected_parent=parent_capability,
+    )
+    try:
+        assert os.write(descriptor, b"partial") == len(b"partial")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+    executor_module._remove_failed_artifact(
+        Path(_file_compat.windows_extended_path(partial)),
+    )
+
+    assert not partial.exists()
+
+
 def test_create_empty_bootstraps_a_trusted_document_outside_the_model_program(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1894,17 +2130,49 @@ def test_checkpoint_replace_failure_preserves_existing_candidate_and_cleans_temp
         archive.writestr("Document.xml", "<Baseline />")
     baseline = checkpoint.read_bytes()
 
-    def reject_replace(source: Path, destination: Path) -> None:
+    def reject_replace(source: Path, destination: Path, **_kwargs: object) -> None:
         assert source != checkpoint
         assert destination == checkpoint
         raise OSError("replace failed")
 
-    monkeypatch.setattr(executor_module.os, "replace", reject_replace)
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            executor_module._file_compat,
+            "replace_windows_file",
+            reject_replace,
+        )
+    else:
+        monkeypatch.setattr(executor_module.os, "replace", reject_replace)
     with pytest.raises(ExecutorError) as caught:
         InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
 
     assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
     assert checkpoint.read_bytes() == baseline
+    assert len(session.doc.save_calls) == 1
+    assert not Path(session.doc.save_calls[0]).exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows path capabilities")
+@pytest.mark.windows_contract
+def test_windows_short_checkpoint_publishes_by_exact_file_id(tmp_path: Path) -> None:
+    _file_compat.protect_windows_path(tmp_path, directory=True)
+    checkpoint = Path(os.path.abspath(tmp_path / "model.FCStd"))
+    descriptor, before = _file_compat.open_private_file(
+        checkpoint,
+        create=True,
+        read_write=True,
+        exclusive=True,
+        expected_parent=_file_compat.capture_windows_path(tmp_path, directory=True),
+    )
+    os.close(descriptor)
+    session = _FakeSession()
+
+    InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
+
+    after = _file_compat.capture_windows_path(checkpoint, directory=False)
+    assert (after.volume, after.file_id) != (before.volume, before.file_id)
+    assert _file_compat.validate_windows_path(after, directory=False) == checkpoint
+    assert executor_module._read_artifact(checkpoint, "fcstd").size_bytes > 0
     assert len(session.doc.save_calls) == 1
     assert not Path(session.doc.save_calls[0]).exists()
 
@@ -3756,6 +4024,69 @@ def test_execute_program_adopts_reviewed_offset_non_solids(
     assert observation["volume_mm3"] == 0.0
 
 
+def _run_real_freecad_script(
+    runtime_python: Path,
+    code: str,
+    *,
+    tmp_path: Path,
+    timeout: int = 180,
+) -> subprocess.CompletedProcess[str]:
+    """Run a large real-engine probe without exceeding CreateProcess limits."""
+
+    args = [str(runtime_python), "-c", code]
+    environment: dict[str, str] | None = None
+    script_capability = None
+    freecad_temp_capability = None
+    freecad_temp: Path | None = None
+    if sys.platform == "win32":
+        script_root = tmp_path / "windows-real-freecad-script"
+        root_capability = _file_compat.ensure_private_directory(
+            script_root,
+            exclusive=True,
+        )
+        script = script_root / "probe.py"
+        descriptor, script_capability = _file_compat.open_private_file(
+            script,
+            create=True,
+            read_write=True,
+            exclusive=True,
+            expected_parent=root_capability,
+        )
+        try:
+            payload = code.encode("utf-8")
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(descriptor, payload[offset:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _file_compat.validate_windows_path(script_capability, directory=False)
+        freecad_temp = script_root / "freecad-temp"
+        freecad_temp_capability = _file_compat.ensure_private_directory(
+            freecad_temp,
+            expected_parent=root_capability,
+            exclusive=True,
+        )
+        environment = dict(os.environ)
+        environment["FREECAD_USER_TEMP"] = str(freecad_temp)
+        args = [str(runtime_python), "-B", str(script)]
+
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=environment,
+    )
+    if script_capability is not None:
+        _file_compat.validate_windows_path(script_capability, directory=False)
+        assert freecad_temp is not None
+        assert freecad_temp_capability is not None
+        _file_compat.validate_windows_path(freecad_temp_capability, directory=True)
+        assert tuple(freecad_temp.iterdir()) == ()
+    return result
+
+
 @pytest.mark.slow
 def test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_duplicate(
     tmp_path: Path,
@@ -3797,7 +4128,11 @@ def test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_d
         + "AcceptanceSpec, ModelCommand, ModelProgram, ValueSource\n"
         + f"root = Path({str(tmp_path)!r})\n"
         + "native_root = root / 'freecad-native-cache'\n"
-        + "native_root.mkdir(mode=0o700)\n"
+        + "if os.name == 'nt':\n"
+        + "    from vibecad._file_compat import ensure_private_directory\n"
+        + "    ensure_private_directory(native_root, exclusive=True)\n"
+        + "else:\n"
+        + "    native_root.mkdir(mode=0o700)\n"
         + "os.environ['FREECAD_USER_TEMP'] = str(native_root)\n"
         + f"reviewed_mappings = {reviewed_mappings!r}\n"
         + f"expected_types = {expected_types!r}\n"
@@ -3852,11 +4187,10 @@ def test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_d
         + "    session.close_document()\n"
         + "assert tuple(native_root.iterdir()) == ()\n"
     )
-    result = subprocess.run(
-        [str(runtime_python), "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=180,
+    result = _run_real_freecad_script(
+        runtime_python,
+        code,
+        tmp_path=tmp_path,
     )
     assert result.returncode == 0, result.stderr
     assert "REAL_REVIEWED_PRIMITIVES_OK" in result.stdout
@@ -4720,10 +5054,17 @@ def test_real_freecad_component_program_checkpoints_reloads_and_exports_step(
         + "    assert abs(shape.volume_mm3 - 1500.0) < 1e-7\n"
         + "    assert abs(shape.bbox_mm[0] - 25.0) < 1e-7\n"
         + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
-        + "    (root / 'model.step').touch(mode=0o600)\n"
+        + "    step_path = root / 'model.step'\n"
+        + "    if sys.platform == 'win32':\n"
+        + "        from vibecad._file_compat import open_private_file\n"
+        + "        descriptor, _ = open_private_file(step_path, exclusive=True)\n"
+        + "        import os\n"
+        + "        os.close(descriptor)\n"
+        + "    else:\n"
+        + "        step_path.touch(mode=0o600)\n"
         + "    _export_session_step(session=session, model_path=root / 'model.FCStd',\n"
-        + "        step_path=root / 'model.step')\n"
-        + "    assert (root / 'model.step').stat().st_size > 0\n"
+        + "        step_path=step_path)\n"
+        + "    assert step_path.stat().st_size > 0\n"
         + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
         + "    assert _component_observations(loaded) == components\n"
         + "    assert _interference_observations(loaded) == interferences\n"
@@ -4734,11 +5075,10 @@ def test_real_freecad_component_program_checkpoints_reloads_and_exports_step(
         + "        loaded.close_document()\n"
         + "    session.close_document()\n"
     )
-    result = subprocess.run(
-        [str(runtime_python), "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=180,
+    result = _run_real_freecad_script(
+        runtime_python,
+        code,
+        tmp_path=tmp_path,
     )
     assert result.returncode == 0, result.stderr
     assert "REAL_COMPONENT_PROGRAM_OK" in result.stdout
@@ -4764,7 +5104,7 @@ def test_real_freecad_native_booleans_edit_reopen_and_export_step(
         + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
         + "from vibecad.execution.executor import (\n"
         + "    InProcessCadExecutor, _entity_observations, _export_session_step, "
-        + "_shape_observation,\n"
+        + "_same_import_observations, _shape_observation,\n"
         + ")\n"
         + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
         + "from vibecad.workflow.contracts import (\n"
@@ -4886,10 +5226,17 @@ def test_real_freecad_native_booleans_edit_reopen_and_export_step(
         + "    shape_before = _shape_observation(session)\n"
         + "    assert shape_before.solid_count == 4, shape_before.to_mapping()\n"
         + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
-        + "    (root / 'model.step').touch(mode=0o600)\n"
+        + "    step_path = root / 'model.step'\n"
+        + "    if sys.platform == 'win32':\n"
+        + "        from vibecad._file_compat import open_private_file\n"
+        + "        descriptor, _ = open_private_file(step_path, exclusive=True)\n"
+        + "        import os\n"
+        + "        os.close(descriptor)\n"
+        + "    else:\n"
+        + "        step_path.touch(mode=0o600)\n"
         + "    _export_session_step(session=session, model_path=root / 'model.FCStd',\n"
-        + "        step_path=root / 'model.step')\n"
-        + "    assert (root / 'model.step').stat().st_size > 0\n"
+        + "        step_path=step_path)\n"
+        + "    assert step_path.stat().st_size > 0\n"
         + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
         + "    loaded_observed = _entity_observations(loaded)\n"
         + "    assert [item.object_id for item in loaded_observed] == "
@@ -4901,7 +5248,10 @@ def test_real_freecad_native_booleans_edit_reopen_and_export_step(
         + "for item, loaded_item in zip(observed, loaded_observed))\n"
         + "    assert all(item.parameters == loaded_item.parameters "
         + "for item, loaded_item in zip(observed, loaded_observed))\n"
-        + "    assert all(item.placement == loaded_item.placement "
+        + "    if sys.platform == 'win32':\n"
+        + "        assert _same_import_observations(loaded_observed, observed)\n"
+        + "    else:\n"
+        + "        assert all(item.placement == loaded_item.placement "
         + "for item, loaded_item in zip(observed, loaded_observed))\n"
         + "    assert all(item.valid_shape == loaded_item.valid_shape "
         + "and item.solid_count == loaded_item.solid_count "
@@ -4928,11 +5278,10 @@ def test_real_freecad_native_booleans_edit_reopen_and_export_step(
         + "        loaded.close_document()\n"
         + "    session.close_document()\n"
     )
-    result = subprocess.run(
-        [str(runtime_python), "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=180,
+    result = _run_real_freecad_script(
+        runtime_python,
+        code,
+        tmp_path=tmp_path,
     )
     assert result.returncode == 0, result.stderr
     assert "REAL_NATIVE_BOOLEANS_OK" in result.stdout
@@ -5006,9 +5355,16 @@ def test_real_freecad_component_boolean_owner_root_reopen_and_export_step(
         + "    assert len(components) == 1 and components[0].member_object_ids == "
         + "tuple(sorted(item.object_id for item in observed if item.object_type != 'App::Part'))\n"
         + "    executor.checkpoint_fcstd(session, root/'model.FCStd')\n"
-        + "    (root/'model.step').touch(mode=0o600)\n"
+        + "    step_path = root / 'model.step'\n"
+        + "    if sys.platform == 'win32':\n"
+        + "        from vibecad._file_compat import open_private_file\n"
+        + "        descriptor, _ = open_private_file(step_path, exclusive=True)\n"
+        + "        import os\n"
+        + "        os.close(descriptor)\n"
+        + "    else:\n"
+        + "        step_path.touch(mode=0o600)\n"
         + "    _export_session_step(session=session, model_path=root/'model.FCStd', "
-        + "step_path=root/'model.step')\n"
+        + "step_path=step_path)\n"
         + "    loaded = executor.load_fcstd(root/'model.FCStd')\n"
         + "    assert [item.object_id for item in _entity_observations(loaded)] == "
         + "[item.object_id for item in observed]\n"
@@ -5019,11 +5375,10 @@ def test_real_freecad_component_boolean_owner_root_reopen_and_export_step(
         + "    if loaded is not None: loaded.close_document()\n"
         + "    session.close_document()\n"
     )
-    result = subprocess.run(
-        [str(runtime_python), "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=180,
+    result = _run_real_freecad_script(
+        runtime_python,
+        code,
+        tmp_path=tmp_path,
     )
     assert result.returncode == 0, result.stderr
     assert "REAL_COMPONENT_BOOLEAN_OK" in result.stdout
@@ -5732,8 +6087,7 @@ def test_controlled_step_export_uses_only_store_derived_exact_path(
 ) -> None:
     shape = _FakeShape()
     candidate = _checkpointed(_FakeSession(shape), tmp_path)
-    candidate.step_path.touch(mode=0o600)
-    candidate.step_path.chmod(0o600)
+    _prepare_empty_private_artifact(candidate.step_path)
 
     def candidate_artifact_path(
         self: LocalRevisionStore,
@@ -5885,8 +6239,7 @@ def test_step_export_failure_is_redacted_and_not_retried(
 ) -> None:
     shape = _FakeShape(export_error=RuntimeError("secret-export-path"))
     candidate = _checkpointed(_FakeSession(shape), tmp_path)
-    candidate.step_path.touch(mode=0o600)
-    candidate.step_path.chmod(0o600)
+    _prepare_empty_private_artifact(candidate.step_path)
     monkeypatch.setattr(
         LocalRevisionStore,
         "candidate_artifact_path",

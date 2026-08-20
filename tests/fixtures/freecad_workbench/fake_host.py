@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import queue
 import tempfile
 import threading
@@ -8,7 +9,15 @@ import time
 from pathlib import Path
 from types import ModuleType
 
+from vibecad._file_compat import (
+    capture_windows_path,
+    ensure_private_directory,
+    open_private_file,
+    set_private_dacl,
+)
+
 _MAIN_THREAD_ID = threading.get_ident()
+_DEFAULT_EVENT_TIMEOUT = 5.0 if os.name == "nt" else 1.0
 
 
 def _require_main_thread() -> None:
@@ -269,6 +278,16 @@ class FakeLocalAgentClient:
             self.materialized_checkout_root = Path(self._materialized_checkout_tmp.name).resolve()
         else:
             self.materialized_checkout_root = materialized_checkout_root.resolve()
+        self._materialized_root_capability = None
+        if os.name == "nt":
+            if not self.materialized_checkout_root.exists():
+                ensure_private_directory(self.materialized_checkout_root)
+            else:
+                set_private_dacl(self.materialized_checkout_root)
+            self._materialized_root_capability = capture_windows_path(
+                self.materialized_checkout_root,
+                directory=True,
+            )
         self.materialized_model_bytes = bytes(materialized_model_bytes)
         self.created_thread_id = threading.get_ident()
         self.closed_thread_id: int | None = None
@@ -493,8 +512,26 @@ class FakeLocalAgentClient:
         checkout_id = "checkout_" + identifier
         grant_id = "file_grant_" + identifier
         path = (self.materialized_checkout_root / checkout_id / "model.FCStd").resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(self.materialized_model_bytes)
+        if os.name == "nt":
+            directory_capability = ensure_private_directory(
+                path.parent,
+                expected_parent=self._materialized_root_capability,
+            )
+            descriptor, _file_capability = open_private_file(
+                path,
+                create=True,
+                read_write=True,
+                expected_parent=directory_capability,
+            )
+            with os.fdopen(descriptor, "r+b") as stream:
+                stream.seek(0)
+                stream.truncate(0)
+                stream.write(self.materialized_model_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.materialized_model_bytes)
         self.checkout_paths[checkout_id] = path
         local_path = str(path)
         model_digest = hashlib.sha256(self.materialized_model_bytes).hexdigest()
@@ -1224,7 +1261,7 @@ def install_fake_pyside(
 def pump_main_events(
     predicate: object,
     *,
-    timeout: float = 1.0,
+    timeout: float = _DEFAULT_EVENT_TIMEOUT,
 ) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():

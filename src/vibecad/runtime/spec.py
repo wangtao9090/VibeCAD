@@ -8,11 +8,19 @@ VIBECAD_VERSION = __version__
 RECEIPT_SCHEMA = 1
 SERVER_PACKAGE_EPOCH = 4
 MCP_VERSION = "1.27.2"
-PUBLIC_SURFACE_SHA256 = "87064c802e64a5c1d11d1a0fdafe898557f50efce74983a06c2c9a0421506059"
+PUBLIC_SURFACE_SHA256 = "10a6dc3a9d9e4a3c2ecd418ee4747f99fae0eb7e79080d1efb611e71bb4d8af6"
 PYTHON_VERSION = (3, 12)
 FREECAD_VERSION = (1, 1, 0)
 PYTHON_PIN = f"python={PYTHON_VERSION[0]}.{PYTHON_VERSION[1]}"
 FREECAD_PIN = "freecad=" + ".".join(map(str, FREECAD_VERSION))
+# conda-forge build 1 shortens Viskores Windows header names.  The exact build
+# is part of the legacy-MAX_PATH installation contract, not a general POSIX pin.
+WINDOWS_VISKORES_PIN = "viskores=1.1.1=cpu_h4b717ef_1"
+# The qualified 209-package Windows solve has a longest linked member of 168
+# characters.  An 80-character final prefix therefore remains ten characters
+# below the legacy 259-character visible-path ceiling.
+WINDOWS_REVIEWED_MAX_ENV_MEMBER = 168
+WINDOWS_MAX_ENV_PREFIX_LENGTH = 80
 MANAGED_KIND = "managed"
 EXTERNAL_KIND = "external"
 

@@ -561,7 +561,7 @@ def test_project_create_key_request_and_quarantine_round_trip(
 
     request_raw = _member_bytes("project_create_request.json")
     with monkeypatch.context() as patch:
-        patch.setattr(project_create.os, "geteuid", lambda: 501)
+        patch.setattr(project_create.os, "geteuid", lambda: 501, raising=False)
         record = project_create._record_from_bytes(
             request_raw,
             expected_name=project_create._request_name(CREATE_KEY),
@@ -632,7 +632,7 @@ def test_checkout_legacy_and_current_open_tombstone_facts_round_trip(
     sealed = _manifest("sealed_revision_manifest.json")
     sealed_head = _head("sealed_revision_head.json")
     with monkeypatch.context() as patch:
-        patch.setattr(checkouts.os, "geteuid", lambda: 501)
+        patch.setattr(checkouts.os, "geteuid", lambda: 501, raising=False)
         legacy_open_raw = _member_bytes("checkout_open_v1.json")
         legacy_open = codec._decode_open(legacy_open_raw)
         current_open_raw = _member_bytes("checkout_open_v2.json")

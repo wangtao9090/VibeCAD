@@ -43,6 +43,7 @@ from tests.test_intent_bridge_freecad_part_file_import_adapter import (
 )
 from tests.test_program_executor import _FakeShape
 from tests.test_reviewed_intent_program import reviewed_box_program
+from vibecad import _file_compat
 from vibecad.engine.document_assets import DocumentAssetWorkspace
 from vibecad.execution.freecad_imageplane_reviewed_execution import (
     build_imageplane_reviewed_family_descriptor,
@@ -122,6 +123,8 @@ class _StagerFactory:
 def _private_root(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True)
     os.chmod(path, 0o700)
+    if os.name == "nt":
+        _file_compat.set_private_dacl(path)
     return path
 
 

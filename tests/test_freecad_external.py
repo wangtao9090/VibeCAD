@@ -12,6 +12,11 @@ import pytest
 
 from vibecad import freecad_external
 
+_MACOS_PILOT = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="the external .app addon pilot is a macOS-only integration",
+)
+
 
 def _fake_app(root: Path, *, version: str = "1.1.3", pyside: str = "6.8.3") -> Path:
     app = (root / "FreeCAD.app").resolve()
@@ -59,6 +64,7 @@ def _addon_source() -> Path:
     return (Path(__file__).resolve().parent.parent / "freecad" / "VibeCAD").resolve()
 
 
+@_MACOS_PILOT
 def test_doctor_admits_only_exact_pilot_without_executing_app(tmp_path: Path) -> None:
     app = _fake_app(tmp_path)
 
@@ -93,6 +99,7 @@ def test_doctor_admits_only_exact_pilot_without_executing_app(tmp_path: Path) ->
         freecad_external.doctor(wrong)
 
 
+@_MACOS_PILOT
 def test_stable_digest_allows_read_atime_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -129,6 +136,7 @@ def test_stable_digest_allows_read_atime_change(
     assert freecad_external._stable_digest(target) == hashlib.sha256(b"pilot-freecad").hexdigest()
 
 
+@_MACOS_PILOT
 def test_stable_digest_rejects_content_mutation_during_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -148,6 +156,7 @@ def test_stable_digest_rejects_content_mutation_during_read(
         freecad_external._stable_digest(target)
 
 
+@_MACOS_PILOT
 def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     tmp_path: Path,
 ) -> None:
@@ -195,6 +204,7 @@ def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     assert sibling.is_dir()
 
 
+@_MACOS_PILOT
 def test_install_upgrades_an_owned_older_package_receipt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -228,6 +238,7 @@ def test_install_upgrades_an_owned_older_package_receipt(
     assert config["package_version"] == "0.10.0"
 
 
+@_MACOS_PILOT
 def test_install_and_uninstall_refuse_foreign_or_mutated_tree(tmp_path: Path) -> None:
     app = _fake_app(tmp_path / "host")
     user_data = (tmp_path / "user-data").resolve()
@@ -263,6 +274,7 @@ def test_install_and_uninstall_refuse_foreign_or_mutated_tree(tmp_path: Path) ->
     assert installed.is_dir()
 
 
+@_MACOS_PILOT
 def test_install_refuses_symlinked_user_data_ancestor_before_writing(tmp_path: Path) -> None:
     app = _fake_app(tmp_path / "host")
     durable = tmp_path / "durable"
@@ -279,3 +291,12 @@ def test_install_refuses_symlinked_user_data_ancestor_before_writing(tmp_path: P
         )
 
     assert list(durable.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="non-macOS contract")
+def test_external_app_pilot_is_actionably_unavailable_off_macos(tmp_path: Path) -> None:
+    with pytest.raises(
+        freecad_external.ExternalFreeCADError,
+        match="available only on macOS.*managed FreeCAD runtime",
+    ):
+        freecad_external.doctor(tmp_path / "FreeCAD.app")

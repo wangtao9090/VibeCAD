@@ -6,16 +6,17 @@ import hashlib
 import json
 import os
 import re
-import resource
 import secrets
-import signal
 import stat
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+import vibecad.execution._resource_compat as resource
+import vibecad.execution._signal_compat as signal
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.lease import (
     LeaseError,
@@ -193,20 +194,29 @@ def _initialize_candidate_file_limit_runtime():
         return
     if threading.current_thread() is not threading.main_thread():
         raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
-    if not _install_candidate_file_signal_policy():
+    if os.name != "nt" and not _install_candidate_file_signal_policy():
         raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
     _CandidateFileLimitRuntime._gate = threading.RLock()
     _CandidateFileLimitRuntime._initialized_pid = pid
 
 
 class _CandidateFileLimit:
-    __slots__ = ("_active", "_gate", "_previous", "_store")
+    __slots__ = (
+        "_active",
+        "_gate",
+        "_previous",
+        "_quota_lease",
+        "_store",
+        "_uses_native_limit",
+    )
 
     def __init__(self, store):
         self._store = store
         self._gate = None
         self._previous = None
+        self._quota_lease = None
         self._active = False
+        self._uses_native_limit = False
 
     def __enter__(self):
         pid = os.getpid()
@@ -214,30 +224,43 @@ class _CandidateFileLimit:
             raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         if _CandidateFileLimitRuntime._initialized_pid != pid:
             raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
-        if not _install_candidate_file_signal_policy():
+        uses_native_limit = os.name != "nt"
+        if uses_native_limit and not _install_candidate_file_signal_policy():
             raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
         if os.getpid() != self._store._pid:
             raise RevisionStoreError(RevisionStoreErrorCode.INVALID_LEASE)
         gate = _CandidateFileLimitRuntime._gate
         failure_code = None
         acquired = False
+        quota_lease = None
         try:
             if gate is None or not gate.acquire(timeout=5.0):
                 raise RuntimeError("candidate file limit gate unavailable")
             acquired = True
             if _CandidateFileLimitRuntime._poisoned_pid == pid:
                 raise RuntimeError("candidate file limit runtime is poisoned")
-            previous = resource.getrlimit(resource.RLIMIT_FSIZE)
-            previous_soft = previous[0]
-            hard = previous[1]
-            effective = _MAX_CANDIDATE_FILE_BYTES
-            if previous_soft != resource.RLIM_INFINITY:
-                effective = min(previous_soft, _MAX_CANDIDATE_FILE_BYTES)
-            if hard != resource.RLIM_INFINITY and effective > hard:
-                raise ValueError("invalid file-size limit")
-            resource.setrlimit(resource.RLIMIT_FSIZE, (effective, hard))
+            previous = None
+            if uses_native_limit:
+                previous = resource.getrlimit(resource.RLIMIT_FSIZE)
+                previous_soft = previous[0]
+                hard = previous[1]
+                effective = _MAX_CANDIDATE_FILE_BYTES
+                if previous_soft != resource.RLIM_INFINITY:
+                    effective = min(previous_soft, _MAX_CANDIDATE_FILE_BYTES)
+                if hard != resource.RLIM_INFINITY and effective > hard:
+                    raise ValueError("invalid file-size limit")
+                resource.setrlimit(resource.RLIMIT_FSIZE, (effective, hard))
+            else:
+                try:
+                    quota_lease, quota_code = _acquire_quota_lease(self._store)
+                except Exception as error:
+                    raise RuntimeError("candidate quota guard unavailable") from error
+                if quota_code is not None:
+                    raise RuntimeError("candidate quota guard unavailable")
         except (OSError, RuntimeError, ValueError):
             release_failed = False
+            if quota_lease is not None:
+                release_failed = _release_quota_lease(quota_lease) is not None
             if acquired:
                 try:
                     gate.release()
@@ -254,16 +277,31 @@ class _CandidateFileLimit:
             raise RevisionStoreError(failure_code)
         self._gate = gate
         self._previous = previous
+        self._quota_lease = quota_lease
+        self._uses_native_limit = uses_native_limit
         self._active = True
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         failed = False
+        validation_error = None
         try:
-            if self._active and self._previous is not None:
+            if self._active and self._uses_native_limit and self._previous is not None:
                 resource.setrlimit(resource.RLIMIT_FSIZE, self._previous)
         except (OSError, ValueError):
             failed = True
+        if self._active and not self._uses_native_limit and exc_type is None:
+            try:
+                from vibecad.execution import revisions_windows
+
+                revisions_windows.validate_candidate_file_budget_under_lease(self._store)
+            except BaseException as error:
+                validation_error = error
+        if self._quota_lease is not None:
+            if _release_quota_lease(self._quota_lease) is not None:
+                failed = True
+                _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
+            self._quota_lease = None
         if failed:
             _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
         try:
@@ -273,8 +311,11 @@ class _CandidateFileLimit:
             failed = True
             _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
         self._active = False
+        self._uses_native_limit = False
         if failed:
             raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        if validation_error is not None:
+            raise validation_error
         return False
 
 
@@ -331,18 +372,32 @@ class RevisionSourceBinding:
             or type(self.ctime_ns) is not int
         ):
             raise TypeError("source binding fields must be exact integers")
-        if (
-            self.dev < 0
-            or self.ino < 0
-            or self.mode < 0
-            or not stat.S_ISREG(self.mode)
-            or stat.S_IMODE(self.mode) != 384
-            or self.uid != os.geteuid()
-            or self.nlink != 1
-            or self.size <= 0
-            or self.mtime_ns < 0
-            or self.ctime_ns < 0
-        ):
+        if sys.platform == "win32":
+            invalid = (
+                self.dev < 0
+                or self.ino < 0
+                or self.mode < 0
+                or not stat.S_ISREG(self.mode)
+                or self.uid < 0
+                or self.nlink != 1
+                or self.size <= 0
+                or self.mtime_ns < 0
+                or self.ctime_ns < 0
+            )
+        else:
+            invalid = (
+                self.dev < 0
+                or self.ino < 0
+                or self.mode < 0
+                or not stat.S_ISREG(self.mode)
+                or stat.S_IMODE(self.mode) != 384
+                or self.uid != os.geteuid()
+                or self.nlink != 1
+                or self.size <= 0
+                or self.mtime_ns < 0
+                or self.ctime_ns < 0
+            )
+        if invalid:
             raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
 
 
@@ -3485,6 +3540,17 @@ def _quota_snapshot(root_fd, root_device, reservations):
 
 
 def _acquire_quota_lease(store):
+    if sys.platform == "win32":
+        deadline = time.monotonic() + 30.0
+        while True:
+            try:
+                return (store._lease_manager.acquire(_QUOTA_RESOURCE_ID), None)
+            except LeaseError as error:
+                if error.code is not LeaseErrorCode.CONTENDED:
+                    return (None, RevisionStoreErrorCode.IO_ERROR)
+            if time.monotonic() >= deadline:
+                return (None, RevisionStoreErrorCode.IO_ERROR)
+            time.sleep(0.005)
     attempt = 0
     while attempt < 250:
         attempt += 1
@@ -3934,6 +4000,23 @@ def _reserve_quota(
     key_result = _reservation_key_digest(reservation_key)
     if key_result[1] is not None:
         return (None, False, key_result[1])
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        try:
+            existing, _reused = revisions_windows._reserve_quota(
+                store,
+                kind,
+                project_id,
+                expected_head,
+                revision_id,
+                key_result[0],
+                project_temp,
+                ceiling_files,
+            )
+        except RevisionStoreError as error:
+            return (None, False, error.code)
+        return (existing, existing["revision_id"] != revision_id, None)
     quota = _acquire_quota_lease(store)
     if quota[1] is not None:
         return (None, False, quota[1])
@@ -4160,6 +4243,20 @@ def _set_reservation_phase(
     state,
     revision_temp,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.set_reservation_phase(
+            store,
+            revision_id,
+            kind,
+            project_id,
+            expected_head,
+            reservation_key,
+            state,
+            revision_temp,
+        )
+
     def transform(current):
         binding_code = _reservation_binding_code(
             current,
@@ -4196,6 +4293,18 @@ def _release_reservation(
     expected_head,
     reservation_key,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.release_reservation(
+            store,
+            revision_id,
+            kind,
+            project_id,
+            expected_head,
+            reservation_key,
+        )
+
     quota = _acquire_quota_lease(store)
     if quota[1] is not None:
         return quota[1]
@@ -4482,6 +4591,17 @@ def _validate_candidate_reservation(
     reservation_key,
     lease,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.validate_candidate_reservation(
+            store,
+            project_id,
+            expected_head,
+            revision_id,
+            reservation_key,
+            lease,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         return mutation_code
@@ -4521,6 +4641,23 @@ def _replace_candidate_model_at(
     lease,
 ):
     """Copy one descriptor-bound external FCStd into a reserved private candidate."""
+
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.replace_candidate_model_at(
+            store,
+            project_id,
+            expected_head,
+            revision_id,
+            reservation_key,
+            source_parent_fd,
+            source_name,
+            expected_binding,
+            expected_sha256,
+            expected_size,
+            lease,
+        )
 
     reservation_code = _validate_candidate_reservation(
         store,
@@ -4750,6 +4887,18 @@ def _initialize_project(
     lease,
     source_at=None,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.initialize_project(
+            store,
+            project_id,
+            source,
+            expected_sha256,
+            expected_size,
+            lease,
+            source_at,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -5158,6 +5307,16 @@ def _cleanup_candidate_dir(candidates_fd, candidate_name, root_device):
 
 
 def _reserve_candidate_revision(store, project_id, expected_head, reservation_key, lease):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.reserve_candidate(
+            store,
+            project_id,
+            expected_head,
+            reservation_key,
+            lease,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -5511,6 +5670,17 @@ def _prepare_revision(
     manifest_sha256,
     lease,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.prepare_revision(
+            store,
+            project_id,
+            expected_head,
+            revision_id,
+            manifest_sha256,
+            lease,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -5717,6 +5887,15 @@ def _open_worker_candidate_staging(
 ):
     """Atomically pin one live store reservation for the Worker parent proxy."""
 
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.open_worker_candidate(
+            store,
+            expected_head=expected_head,
+            revision_id=revision_id,
+            lease=lease,
+        )
     if (
         type(store) is not LocalRevisionStore
         or type(expected_head) is not ProjectHead
@@ -5881,6 +6060,13 @@ def _open_worker_revision(store, *, expected_revision):
     authoritative merely because an older directory descriptor is still open.
     """
 
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.open_worker_revision(
+            store,
+            expected_revision=expected_revision,
+        )
     if type(store) is not LocalRevisionStore or type(expected_revision) is not RevisionRef:
         raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
     loaded = _load_store_project(store, expected_revision.project_id)
@@ -6821,6 +7007,19 @@ def _seed_candidate_from_revision(
     reservation_key,
     lease,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.seed_candidate_from_revision(
+            store,
+            project_id,
+            expected_head,
+            revision_id,
+            expected_source,
+            reservation_key,
+            lease,
+        )
+
     project_code = _identifier_code(project_id, _PROJECT_PATTERN)
     revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
     source_code = _seed_source_code(project_id, expected_source)
@@ -6980,6 +7179,17 @@ def _validate_candidate_payload(
     expected_source,
     lease,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.validate_candidate_payload(
+            store,
+            project_id,
+            revision_id,
+            expected_source,
+            lease,
+        )
+
     project_code = _identifier_code(project_id, _PROJECT_PATTERN)
     revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
     source_code = _seed_source_code(project_id, expected_source)
@@ -8010,6 +8220,10 @@ def _discovery_quota_binding(root_fd, root_device):
 
 
 def _discovery_store_snapshot(store):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.snapshot_store(store)
     quota = _acquire_quota_lease(store)
     if quota[1] is not None:
         raise RevisionStoreError(quota[1])
@@ -8141,7 +8355,14 @@ def _discovery_store_snapshot(store):
 
 
 class LocalRevisionStore:
-    __slots__ = ("_identity", "_lease_manager", "_parts", "_pid", "_root")
+    __slots__ = (
+        "_identity",
+        "_lease_manager",
+        "_parts",
+        "_pid",
+        "_root",
+        "_windows_root_capability",
+    )
 
     def __init__(self, root, lease_manager, *, trust):
         if type(lease_manager) is not ResourceLeaseManager:
@@ -8150,18 +8371,28 @@ class LocalRevisionStore:
             raise RevisionStoreError(RevisionStoreErrorCode.UNSAFE_STORE)
         if trust is not RevisionStoreRootTrust.TRUSTED_LOCAL:
             raise RevisionStoreError(RevisionStoreErrorCode.UNSAFE_STORE)
-        coerced = _coerce_path(root)
-        if coerced[1] is not None:
-            raise RevisionStoreError(coerced[1])
-        opened = _open_root(coerced[0][1], None)
-        if opened[2] is not None:
-            raise RevisionStoreError(opened[2])
-        identity = (opened[1].st_dev, opened[1].st_ino)
-        if _close_fd(opened[0]):
-            raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
-        self._root = coerced[0][0]
-        self._parts = coerced[0][1]
-        self._identity = identity
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            root_path, parts, identity, capability = revisions_windows.initialize_store(root)
+            self._root = root_path
+            self._parts = parts
+            self._identity = identity
+            self._windows_root_capability = capability
+        else:
+            coerced = _coerce_path(root)
+            if coerced[1] is not None:
+                raise RevisionStoreError(coerced[1])
+            opened = _open_root(coerced[0][1], None)
+            if opened[2] is not None:
+                raise RevisionStoreError(opened[2])
+            identity = (opened[1].st_dev, opened[1].st_ino)
+            if _close_fd(opened[0]):
+                raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+            self._root = coerced[0][0]
+            self._parts = coerced[0][1]
+            self._identity = identity
+            self._windows_root_capability = None
         self._lease_manager = lease_manager
         self._pid = os.getpid()
 
@@ -8181,6 +8412,16 @@ class LocalRevisionStore:
     def candidate_artifact_path(self, project_id, revision_id, format, lease):
         if type(format) is not str or format != "step":
             raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            return revisions_windows.candidate_path(
+                self,
+                project_id,
+                revision_id,
+                lease,
+                "model.step",
+            )
         authority = _candidate_authority(self, project_id, revision_id, lease)
         if authority[2] is not None:
             raise RevisionStoreError(authority[2])
@@ -8197,6 +8438,16 @@ class LocalRevisionStore:
         )
 
     def candidate_model_path(self, project_id, revision_id, lease):
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            return revisions_windows.candidate_path(
+                self,
+                project_id,
+                revision_id,
+                lease,
+                "model.FCStd",
+            )
         authority = _candidate_authority(self, project_id, revision_id, lease)
         if authority[2] is not None:
             raise RevisionStoreError(authority[2])
@@ -8416,6 +8667,12 @@ class LocalRevisionStore:
         return _seal_revision(self, project_id, revision_id, lease)
 
     def validate_project_write_lease(self, project_id, lease):
+        if sys.platform == "win32":
+            from vibecad.execution import revisions_windows
+
+            revisions_windows._require_lease(self, project_id, lease)
+            revisions_windows._validate_lease_after(self, lease)
+            return None
         code = _require_mutation(self, project_id, lease)
         if code is not None:
             raise RevisionStoreError(code)
@@ -8423,6 +8680,10 @@ class LocalRevisionStore:
 
 
 def _load_head(store, project_id):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.load_head(store, project_id)
     code = _identifier_code(project_id, _PROJECT_PATTERN)
     if code is not None:
         raise RevisionStoreError(code)
@@ -8447,6 +8708,10 @@ def _load_head(store, project_id):
 
 
 def _load_revision(store, project_id, revision_id):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.load_revision(store, project_id, revision_id)
     project_code = _identifier_code(project_id, _PROJECT_PATTERN)
     if project_code is not None:
         raise RevisionStoreError(project_code)
@@ -8472,6 +8737,10 @@ def _load_revision(store, project_id, revision_id):
 
 
 def _observe_model_source(store, project_id, revision_id):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.observe_model_source(store, project_id, revision_id)
     project_code = _identifier_code(project_id, _PROJECT_PATTERN)
     if project_code is not None:
         raise RevisionStoreError(project_code)
@@ -8982,6 +9251,16 @@ def _copy_revision_artifacts_at(
     cursors,
     chunk_bytes,
 ):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.copy_revision_artifacts_at(
+            store,
+            expected_revision,
+            destination_directory_fd,
+            cursors,
+            chunk_bytes,
+        )
     request = _copy_request_parts(
         expected_revision,
         destination_directory_fd,
@@ -9364,6 +9643,10 @@ def _copy_revision_artifacts_at(
 
 
 def _revision_model_path(store, project_id, revision_id):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.revision_model_path(store, project_id, revision_id)
     revision = _load_revision(store, project_id, revision_id)
     if revision.model is None:
         raise RevisionStoreError(RevisionStoreErrorCode.NOT_FOUND)
@@ -9377,6 +9660,15 @@ def _revision_model_path(store, project_id, revision_id):
 
 
 def _revision_artifact_path(store, project_id, revision_id, artifact_id):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.revision_artifact_path(
+            store,
+            project_id,
+            revision_id,
+            artifact_id,
+        )
     artifact_code = _identifier_code(artifact_id, _ARTIFACT_PATTERN)
     if artifact_code is not None:
         raise RevisionStoreError(artifact_code)
@@ -9426,6 +9718,15 @@ def _cleanup_revision_temp(revisions_fd, temp_name):
 
 
 def _seal_revision(store, project_id, revision_id, lease):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.seal_revision(
+            store,
+            project_id,
+            revision_id,
+            lease,
+        )
     authority = _candidate_authority(store, project_id, revision_id, lease)
     if authority[2] is not None:
         raise RevisionStoreError(authority[2])
@@ -9784,6 +10085,16 @@ def _quota_replace_head_record(store, project_fd, raw, token):
 
 
 def _commit_revision(store, project_id, expected_head, revision_id, lease):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.commit_revision(
+            store,
+            project_id,
+            expected_head,
+            revision_id,
+            lease,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -9935,6 +10246,10 @@ def _new_head_matches(head, journal):
 
 
 def _reconcile(store, project_id, lease):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.reconcile(store, project_id, lease)
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -10096,6 +10411,17 @@ def _reconcile_candidate_reservation(
     key_result = _reservation_key_digest(reservation_key)
     if key_result[1] is not None:
         raise RevisionStoreError(key_result[1])
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.reconcile_candidate_reservation(
+            store,
+            project_id,
+            base_revision,
+            reservation_key,
+            key_result[0],
+            lease,
+        )
     loaded = _load_store_project(store, project_id)
     if loaded[2] is not None:
         raise RevisionStoreError(loaded[2])
@@ -10260,6 +10586,16 @@ def _probe_candidate_reservation(
     key_result = _reservation_key_digest(reservation_key)
     if key_result[1] is not None:
         raise RevisionStoreError(key_result[1])
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.probe_candidate_reservation(
+            store,
+            project_id,
+            base_revision,
+            reservation_key,
+            key_result[0],
+        )
     loaded = _load_store_project(store, project_id)
     if loaded[2] is not None:
         raise RevisionStoreError(loaded[2])
@@ -10320,6 +10656,15 @@ def _probe_candidate_reservation(
 
 
 def _rollback_revision(store, project_id, revision_id, lease):
+    if sys.platform == "win32":
+        from vibecad.execution import revisions_windows
+
+        return revisions_windows.rollback_revision(
+            store,
+            project_id,
+            revision_id,
+            lease,
+        )
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)

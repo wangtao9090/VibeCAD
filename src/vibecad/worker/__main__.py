@@ -18,12 +18,16 @@ def _arguments(argv: list[str]) -> tuple[int, str]:
     except (TypeError, ValueError):
         raise ValueError("invalid Worker descriptor") from None
     generation = argv[4]
-    if (
-        descriptor < 3
-        or re.fullmatch(r"worker_generation_[0-9a-f]{32}", generation) is None
-        or os.getpgrp() != os.getpid()
-        or os.getsid(0) != os.getpid()
-    ):
+    valid_process_boundary = descriptor >= 3
+    if sys.platform != "win32":
+        valid_process_boundary = (
+            valid_process_boundary
+            and os.getpgrp() == os.getpid()
+            and os.getsid(0) == os.getpid()
+        )
+    if not valid_process_boundary or re.fullmatch(
+        r"worker_generation_[0-9a-f]{32}", generation
+    ) is None:
         raise ValueError("invalid Worker generation")
     return descriptor, generation
 
@@ -31,8 +35,12 @@ def _arguments(argv: list[str]) -> tuple[int, str]:
 def main() -> int:
     try:
         descriptor, generation = _arguments(sys.argv)
-        os.set_inheritable(descriptor, False)
-        connection = socket.socket(fileno=descriptor)
+        if sys.platform == "win32":
+            connection = socket.socket(fileno=descriptor)
+            connection.set_inheritable(False)
+        else:
+            os.set_inheritable(descriptor, False)
+            connection = socket.socket(fileno=descriptor)
     except (OSError, ValueError):
         return 2
     try:

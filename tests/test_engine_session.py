@@ -36,6 +36,16 @@ def existing_managed_runtime_python():
     return str(python)
 
 
+def _freecad_subprocess_environment(tmp_path):
+    if sys.platform != "win32":
+        return None
+    from vibecad._file_compat import ensure_private_directory
+
+    freecad_user_temp = (tmp_path / "freecad-user-temp").resolve(strict=False)
+    ensure_private_directory(freecad_user_temp)
+    return {**os.environ, "FREECAD_USER_TEMP": str(freecad_user_temp)}
+
+
 class FakeDoc:
     def __init__(self, calls):
         self.calls = calls
@@ -671,7 +681,13 @@ def test_session_open_close_checkpoint(runtime_env, tmp_path):
         + "assert s.doc is None\n"
         + "print('LIFECYCLE_OK')\n"
     )
-    r = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    r = subprocess.run(
+        [runtime_env, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=_freecad_subprocess_environment(tmp_path),
+    )
     assert r.returncode == 0, r.stderr
     assert "LIFECYCLE_OK" in r.stdout
 
@@ -799,6 +815,7 @@ def test_object_identity_survives_recompute_checkpoint_close_and_load(
         capture_output=True,
         text=True,
         timeout=180,
+        env=_freecad_subprocess_environment(tmp_path),
     )
     assert result.returncode == 0, result.stderr
     assert "IDENTITY_PERSISTENCE_OK" in result.stdout
@@ -886,6 +903,7 @@ def test_explicit_components_survive_real_freecad_save_reload_with_global_observ
         capture_output=True,
         text=True,
         timeout=180,
+        env=_freecad_subprocess_environment(tmp_path),
     )
     assert result.returncode == 0, result.stderr
     assert "EXPLICIT_COMPONENTS_OK" in result.stdout

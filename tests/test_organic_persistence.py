@@ -188,6 +188,7 @@ def test_manifest_decode_rejects_authority_or_payload_binding_changes() -> None:
         b'{"x":"\\ud800"}',
         b"{" + b"x" * MAX_ORGANIC_MANIFEST_BYTES + b"}",
     ),
+    ids=("empty", "array", "nan", "surrogate", "oversized"),
 )
 def test_manifest_parser_fails_closed_on_invalid_or_oversized_bytes(raw: bytes) -> None:
     with pytest.raises(OrganicPersistenceError):

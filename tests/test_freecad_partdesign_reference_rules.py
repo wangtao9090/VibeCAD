@@ -153,9 +153,10 @@ def test_real_freecad_reference_family_create_edit_save_reopen_and_rollback(
     plan_digest_mapping = {kind.value: plan.plan_sha256 for kind, plan in plans.items()}
     code = f"""
 import os, sys
-sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
 sys.path.insert(0, {str(source_root)!r})
 from pathlib import Path
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
 import FreeCAD, Part, PartDesign
 from vibecad.parametric.freecad_partdesign_reference_rules import (
     PartDesignReferenceKind, ReferenceExecutionBindings, ReferenceRuleError,

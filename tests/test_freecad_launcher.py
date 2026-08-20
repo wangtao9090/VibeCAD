@@ -71,6 +71,81 @@ def test_local_distribution_wheel_uses_direct_install_artifact(
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path/descriptor stat contract")
+def test_wheel_binding_uses_birthtime_across_windows_stat_views() -> None:
+    common = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": 0o100600,
+        "st_nlink": 1,
+        "st_size": 14,
+        "st_mtime_ns": 3,
+        "st_birthtime_ns": 4,
+    }
+    path_view = SimpleNamespace(**common, st_ctime_ns=4)
+    descriptor_view = SimpleNamespace(**common, st_ctime_ns=3)
+
+    assert freecad_launcher._wheel_file_binding(path_view) == (
+        freecad_launcher._wheel_file_binding(descriptor_view)
+    )
+    changed_birthtime = SimpleNamespace(**(common | {"st_birthtime_ns": 5}), st_ctime_ns=3)
+    assert freecad_launcher._wheel_file_binding(path_view) != (
+        freecad_launcher._wheel_file_binding(changed_birthtime)
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows addon file capability contract")
+def test_packaged_addon_uses_windows_file_identity_instead_of_posix_mode_bits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    addon = (tmp_path / "VibeCAD").resolve()
+    addon.mkdir()
+    source = addon / "InitGui.py"
+    source.write_bytes(b"# Windows Workbench\n")
+    observed: list[object] = []
+    real_open = freecad_launcher.open_windows_external_file
+    real_validate = freecad_launcher.validate_windows_external_file
+
+    def open_file(path: Path):
+        descriptor, capability = real_open(path)
+        observed.append(capability)
+        return descriptor, capability
+
+    def validate_file(capability):
+        observed.append(capability)
+        return real_validate(capability)
+
+    monkeypatch.setattr(freecad_launcher, "_packaged_addon_root", lambda: addon)
+    monkeypatch.setattr(freecad_launcher, "_ADDON_FILES", frozenset({"InitGui.py"}))
+    monkeypatch.setattr(freecad_launcher, "open_windows_external_file", open_file)
+    monkeypatch.setattr(freecad_launcher, "validate_windows_external_file", validate_file)
+
+    assert freecad_launcher._require_packaged_addon() == addon
+    assert len(observed) == 2
+    assert observed[0] == observed[1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows addon file capability contract")
+def test_packaged_addon_rejects_windows_identity_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    addon = (tmp_path / "VibeCAD").resolve()
+    addon.mkdir()
+    (addon / "InitGui.py").write_bytes(b"# Windows Workbench\n")
+    monkeypatch.setattr(freecad_launcher, "_packaged_addon_root", lambda: addon)
+    monkeypatch.setattr(freecad_launcher, "_ADDON_FILES", frozenset({"InitGui.py"}))
+    monkeypatch.setattr(
+        freecad_launcher,
+        "validate_windows_external_file",
+        lambda _capability: (_ for _ in ()).throw(OSError("identity changed")),
+    )
+
+    with pytest.raises(freecad_launcher.FreeCADLaunchError, match="addon is incomplete"):
+        freecad_launcher._require_packaged_addon()
+
+
 def test_managed_runtime_refreshes_from_local_install_before_capture(
     monkeypatch,
     tmp_path: Path,
@@ -146,14 +221,31 @@ def test_private_profile_and_activation_script_are_isolated(
     activation_script = freecad_launcher._write_activation_script(root.resolve(strict=True))
     ready_file = root / "workbench.ready"
     error_file = root / "workbench.error"
-    environment = freecad_launcher._child_environment(profile, ready_file, error_file)
+    managed_prefix = tmp_path / "managed"
+    environment = freecad_launcher._child_environment(
+        profile,
+        ready_file,
+        error_file,
+        managed_prefix,
+    )
 
     source = activation_script.read_text(encoding="utf-8")
     compile(source, str(activation_script), "exec")
     assert "FreeCADGui.activateWorkbench(expected)" in source
     assert "host.workbench_snapshot()" in source
     assert "threading.Timer(0.1, observe)" in source
-    assert activation_script.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        assert freecad_launcher.capture_windows_path(
+            activation_script,
+            directory=False,
+        ).path == str(activation_script)
+        for directory in (root, *profile):
+            assert freecad_launcher.capture_windows_path(
+                directory.resolve(strict=True),
+                directory=True,
+            ).path == str(directory.resolve(strict=True))
+    else:
+        assert activation_script.stat().st_mode & 0o777 == 0o600
     assert all(
         name not in environment
         for name in freecad_launcher._ENVIRONMENT_INJECTION
@@ -166,6 +258,15 @@ def test_private_profile_and_activation_script_are_isolated(
     assert environment["PYTHONNOUSERSITE"] == "1"
     assert environment["VIBECAD_FREECAD_ERROR_FILE"] == str(error_file)
     assert environment["VIBECAD_FREECAD_READY_FILE"] == str(ready_file)
+    assert environment["VIBECAD_HOME"] == str(freecad_launcher.paths.vibecad_home())
+    if os.name == "nt":
+        assert environment["PATH"].split(os.pathsep)[:3] == [
+            str(managed_prefix / "Library" / "bin"),
+            str(managed_prefix),
+            str(managed_prefix / "Scripts"),
+        ]
+        assert environment["TEMP"] == str(profile[3])
+        assert environment["TMP"] == str(profile[3])
 
 
 def test_launch_uses_one_absolute_managed_binary_and_packaged_addon(
@@ -296,6 +397,46 @@ def test_launch_reaps_child_if_wait_setup_fails(monkeypatch, tmp_path: Path, cap
     assert freecad_launcher.launch() == 1
     assert reaped == [process]
     assert "signal setup failed" in capsys.readouterr().err
+
+
+def test_terminate_and_reap_uses_native_kill_when_sigkill_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.waits = 0
+            self.terminated = 0
+            self.killed = 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated += 1
+
+        def send_signal(self, signum: int) -> None:
+            assert signum == signal.SIGTERM
+            self.terminated += 1
+
+        def kill(self) -> None:
+            self.killed += 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                raise freecad_launcher.subprocess.TimeoutExpired("FreeCAD", timeout)
+            return 1
+
+    process = Process()
+    monkeypatch.delattr(freecad_launcher.signal, "SIGKILL", raising=False)
+
+    freecad_launcher._terminate_and_reap(process)  # type: ignore[arg-type]
+
+    assert process.terminated == 1
+    assert process.killed == 1
+    assert process.waits == 2
 
 
 def test_startup_handshake_requires_exact_active_workbench_marker(tmp_path: Path) -> None:
