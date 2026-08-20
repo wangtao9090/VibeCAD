@@ -17,6 +17,7 @@ docs/
 .vibecad/
 .vibecad-test-runtime/
 dist/
+.gitattributes
 .gitignore
 .python-version
 CLAUDE.md
