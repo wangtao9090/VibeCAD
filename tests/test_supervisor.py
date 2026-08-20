@@ -1342,8 +1342,9 @@ def test_live_child_stdout_eof_is_fixed_transport_failure(
     result: dict[str, int] = {}
     runner = threading.Thread(target=lambda: result.setdefault("code", sup.run()))
     runner.start()
-    runner.join(timeout=1)
     try:
+        assert sup._pump_failed.wait(timeout=5), "child stdout EOF was not detected"
+        runner.join(timeout=5)
         assert not runner.is_alive(), "live stdout EOF left run() blocked in child.wait()"
         assert result == {"code": 1}
         assert child.poll() is not None
