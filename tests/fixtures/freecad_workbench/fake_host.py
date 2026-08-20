@@ -271,23 +271,34 @@ class FakeLocalAgentClient:
             {} if draft_project_by_task_id is None else dict(draft_project_by_task_id)
         )
         self._materialized_checkout_tmp: tempfile.TemporaryDirectory[str] | None = None
+        self._materialized_root_capability = None
         if materialized_checkout_root is None:
             self._materialized_checkout_tmp = tempfile.TemporaryDirectory(
                 prefix="vibecad-fake-checkouts-"
             )
             self.materialized_checkout_root = Path(self._materialized_checkout_tmp.name).resolve()
+            if os.name == "nt":
+                # TemporaryDirectory creates its root with the ambient parent DACL.
+                # Recreate the still-empty random name with the same atomic private
+                # security descriptor used by the product before capturing authority.
+                self.materialized_checkout_root.rmdir()
+                self._materialized_root_capability = ensure_private_directory(
+                    self.materialized_checkout_root,
+                    exclusive=True,
+                )
         else:
             self.materialized_checkout_root = materialized_checkout_root.resolve()
-        self._materialized_root_capability = None
-        if os.name == "nt":
+        if os.name == "nt" and self._materialized_root_capability is None:
             if not self.materialized_checkout_root.exists():
-                ensure_private_directory(self.materialized_checkout_root)
+                self._materialized_root_capability = ensure_private_directory(
+                    self.materialized_checkout_root
+                )
             else:
                 set_private_dacl(self.materialized_checkout_root)
-            self._materialized_root_capability = capture_windows_path(
-                self.materialized_checkout_root,
-                directory=True,
-            )
+                self._materialized_root_capability = capture_windows_path(
+                    self.materialized_checkout_root,
+                    directory=True,
+                )
         self.materialized_model_bytes = bytes(materialized_model_bytes)
         self.created_thread_id = threading.get_ident()
         self.closed_thread_id: int | None = None
