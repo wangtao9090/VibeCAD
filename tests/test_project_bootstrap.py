@@ -1062,7 +1062,13 @@ def test_durable_import_rejects_same_size_source_swap_after_reserved(
 ) -> None:
     data_root = _data_root(tmp_path)
     app = AgentApplication.open(data_root=data_root)
-    service = _durable_service(app)
+    # Keep this storage-integrity contract independent of how an installed
+    # FreeCAD build classifies the deliberately non-FCStd fixture bytes.
+    validation_failure = _ValidationFailurePort(ExecutorErrorCode.INTEGRITY_FAILURE)
+    service = _durable_service(
+        app,
+        cad_port_factory=lambda **_kwargs: validation_failure,
+    )
     source = _source(tmp_path, b"original-contents")
     original_copy = DurableProjectService._copy_source_to_stage
     replacement_blocked = False
