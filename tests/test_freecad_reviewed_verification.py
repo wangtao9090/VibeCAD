@@ -80,7 +80,7 @@ def _synthetic_receipt():
     )
 
 
-def _private_test_host(base, *, execute_case=None, revalidate=None):
+def _private_test_host(base, *, execute_case=None, guard=None, revalidate=None):
     return verification._ReviewedConformanceHost._create(  # noqa: SLF001
         runtime_backend=base.runtime_backend,
         case_manifest_sha256=base.case_manifest_sha256,
@@ -88,10 +88,73 @@ def _private_test_host(base, *, execute_case=None, revalidate=None):
         verifier_id=base.verifier_id,
         verifier_version=base.verifier_version,
         execute_case=execute_case or base.execute_case,
-        guard=base.guard,
+        guard=guard or base.guard,
         revalidate=revalidate or base.revalidate,
         builder_token=verification._HOST_BUILDER_TOKEN,  # noqa: SLF001
     )
+
+
+@pytest.mark.parametrize(
+    ("gui_up", "documents", "gui_module", "expected_path"),
+    (
+        (True, {}, False, "host/runtime/gui"),
+        (0, (), False, "host/runtime/documents/type"),
+        (0, {"Open": object()}, False, "host/runtime/documents/open"),
+        (0, {}, True, "host/runtime/gui_module"),
+    ),
+)
+def test_managed_headless_guard_reports_exact_failed_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+    gui_up: object,
+    documents: object,
+    gui_module: bool,
+    expected_path: str,
+) -> None:
+    class FakeFreeCAD:
+        GuiUp = gui_up
+
+        @staticmethod
+        def listDocuments():
+            return documents
+
+    if gui_module:
+        monkeypatch.setitem(sys.modules, "FreeCADGui", object())
+    else:
+        monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
+    with pytest.raises(CapabilityCatalogError) as caught:
+        verification._require_managed_headless_empty(FakeFreeCAD())  # noqa: SLF001
+    assert caught.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    assert caught.value.path == expected_path
+
+
+def test_guard_failure_note_records_exact_case_boundary() -> None:
+    case_manifest = build_reviewed_family_conformance_case_manifest(PARTDESIGN_RESIDUAL_MANIFEST)
+    base = build_deterministic_synthetic_conformance_host(
+        runtime_backend=_backend(),
+        case_manifest=case_manifest,
+    )
+    calls = 0
+
+    def guard() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            verification._fail(  # noqa: SLF001
+                CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                "host/runtime/documents/open",
+            )
+
+    host = _private_test_host(base, guard=guard)
+    with pytest.raises(CapabilityCatalogError) as caught:
+        build_reviewed_verification_receipt(
+            manifest=PARTDESIGN_RESIDUAL_MANIFEST,
+            case_manifest=case_manifest,
+            host=host,
+        )
+    assert caught.value.path == "host/runtime/documents/open"
+    assert caught.value.__notes__ == [
+        "reviewed host guard failed at host/guard/0: host/runtime/documents/open"
+    ]
 
 
 def test_real_family_descriptors_build_complete_exact_matrix() -> None:

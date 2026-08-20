@@ -20,6 +20,47 @@ jobs:
       - run: uv sync --frozen
       - run: uv run --frozen ruff check .
       - run: uv run --frozen pytest -q -m "not slow"
+  windows-reviewed-attestation:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: bind a fresh isolated reviewed-attestation home
+        shell: pwsh
+        run: |
+          $runtimeHome = Join-Path $env:RUNNER_TEMP "vibecad-reviewed-attestation"
+          if (Test-Path -LiteralPath $runtimeHome) { throw "runtime home already exists" }
+          "VIBECAD_HOME=$runtimeHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: build and install the exact pull-request wheel
+        shell: pwsh
+        run: |
+          $distributionRoot = Join-Path $env:RUNNER_TEMP "reviewed-attestation-dist"
+          $bootstrapRoot = Join-Path $env:RUNNER_TEMP "reviewed-attestation-bootstrap"
+          uv build --wheel --out-dir $distributionRoot
+          if ($LASTEXITCODE -ne 0) { throw "wheel build failed" }
+          $wheels = @(Get-ChildItem -LiteralPath $distributionRoot -Filter "*.whl" -File)
+          if ($wheels.Count -ne 1) { throw "expected one wheel" }
+          uv venv --python 3.12 $bootstrapRoot
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap creation failed" }
+          $bootstrapPython = Join-Path $bootstrapRoot "Scripts\python.exe"
+          uv pip install --python $bootstrapPython --no-deps $wheels[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap install failed" }
+          $env:VIBECAD_PIP_SPEC = $wheels[0].FullName
+          & $bootstrapPython -I -c "from vibecad.runtime.installer import RuntimeInstaller; RuntimeInstaller().install()"
+          if ($LASTEXITCODE -ne 0) { throw "managed runtime install failed" }
+          $managedPython = & $bootstrapPython -I -c "from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $managedPython)) {
+            throw "managed Python is unavailable"
+          }
+          "VIBECAD_MANAGED_FREECAD_PYTHON=$managedPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: exact packaged reviewed-attestation gate
+        shell: pwsh
+        run: |
+          & $env:VIBECAD_MANAGED_FREECAD_PYTHON -I .github\scripts\generate_freecad_reviewed_release_attestation.py --check
+          if ($LASTEXITCODE -ne 0) { throw "reviewed-attestation gate failed" }
   runtime-integration:
     needs: lint-unit
     # This job exercises the macOS managed-runtime path; Windows product quality is
