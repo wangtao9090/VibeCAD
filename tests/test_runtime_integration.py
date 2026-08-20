@@ -114,18 +114,30 @@ def _assert_fresh_unpacked_package(unpacked: Path) -> None:
         assert packaged.read_bytes() == checked_in.read_bytes()
         assert _sha256_path(packaged) == _sha256_path(checked_in)
 
+    packaged_resources = {
+        "execution/_attestations/freecad-reviewed-release-attestation-macos-arm64-v1.json",
+        "execution/_attestations/freecad-reviewed-release-attestation-macos-x86_64-v1.json",
+        "execution/_attestations/freecad-reviewed-release-attestation-windows-x86_64-v1.json",
+    }
     checked_in_source = {
         path.relative_to(repository / "src" / "vibecad").as_posix(): _sha256_path(path)
-        for path in (repository / "src" / "vibecad").rglob("*.py")
-        if path.is_file() and not path.is_symlink()
+        for path in (repository / "src" / "vibecad").rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and (
+            path.suffix == ".py"
+            or path.relative_to(repository / "src" / "vibecad").as_posix() in packaged_resources
+        )
     }
+    assert {name for name in checked_in_source if not name.endswith(".py")} == packaged_resources
     packaged_source: dict[str, str] = {}
     for path in package_root.rglob("*"):
         assert not path.is_symlink()
         if path.is_dir():
             continue
-        assert path.is_file() and path.suffix == ".py"
-        packaged_source[path.relative_to(package_root).as_posix()] = _sha256_path(path)
+        relative = path.relative_to(package_root).as_posix()
+        assert path.is_file() and (path.suffix == ".py" or relative in packaged_resources)
+        packaged_source[relative] = _sha256_path(path)
     assert packaged_source == checked_in_source
 
     checked_in_skill_root = repository / "skills" / "vibecad-agent"
