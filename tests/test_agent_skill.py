@@ -486,6 +486,23 @@ def test_skill_documents_bounded_workbuddy_deferred_tool_permissions():
     assert "unbounded repair loop" in normalized
 
 
+def test_skill_requires_workbuddy_trust_and_complete_mcp_handshake():
+    _metadata, body = _skill_parts()
+    trust = "\n".join(_sections(body, r"workbuddy first-use trust gate"))
+    normalized = _normalized(trust)
+    assert "connector management" in normalized
+    assert "trust" in normalized and "enable" in normalized
+    assert "host-controlled security decision" in normalized
+    assert "never try to bypass" in normalized
+    assert "initialize" in normalized
+    assert "notifications/initialized" in normalized
+    assert "tools/list" in normalized
+    assert "exact 39-tool catalog" in normalized
+    assert "vibecad --help" in normalized and "not an mcp health check" in normalized
+    assert "get_runtime_status" in normalized
+    assert "ensure_runtime" in normalized and "at most once" in normalized
+
+
 def test_skill_requires_exact_distinct_project_and_task_idempotency_keys():
     _metadata, body = _skill_parts()
     normalized = _normalized(body)

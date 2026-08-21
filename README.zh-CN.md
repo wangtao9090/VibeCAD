@@ -223,7 +223,7 @@ Skill 的发现路径如下：
 | Codex 当前安装器路径 | `$CODEX_HOME/skills/vibecad-agent`；未设置时默认 `$HOME/.codex/skills/vibecad-agent` | — |
 | Codex 已发布发现路径 | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
-| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
+| WorkBuddy | `$HOME/.workbuddy/skills/vibecad-agent` | `.codebuddy/skills/vibecad-agent` |
 
 发布资产中的 `vibecad-agent-skill-0.10.0.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
 到上述任一路径。Python wheel 包含服务端和 FreeCAD Workbench 插件，受管运行时包含匹配的服务端
@@ -231,9 +231,10 @@ Skill 的发现路径如下：
 
 ### WorkBuddy（已验证）
 
-安装已发布 CLI，把独立 Skill 目录复制到 `.codebuddy/skills/vibecad-agent`，并在项目
-`.mcp.json` 中注册本地 stdio 服务。`command` 应使用 `command -v vibecad` 返回的绝对路径，避免
-GUI 依赖 shell 继承的 `PATH`：
+安装已发布 CLI，把独立 Skill 目录复制到用户级
+`$HOME/.workbuddy/skills/vibecad-agent` 或项目级 `.codebuddy/skills/vibecad-agent`，并在
+`$HOME/.workbuddy/mcp.json` 或项目 `.mcp.json` 中注册本地 stdio 服务。`command` 应使用
+`command -v vibecad` 返回的绝对路径，避免 GUI 依赖 shell 继承的 `PATH`：
 
 ```json
 {
@@ -247,7 +248,12 @@ GUI 依赖 shell 继承的 `PATH`：
 }
 ```
 
-WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开始或恢复任务。WorkBuddy 会把二进制
+WorkBuddy 提示时必须在连接器管理页信任并启用 VibeCAD。如果看不到 VibeCAD 工具，Skill 必须停止，
+明确提示用户进入 **连接器管理 -> VibeCAD -> 信任/启用**，然后重新加载或重新连接 WorkBuddy；
+Skill 与 VibeCAD 都不得绕过这个由宿主管理的安全决定。诊断客户端必须等待 `initialize` 响应后，
+再依次发送 `notifications/initialized` 与 `tools/list`。看到精确 39 个工具才算连接验证通过；只运行
+`vibecad --help` 不算。随后先调用 `get_runtime_status`，仅在未 ready 时最多调用一次
+`ensure_runtime`，并持续查看状态，不要重复启动安装。WorkBuddy 会把二进制
 `resources/read` 结果原生保存到项目 `.mcp-resources/`，因此 PDF 与批准后的 ZIP 不需要文件路径
 适配层。GLM-5.2 已通过标准多轮任务，但目前只是暂定默认模型：自主 CAD 任务的 allowed tools 应
 排除运行时维护工具，`uninstall_runtime` 必须保留显式用户确认。

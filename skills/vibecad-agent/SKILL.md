@@ -21,6 +21,26 @@ Use a direct tool for one supported operation with explicit inputs. Use ModelPro
 
 Project, task, revision, review, artifact, release, and CAD MCP calls plus the public Workbench client use one same-user authenticated local daemon and shared Task Kernel. Runtime maintenance and inert discovery remain local MCP server concerns. FreeCAD runs behind the kernel in a managed, killable Worker generation. The G1 FreeCAD Workbench alpha uses this same authority for review and Release actions.
 
+## WorkBuddy first-use trust gate
+
+Before starting the required workflow in WorkBuddy, verify that the `vibecad`
+MCP connection is trusted, enabled, and exposes the public tools. If the tools
+are missing or WorkBuddy reports that the connector is untrusted or disabled,
+stop and tell the user to open WorkBuddy's Connector Management page, select
+VibeCAD, click **Trust** or **Enable**, and then reload or reconnect WorkBuddy.
+Trust is a host-controlled security decision: never try to bypass it, click it
+on the user's behalf, or infer consent from an MCP configuration file.
+
+After trust is granted, use the host's MCP client. A diagnostic client must
+complete the standard sequence `initialize` -> wait for the response ->
+`notifications/initialized` -> `tools/list`; sending later frames before the
+initialize response is not proof that the server has no tools. Require the
+exact 39-tool catalog before beginning CAD work. `vibecad --help`, a process
+list, or the existence or absence of `%LOCALAPPDATA%\VibeCAD` is not an MCP
+health check. Once the catalog is visible, call `get_runtime_status`, call
+`ensure_runtime` at most once only when the runtime is not ready, and monitor
+`get_runtime_status` instead of starting another installation.
+
 ## Required workflow
 
 Initialize or verify the runtime first. Once it is ready, call `get_capabilities` as the first business discovery tool instead of guessing CAD support or arguments. Keep every write attached to the returned project id, task id, generation, base revision, draft revision, and idempotency key.
@@ -202,7 +222,7 @@ The calling host owns model selection, subscription or API token use, and every 
 
 The repository's canonical skill directory can be copied to a host-specific discovery path. The currently tested Codex installer target is `$CODEX_HOME/skills/vibecad-agent`, with `$HOME/.codex/skills/vibecad-agent` as the default when `$CODEX_HOME` is unset.
 
-Codex also has published discovery paths at `$HOME/.agents/skills/vibecad-agent` for a user and `.agents/skills/vibecad-agent` for a repository. Claude uses `$HOME/.claude/skills/vibecad-agent` for a user and `.claude/skills/vibecad-agent` for a repository. WorkBuddy uses `.codebuddy/skills/vibecad-agent` at project scope.
+Codex also has published discovery paths at `$HOME/.agents/skills/vibecad-agent` for a user and `.agents/skills/vibecad-agent` for a repository. Claude uses `$HOME/.claude/skills/vibecad-agent` for a user and `.claude/skills/vibecad-agent` for a repository. WorkBuddy uses `$HOME/.workbuddy/skills/vibecad-agent` at user scope and `.codebuddy/skills/vibecad-agent` at project scope.
 
 For WorkBuddy, register the released `vibecad` executable as a local stdio MCP
 server using its absolute path, approve that project-scoped server, and restart

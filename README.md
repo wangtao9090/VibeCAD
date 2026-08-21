@@ -263,7 +263,7 @@ Skill discovery paths are:
 | Current Codex installer path | `$CODEX_HOME/skills/vibecad-agent`; defaults to `$HOME/.codex/skills/vibecad-agent` when unset | — |
 | Published Codex discovery path | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
-| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
+| WorkBuddy | `$HOME/.workbuddy/skills/vibecad-agent` | `.codebuddy/skills/vibecad-agent` |
 
 The release asset `vibecad-agent-skill-0.10.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
@@ -273,10 +273,12 @@ Skill.
 
 ### WorkBuddy (verified)
 
-Install the released CLI, copy the standalone Skill directory to
-`.codebuddy/skills/vibecad-agent`, and register the local stdio server in the
-project's `.mcp.json`. Use the absolute path returned by `command -v vibecad`
-for `command` so the GUI does not depend on an inherited shell `PATH`:
+Install the released CLI, copy the standalone Skill directory to either
+`$HOME/.workbuddy/skills/vibecad-agent` for the current user or
+`.codebuddy/skills/vibecad-agent` for one project, and register the local stdio
+server in `$HOME/.workbuddy/mcp.json` or the project's `.mcp.json`. Use the
+absolute path returned by `command -v vibecad` for `command` so the GUI does
+not depend on an inherited shell `PATH`:
 
 ```json
 {
@@ -290,8 +292,16 @@ for `command` so the GUI does not depend on an inherited shell `PATH`:
 }
 ```
 
-Approve that project-scoped server when WorkBuddy prompts, then start or resume
-the task after the runtime reports ready. WorkBuddy natively persists binary
+Trust and enable VibeCAD in WorkBuddy's Connector Management page when prompted.
+If the VibeCAD tools are absent, the Skill must stop and explicitly direct the
+user to **Connector Management -> VibeCAD -> Trust/Enable**, then ask the user
+to reload or reconnect WorkBuddy; neither the Skill nor VibeCAD may bypass this
+host-controlled decision. A diagnostic client must wait for the `initialize`
+response before sending `notifications/initialized` and `tools/list`. Seeing
+the exact 39-tool catalog is the connection check; `vibecad --help` alone is
+not. After that, call `get_runtime_status`, call `ensure_runtime` at most once
+only when needed, and monitor status until ready rather than starting another
+installation. WorkBuddy natively persists binary
 `resources/read` results into its project `.mcp-resources/` directory, so PDF
 and approved ZIP delivery need no filesystem adapter. GLM-5.2 passed the
 canonical multi-turn task, but remains a provisional default: keep runtime
