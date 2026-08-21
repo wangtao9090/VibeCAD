@@ -15,16 +15,16 @@ from typing import Final
 PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM: Final = MappingProxyType(
     {
         (
-            "0.10.0",
+            "0.10.1",
             "macos.arm64",
-        ): "474bf84757ffd639e0993f2fe3c71ae0fdf8598e6610aae18ef2c90ac3fb31a3",
+        ): "750fb74da7b8ba94e531b2b7f3f89bd0dbe7a0f2bac0183686b0880432d1a11d",
         (
-            "0.10.0",
+            "0.10.1",
             "macos.x86_64",
-        ): "66bf04706872d2ab96cb63ef36221c24f43d01ffdb041f939c62ee943ea45a9a",
+        ): "9ce19f5b4b27ea9c2ecc7f0e4796da600ca684ec977588f644d9a0616d136371",
         (
-            "0.10.0",
+            "0.10.1",
             "windows.x86_64",
-        ): "e12d55a275a9360a633a004a4a60b0df6c0b18499de8de1ba4b50ad5f5592fe1",
+        ): "94a1082b346b9cd098eaf16a1ff7c1b47dbf1e8ff4ac32f703f4eb2ec38e204a",
     }
 )

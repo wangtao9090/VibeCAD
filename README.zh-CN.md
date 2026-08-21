@@ -31,7 +31,7 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 最简单的安装方式是把下面这句话交给编码 Agent：
 
 > 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
-> Workbench Alpha。使用 tag `v0.10.0`，
+> Workbench Alpha。使用 tag `v0.10.1`，
 > 克隆到持久目录，按下方匹配的 Windows PowerShell 或 macOS Terminal 步骤操作，构建 wheel，
 > 通过 `uv tool install --force` 安装，保留 checkout
 > 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
@@ -47,10 +47,10 @@ Windows 正式支持路径不会检查、修改或挂接用户自行安装的 Fr
 
 ```powershell
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.10.0
+git -C VibeCAD checkout v0.10.1
 Set-Location VibeCAD
 uv build --wheel
-uv tool install --force .\dist\vibecad-0.10.0-py3-none-any.whl
+uv tool install --force .\dist\vibecad-0.10.1-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -58,10 +58,10 @@ vibecad --freecad
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.10.0
+git -C VibeCAD checkout v0.10.1
 cd VibeCAD
 uv build --wheel
-uv tool install --force ./dist/vibecad-0.10.0-py3-none-any.whl
+uv tool install --force ./dist/vibecad-0.10.1-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -225,7 +225,7 @@ Skill 的发现路径如下：
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | `$HOME/.workbuddy/skills/vibecad-agent` | `.codebuddy/skills/vibecad-agent` |
 
-发布资产中的 `vibecad-agent-skill-0.10.0.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
+发布资产中的 `vibecad-agent-skill-0.10.1.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
 到上述任一路径。Python wheel 包含服务端和 FreeCAD Workbench 插件，受管运行时包含匹配的服务端
 环境；两者都不会自动激活 Agent Skill。
 
@@ -297,7 +297,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## Host-ready 的准确含义
 
-0.10.0 发布合同独立于宿主验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、
+0.10.1 发布合同独立于宿主验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、
 受管 FreeCAD E2E 和精确 39-tool discovery。Codex、Claude、WorkBuddy 的真实发布包 smoke 分别记录，
 任一宿主通过都不替代另外两个。WorkBuddy 另有上述兼容性覆盖，但不代表其中所有模型都已认证。
 
@@ -309,7 +309,7 @@ daemon 进入该 Application/Task Kernel。运行时维护和无状态 discovery
 第二条领域写入路径。daemon 提供同用户认证及受限的一次性 file grant，不形成第二套提交系统。
 
 S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、P1 顺序编辑与 P2
-刚性机械交付、受控图片机械 CAD 与宿主集成都纳入 0.10.0：
+刚性机械交付、受控图片机械 CAD 与宿主集成都纳入 0.10.1：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；

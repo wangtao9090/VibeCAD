@@ -192,7 +192,7 @@ def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     assert receipt["host_app"] == str(app)
     assert config["python_path"] == str(bridge_python)
     assert config["python_target"] == str(bridge_target)
-    assert config["package_version"] == "0.10.0"
+    assert config["package_version"] == "0.10.1"
     assert not (target / "vibecad").exists()
 
     sibling = target.parent / "OtherAddon"
