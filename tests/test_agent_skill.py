@@ -486,6 +486,23 @@ def test_skill_documents_bounded_workbuddy_deferred_tool_permissions():
     assert "unbounded repair loop" in normalized
 
 
+def test_skill_requires_workbuddy_trust_and_complete_mcp_handshake():
+    _metadata, body = _skill_parts()
+    trust = "\n".join(_sections(body, r"workbuddy first-use trust gate"))
+    normalized = _normalized(trust)
+    assert "connector management" in normalized
+    assert "trust" in normalized and "enable" in normalized
+    assert "host-controlled security decision" in normalized
+    assert "never try to bypass" in normalized
+    assert "initialize" in normalized
+    assert "notifications/initialized" in normalized
+    assert "tools/list" in normalized
+    assert "exact 39-tool catalog" in normalized
+    assert "vibecad --help" in normalized and "not an mcp health check" in normalized
+    assert "get_runtime_status" in normalized
+    assert "ensure_runtime" in normalized and "at most once" in normalized
+
+
 def test_skill_requires_exact_distinct_project_and_task_idempotency_keys():
     _metadata, body = _skill_parts()
     normalized = _normalized(body)
@@ -733,7 +750,7 @@ def test_manifest_projection_and_all_package_versions_target_0_10_0():
     assert spec.VIBECAD_VERSION == "0.10.0"
 
 
-def test_release_documents_project_the_0_9_0_backend_truth():
+def test_release_documents_project_the_current_backend_truth():
     documents = {
         path: _normalized(_read(ROOT / path))
         for path in (
@@ -749,7 +766,8 @@ def test_release_documents_project_the_0_9_0_backend_truth():
     }
     for path, normalized in documents.items():
         assert "0.5.0" not in normalized, path
-        assert "0.9.0" in normalized, path
+        if path not in {"README.md", "README.zh-CN.md"}:
+            assert "0.9.0" in normalized, path
         assert "27-tool" not in normalized, path
         assert "27 个工具" not in normalized, path
 
@@ -771,12 +789,30 @@ def test_release_documents_project_the_0_9_0_backend_truth():
         assert "task kernel" in normalized, path
 
     english_readme = documents["README.md"]
+    assert "v0.10.0" in english_readme
+    assert "vibecad-0.10.0-py3-none-any.whl" in english_readme
+    assert "vibecad-agent-skill-0.10.0.zip" in english_readme
+    assert "v0.9.0" not in english_readme
+    assert "windows x86-64 (powershell)" in english_readme
+    assert "normal, non-elevated powershell" in english_readme
+    assert "system-wide long-path policy change are not required" in english_readme
+    assert "does not inspect, modify, or attach to a user-installed freecad" in english_readme
+    assert "macos (terminal)" in english_readme
     assert "freecad workbench alpha" in english_readme
     assert "g1 (alpha complete)" in english_readme
     assert "exact object/feature selector capture" in english_readme
     assert "not general system-freecad support" in english_readme
 
     chinese_readme = documents["README.zh-CN.md"]
+    assert "v0.10.0" in chinese_readme
+    assert "vibecad-0.10.0-py3-none-any.whl" in chinese_readme
+    assert "vibecad-agent-skill-0.10.0.zip" in chinese_readme
+    assert "v0.9.0" not in chinese_readme
+    assert "windows x86-64（powershell）" in chinese_readme
+    assert "普通、非管理员 powershell" in chinese_readme
+    assert "无需管理员权限" in chinese_readme
+    assert "不会检查、修改或挂接用户自行安装的 freecad" in chinese_readme
+    assert "macos（terminal）" in chinese_readme
     assert "freecad workbench alpha" in chinese_readme
     assert "g1（alpha 完成）" in chinese_readme
     assert "精确 object/feature selector 捕获" in chinese_readme

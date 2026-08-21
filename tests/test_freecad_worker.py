@@ -1157,9 +1157,10 @@ def _wait_gone(pid: int, timeout: float = 2.0) -> bool:
                 return False
             try:
                 exit_code = ctypes.c_ulong()
-                return bool(
-                    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-                ) and exit_code.value == 259
+                return (
+                    bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)))
+                    and exit_code.value == 259
+                )
             finally:
                 kernel32.CloseHandle(handle)
 
@@ -1213,6 +1214,18 @@ def test_worker_environment_canonicalizes_private_freecad_roots(tmp_path: Path) 
         assert path.is_relative_to(real_root.resolve(strict=True))
         if sys.platform == "win32":
             capture_windows_path(path, directory=True)
+    if sys.platform == "win32":
+        prefix = Path(sys.executable).resolve().parent
+        assert environment["PATH"].split(os.pathsep)[:6] == [
+            str(prefix),
+            str(prefix / "Library" / "mingw-w64" / "bin"),
+            str(prefix / "Library" / "usr" / "bin"),
+            str(prefix / "Library" / "bin"),
+            str(prefix / "Scripts"),
+            str(prefix / "bin"),
+        ]
+        assert environment["CONDA_PREFIX"] == str(prefix)
+        assert environment["PROJ_DATA"] == str(prefix / "Library" / "share" / "proj")
 
 
 def test_worker_codec_is_canonical_bounded_and_exact() -> None:
@@ -5346,9 +5359,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                     set_private_dacl(target)
             if sys.platform == "win32":
                 set_private_dacl(validation_directory)
-            validation_fd, validation_capability = _validation_authority(
-                validation_directory
-            )
+            validation_fd, validation_capability = _validation_authority(validation_directory)
             validation_authority = _validation_kwargs(
                 validation_fd,
                 validation_capability,

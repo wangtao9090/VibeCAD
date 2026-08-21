@@ -34,19 +34,40 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.9.0`, clone it into a persistent
-> directory, build its wheel, install it with `uv tool install --force`, keep
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.10.0`, clone it into a persistent
+> directory, use the matching Windows PowerShell or macOS Terminal procedure below,
+> build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
 
-The Agent's reproducible procedure is:
+Both platforms require [Git](https://git-scm.com/) and [uv](https://docs.astral.sh/uv/), an
+Internet connection for the first managed-runtime download, and approximately 3 GB of free disk
+space. VibeCAD installs and verifies its own FreeCAD runtime.
+
+### Windows x86-64 (PowerShell)
+
+Run these commands in a normal, non-elevated PowerShell window. Administrator access, Windows
+Developer Mode, and a system-wide long-path policy change are not required.
+The supported Windows path does not inspect, modify, or attach to a user-installed FreeCAD;
+`vibecad --freecad` launches only the verified VibeCAD-managed runtime.
+
+```powershell
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout v0.10.0
+Set-Location VibeCAD
+uv build --wheel
+uv tool install --force .\dist\vibecad-0.10.0-py3-none-any.whl
+vibecad --freecad
+```
+
+### macOS (Terminal)
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.9.0
+git -C VibeCAD checkout v0.10.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.9.0-py3-none-any.whl
+uv tool install --force ./dist/vibecad-0.10.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -60,6 +81,8 @@ Installation notes:
 - Success means managed FreeCAD opens with the VibeCAD Workbench and review Dock active. On
   failure, report the exact launcher error and stop instead of switching runtimes or inventing an
   alternate installation path.
+- The supported release paths are macOS (Apple Silicon and Intel) and Windows x86-64. Linux and
+  Windows on ARM are not currently supported.
 
 The Dock can list projects and tasks, refresh selected state, open separate managed HEAD and
 draft preview documents, show the review verdict, capture exact whole-object or feature
@@ -240,9 +263,9 @@ Skill discovery paths are:
 | Current Codex installer path | `$CODEX_HOME/skills/vibecad-agent`; defaults to `$HOME/.codex/skills/vibecad-agent` when unset | — |
 | Published Codex discovery path | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
-| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
+| WorkBuddy | `$HOME/.workbuddy/skills/vibecad-agent` | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.9.0.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.10.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -250,10 +273,12 @@ Skill.
 
 ### WorkBuddy (verified)
 
-Install the released CLI, copy the standalone Skill directory to
-`.codebuddy/skills/vibecad-agent`, and register the local stdio server in the
-project's `.mcp.json`. Use the absolute path returned by `command -v vibecad`
-for `command` so the GUI does not depend on an inherited shell `PATH`:
+Install the released CLI, copy the standalone Skill directory to either
+`$HOME/.workbuddy/skills/vibecad-agent` for the current user or
+`.codebuddy/skills/vibecad-agent` for one project, and register the local stdio
+server in `$HOME/.workbuddy/mcp.json` or the project's `.mcp.json`. Use the
+absolute path returned by `command -v vibecad` for `command` so the GUI does
+not depend on an inherited shell `PATH`:
 
 ```json
 {
@@ -267,8 +292,16 @@ for `command` so the GUI does not depend on an inherited shell `PATH`:
 }
 ```
 
-Approve that project-scoped server when WorkBuddy prompts, then start or resume
-the task after the runtime reports ready. WorkBuddy natively persists binary
+Trust and enable VibeCAD in WorkBuddy's Connector Management page when prompted.
+If the VibeCAD tools are absent, the Skill must stop and explicitly direct the
+user to **Connector Management -> VibeCAD -> Trust/Enable**, then ask the user
+to reload or reconnect WorkBuddy; neither the Skill nor VibeCAD may bypass this
+host-controlled decision. A diagnostic client must wait for the `initialize`
+response before sending `notifications/initialized` and `tools/list`. Seeing
+the exact 39-tool catalog is the connection check; `vibecad --help` alone is
+not. After that, call `get_runtime_status`, call `ensure_runtime` at most once
+only when needed, and monitor status until ready rather than starting another
+installation. WorkBuddy natively persists binary
 `resources/read` results into its project `.mcp-resources/` directory, so PDF
 and approved ZIP delivery need no filesystem adapter. GLM-5.2 passed the
 canonical multi-turn task, but remains a provisional default: keep runtime
@@ -303,6 +336,21 @@ Runtime and project data are separate. `uninstall_runtime` first presents a prev
 requires explicit confirmation. It deletes only the managed runtime while preserving project,
 revision, draft, and artifact data. The host settings can then remove the extension itself.
 
+### Windows runtime verification recovery
+
+The Windows verifier and every FreeCAD child use the same explicit managed-environment
+activation contract. VibeCAD prepends the reviewed prefix paths, retains the Python DLL search
+directory for the lifetime of the process, and sets the conda activation variables needed by
+FreeCAD's native libraries. It does not depend on an ambient shell activation or wrap the MCP
+server in `micromamba run`.
+
+If a first cold verification times out or cannot start, VibeCAD records bounded diagnostics in
+`%LOCALAPPDATA%\VibeCAD\runtime\install.log` and preserves the completed environment. Retry
+`ensure_runtime` once after the current maintenance operation has stopped; a healthy environment
+is verified in place and receives its Ready receipt without downloading FreeCAD again. A definite
+import/version failure remains a repair failure. Do not create the Ready receipt manually and do
+not run a second installer concurrently.
+
 ### Local Development
 
 ```bash
@@ -321,7 +369,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.9.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+The 0.10.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
 Release ResourceLinks, managed FreeCAD E2E, and exact 39-tool discovery independently of any host.
 Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
 never certifies the others. WorkBuddy additionally carries the compatibility coverage described
@@ -338,7 +386,7 @@ one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
 editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
-included in 0.9.0:
+included in 0.10.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source

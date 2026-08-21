@@ -27,6 +27,7 @@ from vibecad._file_compat import (
     validate_windows_external_file,
     validate_windows_path,
 )
+from vibecad.freecad_env import activate_windows_runtime_environment
 from vibecad.runtime import paths, spec, status
 from vibecad.runtime.installer import RuntimeInstaller
 
@@ -453,14 +454,7 @@ def _child_environment(
         # the other runtime DLLs.  Keep the user's remaining PATH entries,
         # but put the exact reviewed prefix first and keep all GUI scratch
         # files inside this session's private directory.
-        managed_paths = (
-            managed_prefix / "Library" / "bin",
-            managed_prefix,
-            managed_prefix / "Scripts",
-        )
-        environment["PATH"] = os.pathsep.join(
-            (*map(str, managed_paths), environment.get("PATH", ""))
-        )
+        environment = activate_windows_runtime_environment(environment, managed_prefix)
         environment["TEMP"] = str(process_temp)
         environment["TMP"] = str(process_temp)
     return environment

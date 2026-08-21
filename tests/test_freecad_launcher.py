@@ -260,11 +260,19 @@ def test_private_profile_and_activation_script_are_isolated(
     assert environment["VIBECAD_FREECAD_READY_FILE"] == str(ready_file)
     assert environment["VIBECAD_HOME"] == str(freecad_launcher.paths.vibecad_home())
     if os.name == "nt":
-        assert environment["PATH"].split(os.pathsep)[:3] == [
-            str(managed_prefix / "Library" / "bin"),
+        assert environment["PATH"].split(os.pathsep)[:6] == [
             str(managed_prefix),
+            str(managed_prefix / "Library" / "mingw-w64" / "bin"),
+            str(managed_prefix / "Library" / "usr" / "bin"),
+            str(managed_prefix / "Library" / "bin"),
             str(managed_prefix / "Scripts"),
+            str(managed_prefix / "bin"),
         ]
+        assert environment["CONDA_PREFIX"] == str(managed_prefix)
+        assert environment["SSL_CERT_FILE"] == str(
+            managed_prefix / "Library" / "ssl" / "cacert.pem"
+        )
+        assert environment["PROJ_DATA"] == str(managed_prefix / "Library" / "share" / "proj")
         assert environment["TEMP"] == str(profile[3])
         assert environment["TMP"] == str(profile[3])
 

@@ -41,6 +41,7 @@ _RUNNER_EXECUTABLE_NAME = "micromamba"
 _MAX_SERVER_WHEEL_BYTES = 64 * 1024 * 1024
 _MAX_SERVER_WHEEL_ENTRIES = 4096
 _MAX_DIRECT_URL_BYTES = 4096
+_WINDOWS_PROBE_RETRY_TIMEOUT_SECONDS = 300.0
 
 _FD_EXEC_HELPER = (
     "import os,sys\n"
@@ -156,6 +157,10 @@ def _rename_noreplace_at(
 
 class InstallError(RuntimeError):
     pass
+
+
+class RuntimeVerificationInconclusive(InstallError):
+    """The exact managed environment was preserved for a later verification retry."""
 
 
 def _run(
@@ -842,9 +847,25 @@ class RuntimeInstaller:
                                 "same-version refresh target changed before admission"
                             )
                         evidence = self._capture_evidence(prefix)
-                        if not status.engine_compatible_generation(
-                            evidence
-                        ) or not status.verify_runtime_generation(evidence):
+                        engine_result = self._probe_generation(
+                            evidence,
+                            label="refresh_engine",
+                            engine_only=True,
+                        )
+                        self._raise_if_probe_inconclusive(
+                            engine_result,
+                            label="刷新前引擎校验",
+                        )
+                        full_result = self._probe_generation(
+                            evidence,
+                            label="refresh_runtime",
+                            engine_only=False,
+                        )
+                        self._raise_if_probe_inconclusive(
+                            full_result,
+                            label="刷新前运行时校验",
+                        )
+                        if not engine_result.passed or not full_result.passed:
                             raise InstallError(
                                 "same-version refresh requires a verified current engine/server"
                             )
@@ -1088,9 +1109,78 @@ class RuntimeInstaller:
             if prefix_pin is not None:
                 prefix_pin.close()
 
+    @staticmethod
+    def _append_probe_result(
+        label: str,
+        attempt: int,
+        result: status.RuntimeProbeResult,
+    ) -> None:
+        record: dict[str, object] = {
+            "attempt": attempt,
+            "elapsed_ms": result.elapsed_ms,
+            "failure": result.failure.value,
+            "label": label,
+            "returncode": result.returncode,
+        }
+        if not result.passed:
+            record["stderr_tail"] = result.stderr_tail
+            record["stdout_tail"] = result.stdout_tail
+        try:
+            status.append_install_log(
+                "VIBECAD_RUNTIME_PROBE="
+                + json.dumps(record, ensure_ascii=False, sort_keys=True)
+                + "\n"
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not alter probe semantics
+            pass
+
+    def _probe_generation(
+        self,
+        evidence: status.RuntimeGenerationEvidence,
+        *,
+        label: str,
+        engine_only: bool,
+    ) -> status.RuntimeProbeResult:
+        probe = (
+            status.engine_compatible_generation_result
+            if engine_only
+            else status.verify_runtime_generation_result
+        )
+        result = probe(evidence)
+        self._append_probe_result(label, 1, result)
+        if (
+            sys.platform == "win32"
+            and result.inconclusive
+            and result.failure is not status.RuntimeProbeFailure.GENERATION_CHANGED
+        ):
+            result = probe(
+                evidence,
+                timeout=_WINDOWS_PROBE_RETRY_TIMEOUT_SECONDS,
+            )
+            self._append_probe_result(label, 2, result)
+        return result
+
+    @staticmethod
+    def _raise_if_probe_inconclusive(
+        result: status.RuntimeProbeResult,
+        *,
+        label: str,
+    ) -> None:
+        if result.inconclusive:
+            raise RuntimeVerificationInconclusive(
+                f"{label}未能得出确定结论（{result.failure.value}）；"
+                "现有 FreeCAD 环境已保留，请稍后仅重试一次 ensure_runtime（详见 install.log）"
+            )
+
     def _verify_generation_or_raise(self, prefix: Path, message: str):
         evidence = self._capture_evidence(prefix)
-        if not status.verify_runtime_generation(evidence):
+        result = self._probe_generation(
+            evidence,
+            label="full_runtime",
+            engine_only=False,
+        )
+        self._raise_if_probe_inconclusive(result, label="运行时校验")
+        if not result.passed:
             raise InstallError(message)
         self._revalidate_evidence(evidence)
         return evidence
@@ -1244,16 +1334,9 @@ class RuntimeInstaller:
             raise InstallError(f"拒绝创建非当前托管运行时前缀：{env}")
         if sys.platform == "win32":
             visible_length = len(os.path.abspath(env))
-            longest_qualified_path = (
-                visible_length + 1 + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER
-            )
-            if (
-                visible_length > spec.WINDOWS_MAX_ENV_PREFIX_LENGTH
-                or longest_qualified_path > 259
-            ):
-                raise InstallError(
-                    "Windows 托管运行时路径过长，无法在未启用系统长路径时安全安装"
-                )
+            longest_qualified_path = visible_length + 1 + spec.WINDOWS_REVIEWED_MAX_ENV_MEMBER
+            if visible_length > spec.WINDOWS_MAX_ENV_PREFIX_LENGTH or longest_qualified_path > 259:
+                raise InstallError("Windows 托管运行时路径过长，无法在未启用系统长路径时安全安装")
         with _owned_directory(env.parent, create_missing=False) as parent_pin:
             if parent_pin is None:
                 env.mkdir(mode=0o700)
@@ -1327,11 +1410,7 @@ class RuntimeInstaller:
 
             entries = os.listdir(directory_fd)
             if entries == [runner_name]:
-                flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_BINARY", 0)
-                )
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
                 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 expected_runner = os.stat(
                     runner_name,
@@ -1489,11 +1568,7 @@ class RuntimeInstaller:
         )
         runner_fd = -1
         try:
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_BINARY", 0)
-            )
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
             flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             runner_fd = os.open(
                 _RUNNER_EXECUTABLE_NAME,
@@ -1872,7 +1947,13 @@ class RuntimeInstaller:
     def _reuse_external(self, prefix: Path, *, label: str) -> bool:
         self._emit(Phase.VERIFYING, 95.0, f"校验{label} FreeCAD env")
         evidence = self._capture_evidence(prefix)
-        if not status.verify_runtime_generation(evidence):
+        result = self._probe_generation(
+            evidence,
+            label=f"external_{label}",
+            engine_only=False,
+        )
+        self._raise_if_probe_inconclusive(result, label=f"{label} FreeCAD 校验")
+        if not result.passed:
             return False
         self._validate_runtime_generation()
         self._write_external_receipt(prefix, evidence)
@@ -1881,12 +1962,24 @@ class RuntimeInstaller:
 
     def _reuse_managed_legacy(self, prefix: Path) -> bool:
         evidence = self._capture_evidence(prefix)
-        if status.verify_runtime_generation(evidence):
+        full_result = self._probe_generation(
+            evidence,
+            label="legacy_runtime",
+            engine_only=False,
+        )
+        self._raise_if_probe_inconclusive(full_result, label="legacy 运行时校验")
+        if full_result.passed:
             self._revalidate_evidence(evidence)
             self._emit(Phase.READY, 100.0, "运行时就绪（原位复用 legacy FreeCAD）")
             return True
         self._validate_runtime_generation()
-        if status.engine_compatible_generation(evidence):
+        engine_result = self._probe_generation(
+            evidence,
+            label="legacy_engine",
+            engine_only=True,
+        )
+        self._raise_if_probe_inconclusive(engine_result, label="legacy 引擎校验")
+        if engine_result.passed:
             self._emit(
                 Phase.INSTALLING_PIP,
                 80.0,
@@ -1952,13 +2045,28 @@ class RuntimeInstaller:
             # receipt 缺失/损坏也不等于 2-3GB 引擎损坏。精确验证通过时只补 receipt；
             # FreeCAD 健康但 server 旧/缺失时只同步 pip 包。
             evidence = self._capture_existing_evidence(env)
-            if evidence is not None and status.verify_runtime_generation(evidence):
-                self._validate_runtime_generation()
-                self._write_sentinel(env, evidence)
-                self._emit(Phase.READY, 100.0, "运行时就绪（已补全版本凭据）")
-                return
+            if evidence is not None:
+                full_result = self._probe_generation(
+                    evidence,
+                    label="existing_runtime",
+                    engine_only=False,
+                )
+                self._raise_if_probe_inconclusive(full_result, label="现有运行时校验")
+                if full_result.passed:
+                    self._validate_runtime_generation()
+                    self._write_sentinel(env, evidence)
+                    self._emit(Phase.READY, 100.0, "运行时就绪（已补全版本凭据）")
+                    return
             self._validate_runtime_generation()
-            if evidence is not None and status.engine_compatible_generation(evidence):
+            engine_result = None
+            if evidence is not None:
+                engine_result = self._probe_generation(
+                    evidence,
+                    label="existing_engine",
+                    engine_only=True,
+                )
+                self._raise_if_probe_inconclusive(engine_result, label="现有引擎校验")
+            if engine_result is not None and engine_result.passed:
                 self._emit(
                     Phase.INSTALLING_PIP,
                     80.0,

@@ -32,10 +32,20 @@ def test_real_managed_freecad_round_trips_headless_model(tmp_path: Path) -> None
     step = tmp_path / "windows-w1.step"
     code = """
 import json
+import os
 import sys
 from pathlib import Path
 from vibecad.freecad_env import prepare_freecad_import
 prepare_freecad_import()
+activation = {
+    "conda_prefix": os.environ.get("CONDA_PREFIX"),
+    "path_prefix": os.environ.get("PATH", "").split(os.pathsep)[:6],
+    "proj_data": os.environ.get("PROJ_DATA"),
+    "proj_network": os.environ.get("PROJ_NETWORK"),
+    "ssl_cert_dir": os.environ.get("SSL_CERT_DIR"),
+    "ssl_cert_file": os.environ.get("SSL_CERT_FILE"),
+    "xml_catalog_files": os.environ.get("XML_CATALOG_FILES"),
+}
 import FreeCAD
 import Part
 model = Path(sys.argv[1])
@@ -56,6 +66,7 @@ assert loaded is not None and loaded.Shape.isValid()
 assert len(loaded.Shape.Solids) == 1
 assert abs(float(loaded.Shape.Volume) - 1000.0) < 1e-7
 payload = {
+    "activation": activation,
     "freecad": FreeCAD.Version()[:3],
     "model_bytes": model.stat().st_size,
     "step_bytes": step.stat().st_size,
@@ -82,6 +93,27 @@ print("VIBECAD_WINDOWS_W1=" + json.dumps(payload, sort_keys=True))
     )
     assert payload_line is not None, completed.stdout[-4000:]
     payload = json.loads(payload_line.removeprefix(marker))
+    prefix = python.parent
+    assert payload["activation"] == {
+        "conda_prefix": str(prefix),
+        "path_prefix": [
+            str(prefix),
+            str(prefix / "Library" / "mingw-w64" / "bin"),
+            str(prefix / "Library" / "usr" / "bin"),
+            str(prefix / "Library" / "bin"),
+            str(prefix / "Scripts"),
+            str(prefix / "bin"),
+        ],
+        "proj_data": str(prefix / "Library" / "share" / "proj"),
+        "proj_network": (
+            "OFF"
+            if (prefix / "Library" / "share" / "proj" / "copyright_and_licenses.csv").is_file()
+            else "ON"
+        ),
+        "ssl_cert_dir": str(prefix / "Library" / "ssl" / "certs"),
+        "ssl_cert_file": str(prefix / "Library" / "ssl" / "cacert.pem"),
+        "xml_catalog_files": (prefix / "etc" / "xml" / "catalog").as_uri(),
+    }
     assert payload["freecad"] == ["1", "1", "0"]
     assert payload["volume_mm3"] == pytest.approx(1000.0)
     assert payload["model_bytes"] == model.stat().st_size > 0
