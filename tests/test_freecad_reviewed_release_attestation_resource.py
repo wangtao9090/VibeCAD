@@ -21,7 +21,7 @@ from vibecad.execution.freecad_reviewed_release_attestation import (
 
 def _raw(
     *,
-    release_version: str = "0.10.0",
+    release_version: str = "0.10.1",
     platform_id: str = "macos.x86_64",
 ) -> bytes:
     return json.dumps(
@@ -50,7 +50,7 @@ def _pin(
     monkeypatch.setattr(
         resource,
         "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM",
-        {("0.10.0", platform_id): hashlib.sha256(raw).hexdigest()},
+        {("0.10.1", platform_id): hashlib.sha256(raw).hexdigest()},
     )
 
 
@@ -71,7 +71,7 @@ def test_loads_only_canonical_pinned_bytes_for_the_installed_release(monkeypatch
 
     loaded = resource.load_current_packaged_freecad_reviewed_release_attestation()
 
-    assert loaded.release_version == "0.10.0"
+    assert loaded.release_version == "0.10.1"
     assert loaded.attestation_sha256 == "a" * 64
     assert loaded.resource_sha256 == hashlib.sha256(raw).hexdigest()
     assert loaded.raw == raw
@@ -144,7 +144,7 @@ def test_unsupported_current_platform_fails_before_pin_or_resource_lookup(monkey
             CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
         ),
         (
-            _raw(release_version="0.10.1"),
+            _raw(release_version="0.10.2"),
             True,
             "package_attestation/binding",
             CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
@@ -254,7 +254,7 @@ def test_checked_in_resources_track_the_cross_platform_catalog126_release(
         == loaded_arm.release_version
         == loaded_windows.release_version
         == __version__
-        == "0.10.0"
+        == "0.10.1"
     )
     assert PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM == {
         (__version__, "macos.arm64"): loaded_arm.resource_sha256,

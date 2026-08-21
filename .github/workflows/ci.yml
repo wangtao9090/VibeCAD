@@ -61,6 +61,58 @@ jobs:
         run: |
           & $env:VIBECAD_MANAGED_FREECAD_PYTHON -I .github\scripts\generate_freecad_reviewed_release_attestation.py --check
           if ($LASTEXITCODE -ne 0) { throw "reviewed-attestation gate failed" }
+  macos-reviewed-attestation:
+    if: startsWith(github.head_ref, 'release/')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_id: macos.x86_64
+            runner: macos-15-intel
+          - platform_id: macos.arm64
+            runner: macos-15
+    steps:
+      - name: bind a fresh isolated reviewed-attestation home
+        run: |
+          runtime_home="$RUNNER_TEMP/vibecad-reviewed-attestation"
+          test ! -e "$runtime_home"
+          printf 'VIBECAD_HOME=%s\n' "$runtime_home" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: build and install the exact pull-request wheel
+        run: |
+          distribution_root="$RUNNER_TEMP/reviewed-attestation-dist"
+          bootstrap_root="$RUNNER_TEMP/reviewed-attestation-bootstrap"
+          uv build --wheel --out-dir "$distribution_root"
+          wheel=("$distribution_root"/*.whl)
+          [[ ${#wheel[@]} -eq 1 && -f "${wheel[0]}" && ! -L "${wheel[0]}" ]]
+          uv venv --python 3.12 "$bootstrap_root"
+          bootstrap_python="$bootstrap_root/bin/python"
+          uv pip install --python "$bootstrap_python" --no-deps "${wheel[0]}"
+          VIBECAD_PIP_SPEC="${wheel[0]}" \
+            "$bootstrap_python" -I -c \
+            'from vibecad.runtime.installer import RuntimeInstaller; RuntimeInstaller().install()'
+          managed_python="$("$bootstrap_python" -I -c \
+            'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
+          [[ -x "$managed_python" ]]
+          printf 'VIBECAD_MANAGED_FREECAD_PYTHON=%s\n' "$managed_python" >> "$GITHUB_ENV"
+      - name: assert the trusted managed platform matches the matrix
+        env:
+          EXPECTED_PLATFORM_ID: ${{ matrix.platform_id }}
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I -c
+          "import os;
+          from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id;
+          expected=os.environ['EXPECTED_PLATFORM_ID']; actual=_platform_id();
+          assert actual == expected, (actual,expected)"
+      - name: exact packaged reviewed-attestation gate
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I
+          .github/scripts/generate_freecad_reviewed_release_attestation.py --check
   runtime-integration:
     needs: lint-unit
     # This job exercises the macOS managed-runtime path; Windows product quality is

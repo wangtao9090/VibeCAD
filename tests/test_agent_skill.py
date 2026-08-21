@@ -726,7 +726,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_10_0():
+def test_manifest_projection_and_all_package_versions_target_0_10_1():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -745,9 +745,9 @@ def test_manifest_projection_and_all_package_versions_target_0_10_0():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.10.0"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.10.0"
-    assert spec.VIBECAD_VERSION == "0.10.0"
+    assert locked == ["0.10.1"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.10.1"
+    assert spec.VIBECAD_VERSION == "0.10.1"
 
 
 def test_release_documents_project_the_current_backend_truth():
@@ -789,9 +789,9 @@ def test_release_documents_project_the_current_backend_truth():
         assert "task kernel" in normalized, path
 
     english_readme = documents["README.md"]
-    assert "v0.10.0" in english_readme
-    assert "vibecad-0.10.0-py3-none-any.whl" in english_readme
-    assert "vibecad-agent-skill-0.10.0.zip" in english_readme
+    assert "v0.10.1" in english_readme
+    assert "vibecad-0.10.1-py3-none-any.whl" in english_readme
+    assert "vibecad-agent-skill-0.10.1.zip" in english_readme
     assert "v0.9.0" not in english_readme
     assert "windows x86-64 (powershell)" in english_readme
     assert "normal, non-elevated powershell" in english_readme
@@ -804,9 +804,9 @@ def test_release_documents_project_the_current_backend_truth():
     assert "not general system-freecad support" in english_readme
 
     chinese_readme = documents["README.zh-CN.md"]
-    assert "v0.10.0" in chinese_readme
-    assert "vibecad-0.10.0-py3-none-any.whl" in chinese_readme
-    assert "vibecad-agent-skill-0.10.0.zip" in chinese_readme
+    assert "v0.10.1" in chinese_readme
+    assert "vibecad-0.10.1-py3-none-any.whl" in chinese_readme
+    assert "vibecad-agent-skill-0.10.1.zip" in chinese_readme
     assert "v0.9.0" not in chinese_readme
     assert "windows x86-64（powershell）" in chinese_readme
     assert "普通、非管理员 powershell" in chinese_readme
@@ -868,6 +868,13 @@ def test_release_documents_project_the_current_backend_truth():
     assert "loggedin=false" in current_release
     assert "runtime epoch 4" in current_release
     assert "38-tool public mcp surface" in current_release
+
+    hotfix_release = _normalized(_read(ROOT / "docs" / "releases" / "v0.10.1.md"))
+    assert hotfix_release.startswith("# vibecad v0.10.1 ")
+    assert "managed freecad runtime" in hotfix_release
+    assert "runtime_unavailable" in hotfix_release
+    assert "vibecad==0.10.1" in hotfix_release
+    assert "vibecad-agent-skill-0.10.1.zip" in hotfix_release
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():
