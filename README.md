@@ -35,18 +35,37 @@ The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
 > https://github.com/wangtao9090/VibeCAD. Use tag `v0.10.0`, clone it into a persistent
-> directory, build its wheel, install it with `uv tool install --force`, keep
+> directory, use the matching Windows PowerShell or macOS Terminal procedure below,
+> build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
 
-The Agent's reproducible procedure is:
+Both platforms require [Git](https://git-scm.com/) and [uv](https://docs.astral.sh/uv/), an
+Internet connection for the first managed-runtime download, and approximately 3 GB of free disk
+space. VibeCAD installs and verifies its own FreeCAD runtime.
+
+### Windows x86-64 (PowerShell)
+
+Run these commands in a normal, non-elevated PowerShell window. Administrator access, Windows
+Developer Mode, and a system-wide long-path policy change are not required.
+
+```powershell
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout v0.10.0
+Set-Location VibeCAD
+uv build --wheel
+uv tool install --force .\dist\vibecad-0.10.0-py3-none-any.whl
+vibecad --freecad
+```
+
+### macOS (Terminal)
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
 git -C VibeCAD checkout v0.10.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.10.0-py3-none-any.whl
+uv tool install --force ./dist/vibecad-0.10.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -60,6 +79,8 @@ Installation notes:
 - Success means managed FreeCAD opens with the VibeCAD Workbench and review Dock active. On
   failure, report the exact launcher error and stop instead of switching runtimes or inventing an
   alternate installation path.
+- The supported release paths are macOS (Apple Silicon and Intel) and Windows x86-64. Linux and
+  Windows on ARM are not currently supported.
 
 The Dock can list projects and tasks, refresh selected state, open separate managed HEAD and
 draft preview documents, show the review verdict, capture exact whole-object or feature

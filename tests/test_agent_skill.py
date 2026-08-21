@@ -776,6 +776,10 @@ def test_release_documents_project_the_current_backend_truth():
     assert "vibecad-0.10.0-py3-none-any.whl" in english_readme
     assert "vibecad-agent-skill-0.10.0.zip" in english_readme
     assert "v0.9.0" not in english_readme
+    assert "windows x86-64 (powershell)" in english_readme
+    assert "normal, non-elevated powershell" in english_readme
+    assert "system-wide long-path policy change are not required" in english_readme
+    assert "macos (terminal)" in english_readme
     assert "freecad workbench alpha" in english_readme
     assert "g1 (alpha complete)" in english_readme
     assert "exact object/feature selector capture" in english_readme
@@ -786,6 +790,10 @@ def test_release_documents_project_the_current_backend_truth():
     assert "vibecad-0.10.0-py3-none-any.whl" in chinese_readme
     assert "vibecad-agent-skill-0.10.0.zip" in chinese_readme
     assert "v0.9.0" not in chinese_readme
+    assert "windows x86-64（powershell）" in chinese_readme
+    assert "普通、非管理员 powershell" in chinese_readme
+    assert "无需管理员权限" in chinese_readme
+    assert "macos（terminal）" in chinese_readme
     assert "freecad workbench alpha" in chinese_readme
     assert "g1（alpha 完成）" in chinese_readme
     assert "精确 object/feature selector 捕获" in chinese_readme

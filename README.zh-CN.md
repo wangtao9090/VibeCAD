@@ -32,17 +32,34 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 
 > 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
 > Workbench Alpha。使用 tag `v0.10.0`，
-> 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
+> 克隆到持久目录，按下方匹配的 Windows PowerShell 或 macOS Terminal 步骤操作，构建 wheel，
+> 通过 `uv tool install --force` 安装，保留 checkout
 > 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
 
-Agent 应执行以下可复现步骤：
+两个平台都需要 [Git](https://git-scm.com/) 和 [uv](https://docs.astral.sh/uv/)，首次下载受管运行时
+时需要联网，并预留约 3 GB 磁盘空间。VibeCAD 会自行安装并验证 FreeCAD 运行时。
+
+### Windows x86-64（PowerShell）
+
+请在普通、非管理员 PowerShell 窗口中运行。无需管理员权限、Windows 开发者模式或修改系统长路径策略。
+
+```powershell
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout v0.10.0
+Set-Location VibeCAD
+uv build --wheel
+uv tool install --force .\dist\vibecad-0.10.0-py3-none-any.whl
+vibecad --freecad
+```
+
+### macOS（Terminal）
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
 git -C VibeCAD checkout v0.10.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.10.0-py3-none-any.whl
+uv tool install --force ./dist/vibecad-0.10.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -54,6 +71,8 @@ vibecad --freecad
 - 首次启动允许下载约 2–3 GB 的锁定运行时文件，后续启动复用；
 - 成功判据是受管 FreeCAD 打开，VibeCAD Workbench 与审核 Dock 均已激活；若失败，报告 launcher
   的精确错误并停止，不切换运行时，也不自行发明其他安装路径。
+- 当前发布路径支持 macOS（Apple Silicon 与 Intel）和 Windows x86-64；暂不支持 Linux 与
+  Windows on ARM。
 
 当前 Dock 可以列出项目和任务、刷新所选状态、打开相互独立的受管 HEAD 与草案预览文档、展示审核
 结论、捕获精确的完整对象或 feature `SelectorV1`，并对新鲜草案执行 Accept 或 Reject。当前尚不
