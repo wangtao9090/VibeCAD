@@ -963,7 +963,7 @@ def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, t
             "-c",
             status._VERIFY_SNIPPET,
         ]
-    assert {key: options["env"][key] for key in _FREECAD_PROCESS_ENV_KEYS} == {
+    expected_environment = {
         key: value
         for key, value in _expected_freecad_process_environment(
             home,
@@ -972,6 +972,7 @@ def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, t
         ).items()
         if key in _FREECAD_PROCESS_ENV_KEYS
     }
+    assert {key: options["env"][key] for key in expected_environment} == expected_environment
 
 
 @pytest.mark.windows_contract

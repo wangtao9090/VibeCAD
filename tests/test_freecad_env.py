@@ -46,7 +46,7 @@ def test_prepare_retains_one_windows_dll_directory_handle(monkeypatch, tmp_path)
         handles.append(handle)
         return handle
 
-    monkeypatch.setattr(fe.os, "add_dll_directory", add_dll_directory)
+    monkeypatch.setattr(fe.os, "add_dll_directory", add_dll_directory, raising=False)
     saved = list(sys.path)
     saved_environment = dict(os.environ)
     try:

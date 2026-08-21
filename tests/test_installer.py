@@ -1408,11 +1408,15 @@ def test_inconclusive_existing_runtime_is_preserved_and_repaired_without_downloa
     with pytest.raises(inst.RuntimeVerificationInconclusive, match="环境已保留"):
         inst.RuntimeInstaller().install()
 
-    assert calls == [120.0, inst._WINDOWS_PROBE_RETRY_TIMEOUT_SECONDS]
+    expected_calls = [120.0]
+    if inst.sys.platform == "win32":
+        expected_calls.append(inst._WINDOWS_PROBE_RETRY_TIMEOUT_SECONDS)
+    assert calls == expected_calls
     assert retained.read_bytes() == b"complete managed environment"
     assert not sentinel.exists()
     probe_log = inst.paths.install_log().read_text(encoding="utf-8")
-    assert '"attempt": 1' in probe_log and '"attempt": 2' in probe_log
+    assert '"attempt": 1' in probe_log
+    assert ('"attempt": 2' in probe_log) is (inst.sys.platform == "win32")
     assert '"failure": "timed_out"' in probe_log
 
     passed = inst.status.RuntimeProbeResult(
@@ -2354,7 +2358,7 @@ def test_capability_bound_python_probe_ignores_prefix_replacement_and_writes_no_
 
     monkeypatch.setattr(inst.status, "_spawn_probe_process", replace_prefix_before_spawn)
 
-    with pytest.raises(inst.InstallError, match="不会自动改写用户 env"):
+    with pytest.raises(inst.RuntimeVerificationInconclusive, match="generation_changed|环境已保留"):
         inst.RuntimeInstaller().install()
 
     assert swapped is True

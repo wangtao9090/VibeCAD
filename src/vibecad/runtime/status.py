@@ -2015,6 +2015,14 @@ def _probe_runtime_generation_result(
             )
         return result
 
+    try:
+        environment = freecad_process_environment(
+            {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            runtime_prefix=evidence.prefix,
+        )
+    except (OSError, TypeError, ValueError):
+        return RuntimeProbeResult(RuntimeProbeFailure.SPAWN_ERROR, None, 0)
+
     prefix_pinned = None
     python_parent = None
     try:
@@ -2031,10 +2039,6 @@ def _probe_runtime_generation_result(
             else _open_relative_pinned_directory(prefix_pinned, tuple(parent_parts))
         )
         python_parent.validate()
-        environment = freecad_process_environment(
-            {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-            runtime_prefix=evidence.prefix,
-        )
         parent_fd = python_parent.fd
         launcher = os.fspath(sys.executable)
         if not launcher or not os.path.isabs(launcher):
