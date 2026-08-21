@@ -48,6 +48,8 @@ space. VibeCAD installs and verifies its own FreeCAD runtime.
 
 Run these commands in a normal, non-elevated PowerShell window. Administrator access, Windows
 Developer Mode, and a system-wide long-path policy change are not required.
+The supported Windows path does not inspect, modify, or attach to a user-installed FreeCAD;
+`vibecad --freecad` launches only the verified VibeCAD-managed runtime.
 
 ```powershell
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD

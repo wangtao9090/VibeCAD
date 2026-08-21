@@ -42,6 +42,8 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 ### Windows x86-64（PowerShell）
 
 请在普通、非管理员 PowerShell 窗口中运行。无需管理员权限、Windows 开发者模式或修改系统长路径策略。
+Windows 正式支持路径不会检查、修改或挂接用户自行安装的 FreeCAD；`vibecad --freecad` 只启动经过
+验证的 VibeCAD 受管运行时。
 
 ```powershell
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
