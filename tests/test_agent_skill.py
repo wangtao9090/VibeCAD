@@ -733,7 +733,7 @@ def test_manifest_projection_and_all_package_versions_target_0_10_0():
     assert spec.VIBECAD_VERSION == "0.10.0"
 
 
-def test_release_documents_project_the_0_9_0_backend_truth():
+def test_release_documents_project_the_current_backend_truth():
     documents = {
         path: _normalized(_read(ROOT / path))
         for path in (
@@ -749,7 +749,8 @@ def test_release_documents_project_the_0_9_0_backend_truth():
     }
     for path, normalized in documents.items():
         assert "0.5.0" not in normalized, path
-        assert "0.9.0" in normalized, path
+        if path not in {"README.md", "README.zh-CN.md"}:
+            assert "0.9.0" in normalized, path
         assert "27-tool" not in normalized, path
         assert "27 个工具" not in normalized, path
 
@@ -771,12 +772,20 @@ def test_release_documents_project_the_0_9_0_backend_truth():
         assert "task kernel" in normalized, path
 
     english_readme = documents["README.md"]
+    assert "v0.10.0" in english_readme
+    assert "vibecad-0.10.0-py3-none-any.whl" in english_readme
+    assert "vibecad-agent-skill-0.10.0.zip" in english_readme
+    assert "v0.9.0" not in english_readme
     assert "freecad workbench alpha" in english_readme
     assert "g1 (alpha complete)" in english_readme
     assert "exact object/feature selector capture" in english_readme
     assert "not general system-freecad support" in english_readme
 
     chinese_readme = documents["README.zh-CN.md"]
+    assert "v0.10.0" in chinese_readme
+    assert "vibecad-0.10.0-py3-none-any.whl" in chinese_readme
+    assert "vibecad-agent-skill-0.10.0.zip" in chinese_readme
+    assert "v0.9.0" not in chinese_readme
     assert "freecad workbench alpha" in chinese_readme
     assert "g1（alpha 完成）" in chinese_readme
     assert "精确 object/feature selector 捕获" in chinese_readme

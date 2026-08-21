@@ -34,7 +34,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.9.0`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.10.0`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -43,10 +43,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.9.0
+git -C VibeCAD checkout v0.10.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.9.0-py3-none-any.whl
+uv tool install --force dist/vibecad-0.10.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -242,7 +242,7 @@ Skill discovery paths are:
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.9.0.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.10.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -321,7 +321,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.9.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+The 0.10.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
 Release ResourceLinks, managed FreeCAD E2E, and exact 39-tool discovery independently of any host.
 Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
 never certifies the others. WorkBuddy additionally carries the compatibility coverage described
@@ -338,7 +338,7 @@ one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
 editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
-included in 0.9.0:
+included in 0.10.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
