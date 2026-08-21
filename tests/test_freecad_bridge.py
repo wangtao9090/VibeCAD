@@ -128,7 +128,7 @@ def test_bridge_handshake_and_closed_method_allowlist() -> None:
         "kind": "hello",
         "protocol": "vibecad-freecad-bridge",
         "protocol_version": 1,
-        "package_version": "0.10.0",
+        "package_version": "0.10.1",
         "daemon_id": client.daemon_id,
         "nonce": nonce,
     }

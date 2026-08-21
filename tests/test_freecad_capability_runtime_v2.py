@@ -520,7 +520,7 @@ def test_fixed_packaged_attestation_promotes_all_102_without_running_verifier(
         calls.append(("validate", (value, kwargs)))
         assert value is decoded
         assert kwargs == {
-            "expected_release_version": "0.10.0",
+            "expected_release_version": "0.10.1",
             "runtime_backend": discovery.snapshot.backend,
             "discovery_snapshot_sha256": discovery.snapshot.snapshot_sha256,
             "discovery_manifest_sha256": discovery.manifest.manifest_sha256,
