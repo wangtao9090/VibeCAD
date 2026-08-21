@@ -21,6 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+from vibecad.freecad_env import activate_windows_runtime_environment
 from vibecad.worker.codec import (
     MAX_WORKER_RESPONSE_BYTES,
     WorkerCodecError,
@@ -246,13 +247,6 @@ def _minimal_windows_environment(
     system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
     if not system_root or not Path(system_root).is_absolute():
         raise OSError("Windows system root is unavailable")
-    path_entries = (
-        prefix,
-        prefix / "Library" / "bin",
-        prefix / "Scripts",
-        Path(system_root) / "System32",
-        Path(system_root),
-    )
     environment = {
         "APPDATA": str(home / "appdata"),
         "FREECAD_USER_DATA": str(freecad_data),
@@ -260,7 +254,7 @@ def _minimal_windows_environment(
         "FREECAD_USER_TEMP": str(freecad_temp),
         "HOME": str(home),
         "LOCALAPPDATA": str(home / "localappdata"),
-        "PATH": os.pathsep.join(str(value) for value in path_entries),
+        "PATH": os.pathsep.join((str(Path(system_root) / "System32"), str(Path(system_root)))),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONPATH": str(source_root),
@@ -278,7 +272,7 @@ def _minimal_windows_environment(
             environment[name] = value
     for name in ("appdata", "localappdata"):
         _private_child_directory(home, name)
-    return environment
+    return activate_windows_runtime_environment(environment, prefix)
 
 
 class _SpawnedProcess:

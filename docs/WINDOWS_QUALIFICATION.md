@@ -127,6 +127,24 @@ pins, derives `win-64` from installed `conda-meta` JSON, and checks that the
 cache-cleanup helper module has exited. Sanitized installer stdout and stderr are
 retained for failure diagnosis.
 
+The verifier, Worker, supervisor, and GUI launcher share one reviewed Windows
+activation contract. It prepends the managed prefix, `Library\mingw-w64\bin`,
+`Library\usr\bin`, `Library\bin`, `Scripts`, and `bin`; sets the exact
+`CONDA_PREFIX`, PROJ, OpenSSL, and XML catalog variables; and retains the
+`os.add_dll_directory()` cookie for the lifetime of a FreeCAD-hosting Python
+process. The parent environment is copied rather than mutated. This avoids an
+ambient activated shell while preserving the Job Object, process-generation,
+and stdio supervision boundaries that would be obscured by wrapping every child
+in `micromamba run`.
+
+Each verification attempt records a bounded structured result in `install.log`:
+elapsed time, return code, failure class, and output tails. A definite process
+exit is a failed runtime. A timeout or spawn failure is inconclusive; on Windows
+it receives one longer retry, then preserves the exact environment and refuses
+to publish Ready. A later single `ensure_runtime` retry revalidates that same
+generation and repairs only the receipt when healthy. It must not invoke either
+micromamba download phase in this recovery case.
+
 Exit criteria:
 
 - the selected conda subdir is proven by installed metadata to be exactly
@@ -143,6 +161,11 @@ Exit criteria:
   contains `viskores=1.1.1=cpu_h4b717ef_1`; both binaries match their embedded
   reviewed SHA-256 digests;
 - managed Python imports FreeCAD 1.1.0 without relying on a system FreeCAD;
+- the verifier and launched FreeCAD process expose the exact reviewed activation
+  variables, and the verifier's DLL-directory lifetime survives through import;
+- an injected cold-start timeout preserves the exact runtime, emits structured
+  diagnostics, and a later successful retry publishes Ready with zero package
+  download or relink commands;
 - FreeCAD create/recompute/save/export/reopen/close succeeds headlessly;
 - the short physical cache root is no longer than 40 characters, and it, the
   2.5 download prefix, and the recovery record are absent after installation;

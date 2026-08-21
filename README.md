@@ -336,6 +336,21 @@ Runtime and project data are separate. `uninstall_runtime` first presents a prev
 requires explicit confirmation. It deletes only the managed runtime while preserving project,
 revision, draft, and artifact data. The host settings can then remove the extension itself.
 
+### Windows runtime verification recovery
+
+The Windows verifier and every FreeCAD child use the same explicit managed-environment
+activation contract. VibeCAD prepends the reviewed prefix paths, retains the Python DLL search
+directory for the lifetime of the process, and sets the conda activation variables needed by
+FreeCAD's native libraries. It does not depend on an ambient shell activation or wrap the MCP
+server in `micromamba run`.
+
+If a first cold verification times out or cannot start, VibeCAD records bounded diagnostics in
+`%LOCALAPPDATA%\VibeCAD\runtime\install.log` and preserves the completed environment. Retry
+`ensure_runtime` once after the current maintenance operation has stopped; a healthy environment
+is verified in place and receives its Ready receipt without downloading FreeCAD again. A definite
+import/version failure remains a repair failure. Do not create the Ready receipt manually and do
+not run a second installer concurrently.
+
 ### Local Development
 
 ```bash

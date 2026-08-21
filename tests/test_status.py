@@ -518,18 +518,87 @@ def test_probe_is_isolated_and_never_writes_external_bytecode(
     assert status._probe(Path(sys.executable), "import external_runtime_probe") is False
 
 
+def test_probe_result_preserves_timeout_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "VibeCAD"))
+
+    def timed_out(command, **options):
+        raise subprocess.TimeoutExpired(
+            command,
+            options["timeout"],
+            output=b"partial stdout",
+            stderr=b"cold DLL scan",
+        )
+
+    monkeypatch.setattr(status, "_spawn_probe_process", timed_out)
+
+    result = status._probe_result(Path(sys.executable), "pass", timeout=0.01)
+
+    assert result.failure is status.RuntimeProbeFailure.TIMED_OUT
+    assert result.inconclusive is True
+    assert result.passed is False
+    assert result.returncode is None
+    assert result.stdout_tail == "partial stdout"
+    assert result.stderr_tail == "cold DLL scan"
+
+
+def test_probe_result_preserves_nonzero_exit_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "VibeCAD"))
+
+    completed = subprocess.CompletedProcess(
+        [sys.executable],
+        7,
+        stdout=b"probe stdout",
+        stderr=b"FreeCAD import failed",
+    )
+    monkeypatch.setattr(status, "_spawn_probe_process", lambda *args, **kwargs: completed)
+
+    result = status._probe_result(Path(sys.executable), "pass")
+
+    assert result.failure is status.RuntimeProbeFailure.PROCESS_EXIT
+    assert result.inconclusive is False
+    assert result.passed is False
+    assert result.returncode == 7
+    assert result.stdout_tail == "probe stdout"
+    assert result.stderr_tail == "FreeCAD import failed"
+
+
 _FREECAD_PROCESS_ENV_KEYS = frozenset(
-    {"FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP"}
+    {
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PREFIX",
+        "CONDA_SHLVL",
+        "FREECAD_USER_HOME",
+        "FREECAD_USER_DATA",
+        "FREECAD_USER_TEMP",
+        "PATH",
+        "PROJ_DATA",
+        "PROJ_NETWORK",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "XML_CATALOG_FILES",
+    }
 )
 
 
-def _expected_freecad_process_environment(home: Path) -> dict[str, str]:
+def _expected_freecad_process_environment(
+    home: Path,
+    base: dict[str, str] | None = None,
+    *,
+    runtime_prefix: Path | None = None,
+) -> dict[str, str]:
     root = home / "runtime" / "freecad-user"
-    return {
+    environment = {
+        **(base or {}),
         "FREECAD_USER_HOME": str(root / "home"),
         "FREECAD_USER_DATA": str(root / "data"),
         "FREECAD_USER_TEMP": str(root / "temp"),
     }
+    if sys.platform == "win32":
+        return status.activate_windows_runtime_environment(
+            environment,
+            runtime_prefix or status.paths.active_runtime_prefix(),
+        )
+    return environment
 
 
 def test_freecad_process_environment_is_private_replaceable_and_exact(
@@ -555,12 +624,16 @@ def test_freecad_process_environment_is_private_replaceable_and_exact(
     environment = status.freecad_process_environment(base)
 
     assert base == base_before
-    assert environment == {"KEEP": "yes", **expected}
+    assert environment == _expected_freecad_process_environment(home, {"KEEP": "yes"})
     assert status.freecad_process_environment() == expected
     assert {key: os.environ.get(key) for key in _FREECAD_PROCESS_ENV_KEYS} == process_before
     assert legacy_marker.read_bytes() == b"external-engine"
     assert not (home / "data").exists()
-    for directory in [home / "runtime" / "freecad-user", *map(Path, expected.values())]:
+    private_directories = [
+        Path(expected[key])
+        for key in ("FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP")
+    ]
+    for directory in [home / "runtime" / "freecad-user", *private_directories]:
         info = directory.lstat()
         assert stat.S_ISDIR(info.st_mode)
         if sys.platform == "win32":
@@ -568,6 +641,33 @@ def test_freecad_process_environment_is_private_replaceable_and_exact(
             assert capability.owner_sid.startswith("S-1-")
         else:
             assert stat.S_IMODE(info.st_mode) & 0o077 == 0
+
+
+def test_windows_freecad_process_environment_activates_requested_generation(
+    monkeypatch,
+    tmp_path,
+):
+    if sys.platform != "win32":
+        pytest.skip("Windows managed-runtime activation contract")
+    home = tmp_path / "VibeCAD"
+    requested = tmp_path / "legacy" / "envs" / "vibecad"
+    requested.mkdir(parents=True)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    environment = status.freecad_process_environment(
+        {"PATH": r"C:\Windows\System32"},
+        runtime_prefix=requested,
+    )
+
+    assert environment["CONDA_PREFIX"] == str(requested)
+    assert environment["PATH"].split(os.pathsep)[:6] == [
+        str(requested),
+        str(requested / "Library" / "mingw-w64" / "bin"),
+        str(requested / "Library" / "usr" / "bin"),
+        str(requested / "Library" / "bin"),
+        str(requested / "Scripts"),
+        str(requested / "bin"),
+    ]
 
 
 def test_freecad_process_environment_rejects_alias_without_touching_target(
@@ -764,7 +864,10 @@ def test_probe_supplies_freecad_environment_when_passwd_lookup_is_unavailable(
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     for key in _FREECAD_PROCESS_ENV_KEYS:
         monkeypatch.setenv(key, f"poison-{key}")
-    expected = _expected_freecad_process_environment(home)
+    expected = _expected_freecad_process_environment(
+        home,
+        {"PATH": os.environ.get("PATH", "")},
+    )
     captured = {}
 
     class P:
@@ -795,7 +898,7 @@ def test_probe_fails_closed_when_freecad_environment_is_unavailable(
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
 
-    def unavailable(_base=None):
+    def unavailable(_base=None, **_kwargs):
         raise ValueError("FreeCAD process directory is unavailable")
 
     monkeypatch.setattr(status, "freecad_process_environment", unavailable, raising=False)
@@ -860,9 +963,15 @@ def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, t
             "-c",
             status._VERIFY_SNIPPET,
         ]
-    assert {
-        key: options["env"][key] for key in _FREECAD_PROCESS_ENV_KEYS
-    } == _expected_freecad_process_environment(home)
+    assert {key: options["env"][key] for key in _FREECAD_PROCESS_ENV_KEYS} == {
+        key: value
+        for key, value in _expected_freecad_process_environment(
+            home,
+            {"PATH": os.environ.get("PATH", "")},
+            runtime_prefix=prefix,
+        ).items()
+        if key in _FREECAD_PROCESS_ENV_KEYS
+    }
 
 
 @pytest.mark.windows_contract

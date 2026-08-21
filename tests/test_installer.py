@@ -15,8 +15,7 @@ from vibecad.runtime.status import Phase
 _FAKE_MICROMAMBA = b"#!/bin/sh\nexit 0\n"
 _WINDOWS_FAKE_MICROMAMBA = b"mock micromamba"
 _REAL_ENSURE_MICROMAMBA = inst.micromamba.ensure_micromamba
-_REAL_VERIFY_GENERATION = inst.status.verify_runtime_generation
-_REAL_ENGINE_GENERATION = inst.status.engine_compatible_generation
+_REAL_VERIFY_GENERATION_RESULT = inst.status.verify_runtime_generation_result
 _POSIX_DIRECTORY_CAPABILITY = pytest.mark.skipif(
     inst.sys.platform == "win32",
     reason="POSIX dir-fd/pass_fds runner contract; Windows uses Job Objects and native guards",
@@ -60,6 +59,28 @@ def _offline_capability_download(monkeypatch):
         inst.status,
         "engine_compatible_generation",
         lambda evidence: inst.status.engine_compatible(evidence.python),
+    )
+
+    def probe_result(passed: bool) -> inst.status.RuntimeProbeResult:
+        return inst.status.RuntimeProbeResult(
+            (
+                inst.status.RuntimeProbeFailure.NONE
+                if passed
+                else inst.status.RuntimeProbeFailure.PROCESS_EXIT
+            ),
+            0 if passed else 1,
+            0,
+        )
+
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime_generation_result",
+        lambda evidence, **_kwargs: probe_result(inst.status.verify_runtime(evidence.python)),
+    )
+    monkeypatch.setattr(
+        inst.status,
+        "engine_compatible_generation_result",
+        lambda evidence, **_kwargs: probe_result(inst.status.engine_compatible(evidence.python)),
     )
     if inst.sys.platform == "win32":
         # pytest's deeply nested temp roots are intentionally unlike the product
@@ -419,17 +440,22 @@ def test_installer_verification_fails_closed_without_freecad_process_directory(
 
     calls = []
 
-    def unavailable(base=None):
+    def unavailable(base=None, **_kwargs):
         calls.append(base)
         raise ValueError("FreeCAD process directory is unavailable")
 
     monkeypatch.setattr(inst.status, "freecad_process_environment", unavailable, raising=False)
-    monkeypatch.setattr(inst.status, "verify_runtime_generation", _REAL_VERIFY_GENERATION)
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime_generation_result",
+        _REAL_VERIFY_GENERATION_RESULT,
+    )
 
-    with pytest.raises(inst.InstallError, match="verification stopped"):
+    with pytest.raises(inst.RuntimeVerificationInconclusive, match="spawn_error"):
         inst.RuntimeInstaller()._verify_generation_or_raise(prefix, "verification stopped")
 
-    assert len(calls) == 1 and calls[0]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert len(calls) == (2 if inst.sys.platform == "win32" else 1)
+    assert all(call["PYTHONDONTWRITEBYTECODE"] == "1" for call in calls)
     assert not (prefix / ".vibecad_ready").exists()
     assert legacy_marker.read_bytes() == b"external-engine"
 
@@ -1346,6 +1372,66 @@ def test_unhealthy_existing_managed_env_is_removed_before_create(monkeypatch, tm
     assert python == inst.paths.env_python_for(env)
 
 
+@pytest.mark.windows_contract
+def test_inconclusive_existing_runtime_is_preserved_and_repaired_without_download(
+    monkeypatch,
+    tmp_path,
+):
+    _python, sentinel = _prepare_managed_env(monkeypatch, tmp_path, None)
+    env = inst.paths.env_prefix()
+    retained = env / "retained-engine.bin"
+    retained.write_bytes(b"complete managed environment")
+    calls: list[float] = []
+
+    def timed_out(_evidence, *, timeout=120.0):
+        calls.append(timeout)
+        return inst.status.RuntimeProbeResult(
+            inst.status.RuntimeProbeFailure.TIMED_OUT,
+            None,
+            round(timeout * 1000),
+            "",
+            "cold antivirus scan",
+        )
+
+    monkeypatch.setattr(inst.status, "verify_runtime_generation_result", timed_out)
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "_remove_managed_env",
+        lambda self, path: pytest.fail(f"inconclusive environment was removed: {path}"),
+    )
+    monkeypatch.setattr(
+        inst.micromamba,
+        "ensure_micromamba",
+        lambda *args, **kwargs: pytest.fail("inconclusive verification must not download"),
+    )
+
+    with pytest.raises(inst.RuntimeVerificationInconclusive, match="环境已保留"):
+        inst.RuntimeInstaller().install()
+
+    assert calls == [120.0, inst._WINDOWS_PROBE_RETRY_TIMEOUT_SECONDS]
+    assert retained.read_bytes() == b"complete managed environment"
+    assert not sentinel.exists()
+    probe_log = inst.paths.install_log().read_text(encoding="utf-8")
+    assert '"attempt": 1' in probe_log and '"attempt": 2' in probe_log
+    assert '"failure": "timed_out"' in probe_log
+
+    passed = inst.status.RuntimeProbeResult(
+        inst.status.RuntimeProbeFailure.NONE,
+        0,
+        3,
+    )
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime_generation_result",
+        lambda _evidence, **_kwargs: passed,
+    )
+
+    inst.RuntimeInstaller().install()
+
+    assert retained.read_bytes() == b"complete managed environment"
+    assert inst.status.read_runtime_receipt() == spec.expected_receipt()
+
+
 def test_successful_create_without_python_stops_after_pip_and_before_receipt(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
     monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
@@ -2246,7 +2332,11 @@ def test_capability_bound_python_probe_ignores_prefix_replacement_and_writes_no_
     python.parent.mkdir(parents=True)
     python.write_bytes(b'#!/bin/sh\nprintf safe > "$VIBECAD_TEST_MARKER"\nexit 0\n')
     python.chmod(0o700)
-    monkeypatch.setattr(inst.status, "verify_runtime_generation", _REAL_VERIFY_GENERATION)
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime_generation_result",
+        _REAL_VERIFY_GENERATION_RESULT,
+    )
     real_spawn = inst.status._spawn_probe_process
     detached = prefix.with_name("external-detached")
     swapped = False

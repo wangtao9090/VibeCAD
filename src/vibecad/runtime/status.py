@@ -33,6 +33,7 @@ from vibecad._file_compat import (
     validate_windows_handle_path,
     validate_windows_path,
 )
+from vibecad.freecad_env import activate_windows_runtime_environment
 from vibecad.runtime import paths, spec
 
 # import FreeCAD 前的跨平台兜底（Windows 把 conda Library/bin 注入 PATH；macOS/Linux 无操作）
@@ -42,7 +43,7 @@ _PREP = (
     "    _b=os.path.join(sys.prefix,'Library','bin')\n"
     "    os.environ['PATH']=_b+os.pathsep+os.environ.get('PATH','')\n"
     "    try:\n"
-    "        os.add_dll_directory(_b)\n"
+    "        _vibecad_dll_directory=os.add_dll_directory(_b)\n"
     "    except Exception:\n"
     "        pass\n"
     "    _mods=[_b, os.path.join(sys.prefix,'Library','lib')]\n"
@@ -111,9 +112,42 @@ _VERIFY_SNIPPET = _ENGINE_SNIPPET + _SERVER_SNIPPET
 _STALE_SECONDS = 3600
 _MAX_RECEIPT_BYTES = 4096
 _MAX_LOG_APPEND_BYTES = 64 * 1024
+_MAX_PROBE_DIAGNOSTIC_BYTES = 4096
+_DEFAULT_PROBE_TIMEOUT_SECONDS = 120.0
 _BOUNDED_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RUNTIME_MAINTENANCE_CLAIM_FD_ENV = "VIBECAD_STARTUP_LOCK_FD"
+
+
+class RuntimeProbeFailure(StrEnum):
+    NONE = "none"
+    PROCESS_EXIT = "process_exit"
+    TIMED_OUT = "timed_out"
+    SPAWN_ERROR = "spawn_error"
+    GENERATION_CHANGED = "generation_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProbeResult:
+    failure: RuntimeProbeFailure
+    returncode: int | None
+    elapsed_ms: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+    @property
+    def passed(self) -> bool:
+        return self.failure is RuntimeProbeFailure.NONE and self.returncode == 0
+
+    @property
+    def inconclusive(self) -> bool:
+        return self.failure in {
+            RuntimeProbeFailure.TIMED_OUT,
+            RuntimeProbeFailure.SPAWN_ERROR,
+            RuntimeProbeFailure.GENERATION_CHANGED,
+        }
+
+
 _PRE_EPOCH_MANAGED_RECEIPT_KEYS = frozenset(
     {
         "schema",
@@ -1166,6 +1200,8 @@ def _validate_private_process_ancestors(pinned: _PinnedDirectory) -> None:
 
 def freecad_process_environment(
     base: Mapping[str, str] | None = None,
+    *,
+    runtime_prefix: Path | None = None,
 ) -> dict[str, str]:
     """Return a copied process environment with private FreeCAD directories.
 
@@ -1222,6 +1258,11 @@ def freecad_process_environment(
     environment.update(
         {variable: str(container_path / name) for variable, name in directory_names.items()}
     )
+    if sys.platform == "win32":
+        environment = activate_windows_runtime_environment(
+            environment,
+            runtime_prefix or paths.active_runtime_prefix(),
+        )
     return environment
 
 
@@ -1838,21 +1879,89 @@ def runtime_recovery_kind() -> RecoveryKind:
     return RecoveryKind.REPAIR_REQUIRED
 
 
-def _probe(python: Path | None, snippet: str) -> bool:
-    py = python or paths.active_runtime_python()
-    if not Path(py).exists():
-        return False
+def _probe_diagnostic_tail(value: object) -> str:
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "replace")
+    elif isinstance(value, str):
+        text = value
+    else:
+        return ""
+    return text.replace("\x00", "\ufffd")[-_MAX_PROBE_DIAGNOSTIC_BYTES:]
+
+
+def _run_probe_command(
+    command: list[str],
+    *,
+    environment: Mapping[str, str],
+    timeout: float,
+    pass_fds: tuple[int, ...] = (),
+) -> RuntimeProbeResult:
+    started = time.monotonic()
+    options: dict[str, object] = {
+        "capture_output": True,
+        "timeout": timeout,
+        "env": dict(environment),
+    }
+    if pass_fds:
+        options["pass_fds"] = pass_fds
     try:
-        environment = freecad_process_environment({**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-        result = _spawn_probe_process(
-            [str(py), "-I", "-B", "-c", snippet],
-            capture_output=True,
-            timeout=120,
-            env=environment,
+        completed = _spawn_probe_process(command, **options)
+    except subprocess.TimeoutExpired as exc:
+        return RuntimeProbeResult(
+            RuntimeProbeFailure.TIMED_OUT,
+            None,
+            max(0, round((time.monotonic() - started) * 1000)),
+            _probe_diagnostic_tail(exc.output),
+            _probe_diagnostic_tail(exc.stderr),
         )
-        return result.returncode == 0
     except (OSError, TypeError, ValueError, subprocess.SubprocessError):
-        return False
+        return RuntimeProbeResult(
+            RuntimeProbeFailure.SPAWN_ERROR,
+            None,
+            max(0, round((time.monotonic() - started) * 1000)),
+        )
+    returncode = getattr(completed, "returncode", None)
+    if type(returncode) is not int:
+        return RuntimeProbeResult(
+            RuntimeProbeFailure.SPAWN_ERROR,
+            None,
+            max(0, round((time.monotonic() - started) * 1000)),
+        )
+    return RuntimeProbeResult(
+        RuntimeProbeFailure.NONE if returncode == 0 else RuntimeProbeFailure.PROCESS_EXIT,
+        returncode,
+        max(0, round((time.monotonic() - started) * 1000)),
+        _probe_diagnostic_tail(getattr(completed, "stdout", None)),
+        _probe_diagnostic_tail(getattr(completed, "stderr", None)),
+    )
+
+
+def _probe_result(
+    python: Path | None,
+    snippet: str,
+    *,
+    timeout: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
+    runtime_prefix: Path | None = None,
+) -> RuntimeProbeResult:
+    py = python or paths.active_runtime_python()
+    try:
+        if not Path(py).exists():
+            raise OSError("runtime Python is unavailable")
+        environment = freecad_process_environment(
+            {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            runtime_prefix=runtime_prefix,
+        )
+    except (OSError, TypeError, ValueError):
+        return RuntimeProbeResult(RuntimeProbeFailure.SPAWN_ERROR, None, 0)
+    return _run_probe_command(
+        [str(py), "-I", "-B", "-c", snippet],
+        environment=environment,
+        timeout=timeout,
+    )
+
+
+def _probe(python: Path | None, snippet: str) -> bool:
+    return _probe_result(python, snippet).passed
 
 
 def _spawn_probe_process(*args, **kwargs):
@@ -1871,10 +1980,12 @@ _FD_EXEC_HELPER = (
 )
 
 
-def _probe_runtime_generation(
+def _probe_runtime_generation_result(
     evidence: RuntimeGenerationEvidence,
     snippet: str,
-) -> bool:
+    *,
+    timeout: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
+) -> RuntimeProbeResult:
     """Probe from the evidence-bound Python parent instead of an absolute path.
 
     On POSIX this closes ancestor/prefix replacement: the child changes directory
@@ -1884,15 +1995,25 @@ def _probe_runtime_generation(
     """
 
     if type(evidence) is not RuntimeGenerationEvidence:
-        return False
+        return RuntimeProbeResult(RuntimeProbeFailure.SPAWN_ERROR, None, 0)
     if not _secure_dir_fd_available():
-        if not _probe(evidence.python, snippet):
-            return False
+        result = _probe_result(
+            evidence.python,
+            snippet,
+            timeout=timeout,
+            runtime_prefix=evidence.prefix,
+        )
         try:
             _validate_runtime_generation_evidence(evidence, evidence.prefix)
         except (OSError, ValueError):
-            return False
-        return True
+            return RuntimeProbeResult(
+                RuntimeProbeFailure.GENERATION_CHANGED,
+                result.returncode,
+                result.elapsed_ms,
+                result.stdout_tail,
+                result.stderr_tail,
+            )
+        return result
 
     prefix_pinned = None
     python_parent = None
@@ -1910,13 +2031,16 @@ def _probe_runtime_generation(
             else _open_relative_pinned_directory(prefix_pinned, tuple(parent_parts))
         )
         python_parent.validate()
-        environment = freecad_process_environment({**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        environment = freecad_process_environment(
+            {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            runtime_prefix=evidence.prefix,
+        )
         parent_fd = python_parent.fd
         launcher = os.fspath(sys.executable)
         if not launcher or not os.path.isabs(launcher):
-            return False
+            return RuntimeProbeResult(RuntimeProbeFailure.SPAWN_ERROR, None, 0)
         target_command = [f"./{evidence.python.name}", "-I", "-B", "-c", snippet]
-        result = _spawn_probe_process(
+        result = _run_probe_command(
             [
                 launcher,
                 "-I",
@@ -1926,9 +2050,8 @@ def _probe_runtime_generation(
                 str(parent_fd),
                 *target_command,
             ],
-            capture_output=True,
-            timeout=120,
-            env=environment,
+            environment=environment,
+            timeout=timeout,
             pass_fds=(parent_fd,),
         )
         python_parent.validate()
@@ -1937,14 +2060,21 @@ def _probe_runtime_generation(
             evidence.prefix,
             prefix_pinned,
         )
-        return result.returncode == 0
+        return result
     except (OSError, TypeError, ValueError, subprocess.SubprocessError):
-        return False
+        return RuntimeProbeResult(RuntimeProbeFailure.GENERATION_CHANGED, None, 0)
     finally:
         if python_parent is not None and python_parent is not prefix_pinned:
             python_parent.close()
         if prefix_pinned is not None:
             prefix_pinned.close()
+
+
+def _probe_runtime_generation(
+    evidence: RuntimeGenerationEvidence,
+    snippet: str,
+) -> bool:
+    return _probe_runtime_generation_result(evidence, snippet).passed
 
 
 def health_check(python: Path | None = None) -> bool:
@@ -1968,10 +2098,30 @@ def engine_compatible_generation(evidence: RuntimeGenerationEvidence) -> bool:
     return _probe_runtime_generation(evidence, _ENGINE_SNIPPET)
 
 
+def engine_compatible_generation_result(
+    evidence: RuntimeGenerationEvidence,
+    *,
+    timeout: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
+) -> RuntimeProbeResult:
+    """Return diagnostics for one capability-bound managed-engine probe."""
+
+    return _probe_runtime_generation_result(evidence, _ENGINE_SNIPPET, timeout=timeout)
+
+
 def verify_runtime_generation(evidence: RuntimeGenerationEvidence) -> bool:
     """Capability-bound full runtime/server probe."""
 
     return _probe_runtime_generation(evidence, _VERIFY_SNIPPET)
+
+
+def verify_runtime_generation_result(
+    evidence: RuntimeGenerationEvidence,
+    *,
+    timeout: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
+) -> RuntimeProbeResult:
+    """Return diagnostics for one capability-bound full runtime/server probe."""
+
+    return _probe_runtime_generation_result(evidence, _VERIFY_SNIPPET, timeout=timeout)
 
 
 _WINDOWS_PROCESS_CREATED_RE = re.compile(r"[0-9a-f]{16}\Z")
